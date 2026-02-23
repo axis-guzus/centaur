@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import time
 from pathlib import Path
 
 import click
@@ -45,34 +44,6 @@ def sync(source: tuple[str, ...]) -> None:
         click.echo(f"  {r.source}: {r.records_written} records ({r.duration_ms}ms)")
         for kind, count in sorted(r.kinds.items()):
             click.echo(f"    {kind}: {count}")
-
-
-@cli.command()
-@click.option(
-    "--sql-dir",
-    default=None,
-    help="Path to SQL models directory",
-)
-def transform(sql_dir: str | None) -> None:
-    """Run SQL transform models."""
-    from .config import Settings
-    from .db import close_pool, create_pool
-    from .transform import run_transform
-
-    settings = Settings()
-    resolved_dir = Path(sql_dir) if sql_dir else Path(__file__).parent.parent.parent.parent / "sql"
-
-    async def _run() -> None:
-        pool = await create_pool(settings.database_url)
-        try:
-            result = await run_transform(pool, resolved_dir)
-            click.echo(
-                f"Transform complete: {result.models_run} models in {result.duration_ms}ms"
-            )
-        finally:
-            await close_pool(pool)
-
-    asyncio.run(_run())
 
 
 @cli.command()

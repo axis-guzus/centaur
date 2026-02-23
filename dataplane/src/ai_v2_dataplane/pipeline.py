@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
-from typing import Any
 
 import structlog
 
 from .config import Settings
 from .cursors import CursorStore
 from .db import close_pool, create_pool
-from .embeddings import EmbeddingService
 from .extractors.attio import AttioExtractor
 from .extractors.base import BaseExtractor, ExtractResult
 from .extractors.betterstack import BetterStackExtractor
@@ -20,11 +17,8 @@ from .extractors.granola import GranolaExtractor
 from .extractors.linear import LinearExtractor
 from .extractors.pylon import PylonExtractor
 from .extractors.slack import SlackExtractor
-from .transform import run_transform
 
 log = structlog.get_logger()
-
-SQL_DIR = Path(__file__).parent.parent.parent.parent / "sql"
 
 
 def _build_extractors(settings: Settings) -> list[BaseExtractor]:
@@ -121,18 +115,6 @@ async def run_sync(
                     error=str(e),
                     duration_ms=int((time.monotonic() - start) * 1000),
                 )
-
-        # Run transform
-        if SQL_DIR.exists():
-            try:
-                tr = await run_transform(pool, SQL_DIR)
-                log.info(
-                    "transform_complete",
-                    models=tr.models_run,
-                    duration_ms=tr.duration_ms,
-                )
-            except Exception as e:
-                log.error("transform_failed", error=str(e))
 
         return results
     finally:

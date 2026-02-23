@@ -28,7 +28,7 @@ make sandbox-update-repos       # Update repos in sandbox
 - `ruff` for linting and formatting (line-length=100)
 - All secrets via environment variables, never hardcode credentials
 - Use `asyncpg` for Postgres connections, `pgvector` for embeddings
-- Use `sqlalchemy` with async engine for ORM/query building
+- No staging views or mart views — query `raw_records` JSONB directly via `data->>'field'`
 - Alembic for all schema migrations — never modify the DB manually
 - All API endpoints require `Authorization: Bearer <key>` auth
 - Tests use pytest with pytest-asyncio; each package has its own `tests/` directory

@@ -85,7 +85,7 @@ def upgrade() -> None:
     """)
     op.execute(
         "CREATE INDEX idx_embeddings_vector ON embeddings "
-        "USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"
+        "USING hnsw (embedding vector_cosine_ops)"
     )
     op.execute("CREATE INDEX idx_embeddings_source ON embeddings (source, kind)")
     op.execute("CREATE INDEX idx_embeddings_metadata ON embeddings USING GIN (metadata)")

@@ -1,178 +1,101 @@
 # Tempo AI v2
 
-A rebuild of the Tempo AI system with Postgres+pgvector for data, FastAPI+MCP for the API layer, and Codex+Docker for sandboxed code execution.
+Rebuild of the Tempo AI system: **Postgres+pgvector** for data + search, **FastAPI+MCP** API layer, **Codex+Docker** sandbox.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      Tempo AI v2                        │
-├──────────────┬──────────────────┬───────────────────────┤
-│  dataplane/  │      api/        │     sandbox/          │
-│              │                  │                       │
-│  ETL from:   │  FastAPI server  │  Docker context with  │
-│  - Slack     │  + MCP protocol  │  preloaded repos and  │
-│  - Linear    │                  │  Codex runtime        │
-│  - GitHub    │  Endpoints:      │                       │
-│  - GCal      │  /query (SQL)    │  Provides isolated    │
-│  - GDrive    │  /search (vec)   │  execution for agent  │
-│  - Granola   │  /context        │  code changes         │
-│  - Attio     │  /mcp/*          │                       │
-│  - Pylon     │                  │                       │
-│              │                  │                       │
-│  ┌────────┐  │                  │                       │
-│  │Postgres│  │                  │                       │
-│  │pgvector│◄─┤                  │                       │
-│  └────────┘  │                  │                       │
-└──────────────┴──────────────────┴───────────────────────┘
+                    ┌──────────────────────────────┐
+                    │         Remote Clients        │
+                    │  (Codex, agents, MCP clients) │
+                    └──────────────┬───────────────┘
+                                   │
+                    ┌──────────────▼───────────────┐
+                    │       api/ (FastAPI+MCP)      │
+                    │  /api/search  (hybrid search) │
+                    │  /api/query   (JSONB queries) │
+                    │  /api/search/sql (raw SQL)    │
+                    │  /mcp         (7 MCP tools)   │
+                    └──────────────┬───────────────┘
+                                   │
+                    ┌──────────────▼───────────────┐
+                    │   Postgres 16 + pgvector      │
+                    │                               │
+                    │  raw_records  (JSONB, all src) │
+                    │  embeddings   (vector(1536))   │
+                    │  people / entity_mappings      │
+                    │  sync_cursors / sync_runs      │
+                    │  secrets                       │
+                    └──────────────▲───────────────┘
+                                   │
+                    ┌──────────────┴───────────────┐
+                    │   dataplane/ (ETL pipeline)   │
+                    │   10 extractors → raw_records │
+                    │   → OpenAI embed → embeddings │
+                    └──────────────────────────────┘
 ```
+
+**No staging views. No mart views.** All queries hit JSONB directly (`data->>'field'`) or the `embeddings` table for semantic search. This replaces metronome's SQLite + qmd + 23 staging views + 12 marts with two tables.
 
 ### Data Plane (`dataplane/`)
 
-ETL pipeline that ingests data from all Tempo sources into Postgres with pgvector embeddings:
-
-- **Sources**: Slack, Linear, GitHub, Google Calendar, Google Drive, Granola, Attio, Pylon, BetterStack
-- **Storage**: Postgres 16 with pgvector extension for semantic search
-- **Embeddings**: OpenAI `text-embedding-3-small` via async batch processing
-- **Scheduling**: Incremental sync with cursor-based pagination
-
-Replaces the existing metronome SQLite+QMD system with a proper relational store and vector search.
+- **10 extractors**: Slack, Linear, GitHub, GCal, Gmail, GDrive, Granola, Attio, Pylon, BetterStack
+- **Storage**: `raw_records` table — append-only JSONB, dedup by `(source, kind, external_id, content_hash)`
+- **Search**: `embeddings` table — pgvector HNSW index + tsvector FTS, hybrid search via RRF
+- **Sync**: Cursor-based incremental, 5-min overlap for consistency
 
 ### API Layer (`api/`)
 
-FastAPI server exposing both REST and MCP (Model Context Protocol) endpoints:
-
-- **`/query`** — Execute SQL queries against the data plane
-- **`/search`** — Semantic vector search across all sources
-- **`/context`** — Build context windows for agent prompts
-- **`/mcp/*`** — MCP-compliant tool server for agent integration
-- **Auth**: API key via `Authorization: Bearer <key>` header
+- **`POST /api/search`** — Hybrid vector + FTS search with RRF ranking
+- **`POST /api/search/sql`** — Run read-only SQL directly against `raw_records` JSONB
+- **`GET /api/query/*`** — Structured endpoints (slack/messages, linear/issues, github/prs, timeline, people)
+- **`/mcp`** — 7 MCP tools (search, sql_query, get_slack_thread, get_person, get_timeline, list_sources, sync_status)
 
 ### Sandbox (`sandbox/`)
 
-Docker-based execution environment for Codex agent tasks:
-
-- Pre-cloned Tempo repositories (configurable via `GITHUB_REPOS`)
-- Toolchains: Rust, Python/uv, Node/pnpm, Go, Solidity/Foundry
-- Network-isolated execution with controlled egress
-- Ephemeral containers — destroyed after each task
+Docker image preloaded with 28 tempoxyz repos, auto-updated every 6h. For Codex / agent code execution.
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/)
-- Docker + Docker Compose
-- Postgres 16 with pgvector (or use the included docker-compose)
-
-### Setup
-
 ```bash
-# Clone
-gh repo clone tempoxyz/ai_v2 /repos/tempoxyz/ai_v2
-cd /repos/tempoxyz/ai_v2
-
-# Copy env and fill in secrets
-cp .env.example .env
-
-# Start Postgres
-docker compose up -d
-
-# Install Python deps
-make install
-
-# Run migrations
-make migrate
-
-# Run initial ETL sync
-make sync
-
-# Start API server
-make api
+gh repo clone tempoxyz/ai_v2
+cd ai_v2
+cp .env.example .env        # fill in secrets
+docker compose up -d         # start Postgres
+make install                 # install Python deps
+make migrate                 # run Alembic migrations
+make sync                    # run ETL pipeline
+make api                     # start API server
 ```
 
-### Development
+## Deployment (dev-aibot)
 
 ```bash
-make lint       # Ruff check + format
-make test       # Run all tests
-make migrate    # Apply Postgres migrations
+bash scripts/setup-postgres.sh                          # install PG + pgvector
+DATABASE_URL=... uv run alembic -c migrations/alembic.ini upgrade head
+python scripts/migrate-from-sqlite.py --sqlite-path ~/.pov/pov.db --database-url ...
+python scripts/generate-embeddings.py --database-url ... --openai-api-key ...
+bash scripts/deploy-dev-aibot.sh                        # systemd services
 ```
-
-## Configuration
-
-All configuration is via environment variables. See `.env.example` for the full list.
-
-| Variable | Description |
-|----------|-------------|
-| `DATABASE_URL` | Postgres connection string |
-| `OPENAI_API_KEY` | OpenAI API key for embeddings |
-| `SLACK_TOKEN` | Slack Bot OAuth token |
-| `LINEAR_API_KEY` | Linear API key |
-| `GITHUB_TOKEN` | GitHub PAT |
-| `API_SECRET_KEY` | Secret key for API auth |
-| `SANDBOX_IMAGE` | Docker image for Codex sandbox |
-| `GITHUB_REPOS` | Comma-separated repos to clone into sandbox |
-
-## Deployment
-
-Deployed to `dev-aibot` via systemd:
-
-```bash
-ssh ubuntu@dev-aibot
-cd /repos/tempoxyz/ai_v2
-
-# Update
-git pull
-make install
-make migrate
-
-# Restart services
-sudo systemctl restart tempo-ai-v2-api
-sudo systemctl restart tempo-ai-v2-sync
-```
-
-## Migration from Metronome
-
-The dataplane includes a migration script to import existing metronome SQLite data:
-
-```bash
-# Export from metronome SQLite
-python -m dataplane.migrate.from_metronome \
-  --sqlite-path /path/to/metronome.db \
-  --database-url postgresql://tempo:tempo_dev@localhost:5432/ai_v2
-```
-
-This imports all historical data and regenerates embeddings using pgvector.
 
 ## Project Structure
 
 ```
 ai_v2/
-├── dataplane/          # ETL pipeline + DB models
-│   ├── src/
-│   │   └── dataplane/
-│   │       ├── sources/    # Per-source ETL (slack, linear, github, ...)
-│   │       ├── models/     # SQLAlchemy models
-│   │       ├── embeddings/ # Embedding generation
-│   │       └── migrate/    # Migration from metronome
-│   └── pyproject.toml
-├── api/                # FastAPI + MCP server
-│   ├── src/
-│   │   └── api/
-│   │       ├── routes/     # REST endpoints
-│   │       ├── mcp/        # MCP protocol handlers
-│   │       └── auth/       # API key auth
-│   └── pyproject.toml
-├── sandbox/            # Docker sandbox builder
-│   ├── Dockerfile
-│   ├── scripts/
-│   └── pyproject.toml
-├── migrations/         # Alembic migrations
-├── scripts/            # Deployment + ops scripts
-├── docker-compose.yml  # Local dev stack
-├── pyproject.toml      # Root workspace config
+├── dataplane/          # ETL pipeline
+│   └── src/ai_v2_dataplane/
+│       ├── extractors/ # 10 source extractors
+│       ├── embeddings.py
+│       ├── pipeline.py
+│       └── cli.py
+├── api/                # FastAPI + MCP
+│   └── src/ai_v2_api/
+│       ├── routers/    # search, query, sync, secrets, health
+│       └── mcp_server.py
+├── sandbox/            # Docker + repo sync
+├── migrations/         # Alembic (1 migration: core schema)
+├── scripts/            # setup-postgres, migrate-from-sqlite, deploy, embeddings
+├── docker-compose.yml
 ├── Makefile
-└── AGENTS.md
+└── pyproject.toml
 ```
