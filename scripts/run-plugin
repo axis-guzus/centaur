@@ -18,7 +18,12 @@ if len(sys.argv) < 2:
     sys.exit(1)
 
 plugin_name = sys.argv[1]
-plugin_dir = Path(__file__).resolve().parent.parent / "plugins" / plugin_name
+repo_root = Path(__file__).resolve().parent.parent
+plugin_dir = repo_root / "plugins" / plugin_name
+
+# Load root .env so all secrets are available
+from dotenv import load_dotenv
+load_dotenv(repo_root / ".env")
 
 if not plugin_dir.exists():
     available = sorted(

@@ -30,23 +30,32 @@ def get_plugin_context() -> PluginContext:
 
 
 def secret(key: str, default: str | None = None) -> str:
-    """Get a secret. Resolution order: plugin .env → root .env → os.environ.
+    """Get a secret. Resolution order: plugin context → os.environ.
 
     This allows secrets to be defined centrally in one root .env file,
     overridden per-plugin, or injected via environment (Docker/k8s/sops/1pw).
+    Works standalone (no plugin context) by falling back to os.environ.
     """
-    ctx = _plugin_ctx.get()
-    # 1. Plugin-scoped secrets (from plugin .env or root .env, already merged)
-    val = ctx.secrets.get(key)
-    if val is not None:
-        return val
-    # 2. Fall back to os.environ (for Docker, k8s secrets, sops, 1pw, etc.)
+    # 1. Check plugin context if available (server mode)
+    try:
+        ctx = _plugin_ctx.get()
+        val = ctx.secrets.get(key)
+        if val is not None:
+            return val
+    except LookupError:
+        pass
+    # 2. Fall back to os.environ (standalone CLI, Docker, k8s, sops, 1pw)
     val = os.environ.get(key)
     if val is not None:
         return val
     if default is not None:
         return default
-    raise KeyError(f"Missing secret '{key}' for plugin '{ctx.name}'")
+    ctx_name = ""
+    try:
+        ctx_name = f" for plugin '{_plugin_ctx.get().name}'"
+    except LookupError:
+        pass
+    raise KeyError(f"Missing secret '{key}'{ctx_name}")
 
 
 def plugin_tool(*, name: str | None = None):
