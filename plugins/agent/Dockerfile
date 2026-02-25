@@ -37,7 +37,7 @@ RUN mkdir -p /repos
 COPY repos/ /repos/
 
 # API config
-ENV AI_V2_API_URL="http://host.docker.internal:8000"
+ENV AI_V2_API_URL="http://localhost:8000"
 
 # MCP config dirs (populated by entrypoint from AI_V2_API_KEY env)
 RUN mkdir -p /root/.config/amp /root/.codex

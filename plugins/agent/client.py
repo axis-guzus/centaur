@@ -37,7 +37,7 @@ def _container_env() -> list[str]:
         "API_SECRET_KEY",
     ]
     env = [
-        f"AI_V2_API_URL={os.getenv('AI_V2_API_URL', 'http://host.docker.internal:8000')}",
+        f"AI_V2_API_URL={os.getenv('AI_V2_API_URL', 'http://localhost:8000')}",
         f"AI_V2_API_KEY={os.getenv('API_SECRET_KEY', '')}",
     ]
     for k in keys:

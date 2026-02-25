@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-MCP_URL="${AI_V2_API_URL:-http://host.docker.internal:8000}/mcp/"
+MCP_URL="${AI_V2_API_URL:-http://localhost:8000}/mcp/"
 MCP_KEY="${AI_V2_API_KEY:-}"
 
 # Write MCP configs for all harnesses
