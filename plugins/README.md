@@ -85,11 +85,11 @@ Use `secret("KEY")` to access. Never use `os.environ` — plugin secrets are sco
 | openfec | OpenFEC federal election data | DATAGOV_API_KEY |
 | opentable | OpenTable reservation search | (none) |
 | paradigmdb | Internal PostgreSQL, Shift notes, BigQuery | RESHIFT_DB_*, GCP auth |
-| parchiver | Document archiver for investment materials | (none) |
+| archiver | Document archiver for investment materials (DocSend, Google Drive) | PARCHIVER_DATABASE_URL, PARCHIVER_REDUCTO_API_KEY, PARCHIVER_OPENROUTER_API_KEY, PARCHIVER_R2_* |
 | polymarket | Polymarket prediction markets | (none — public API) |
 | posthog | PostHog product analytics, HogQL | POSTHOG_API_KEY, POSTHOG_PROJECT_ID |
 | profslice | Firefox Profiler data extraction | (none) |
-| ptwittercli | Twitter — user profiles, followers, tweets, search | (twitter-sdk auth) |
+| ptwittercli | Twitter — user profiles, followers, tweets, search | SYNOPTIC_API_KEY |
 | pylon | Pylon support — issues, accounts, contacts | PYLON_API_KEY |
 | reth | Reth execution timings and performance metrics | (none) |
 | reth-log-analyzer | Parse reth logs and generate performance graphs | (none) |
