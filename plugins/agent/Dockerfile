@@ -1,16 +1,23 @@
 FROM ubuntu:24.04
 
-# System deps
-RUN apt-get update && apt-get install -y \
-    git curl wget build-essential pkg-config \
-    libssl-dev python3 python3-pip python3-venv \
-    && rm -rf /var/lib/apt/lists/*
+# ── System packages ──────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Core
+    git curl wget ca-certificates gnupg lsb-release sudo \
+    # Build tools
+    build-essential pkg-config cmake ninja-build \
+    libssl-dev libclang-dev protobuf-compiler \
+    # Utilities
+    ripgrep fd-find jq tree tmux unzip xz-utils \
+    # Python
+    python3 python3-pip python3-venv python3-dev \
+    # Process management
+    procps htop \
+    && rm -rf /var/lib/apt/lists/* \
+    # fd-find installs as fdfind — symlink to fd
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
-# Install uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
-
-# Install GitHub CLI
+# ── GitHub CLI ───────────────────────────────────────────────────────────────
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
@@ -18,37 +25,72 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js
+# ── Node.js 22 ───────────────────────────────────────────────────────────────
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust
+# ── Rust ─────────────────────────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Install all harness CLIs
+# ── uv (Python package manager) ─────────────────────────────────────────────
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+# ── Foundry (forge, cast, anvil, chisel) ─────────────────────────────────────
+RUN curl -L https://foundry.paradigm.xyz | bash \
+    && /root/.foundry/bin/foundryup \
+    && cp /root/.foundry/bin/* /usr/local/bin/
+
+# ── Harness CLIs (amp, claude-code, codex) ───────────────────────────────────
 RUN curl -fsSL https://ampcode.com/install.sh | bash \
     && cp -L /root/.amp/bin/amp /usr/local/bin/amp \
     && chmod a+rx /usr/local/bin/amp
 RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
-# Non-root user (required by claude-code --dangerously-skip-permissions)
+# ── Non-root agent user ─────────────────────────────────────────────────────
+# claude-code requires non-root for --dangerously-skip-permissions
 RUN useradd -m -s /bin/bash agent \
-    && mkdir -p /repos \
-    && chown agent:agent /repos
+    && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
-# Set up agent user's home with amp runtime marker + config dirs
+# ── Set up agent user environment ────────────────────────────────────────────
 USER agent
+WORKDIR /home/agent
+
+# Rust toolchain for agent user
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/home/agent/.cargo/bin:${PATH}"
+
+# uv for agent user
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/home/agent/.local/bin:${PATH}"
+
+# Foundry for agent user
+RUN curl -L https://foundry.paradigm.xyz | bash \
+    && /home/agent/.foundry/bin/foundryup
+ENV PATH="/home/agent/.foundry/bin:${PATH}"
+
+# Amp runtime marker so it doesn't fall back to plain bun
 RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex \
     && ln -s /usr/local/bin/amp ~/.amp/bin/amp
-WORKDIR /repos
 
-# Copy pre-cloned repos and system prompt
-COPY --chown=agent:agent repos/ /repos/
-COPY --chown=agent:agent SYSTEM_PROMPT.md /repos/AGENTS.md
+# Git defaults
+RUN git config --global init.defaultBranch main \
+    && git config --global push.autoSetupRemote true \
+    && git config --global --add safe.directory '*'
 
-# Minimal entrypoint — all config passed inline via CLI flags
+# ── Repositories ─────────────────────────────────────────────────────────────
+# Pre-cloned by clone-repos.sh into repos/{org}/{repo} structure.
+# Mounted at ~/github/{org}/{repo} inside the container.
+RUN mkdir -p ~/github
+COPY --chown=agent:agent repos/ /home/agent/github/
+
+# ── System prompt ────────────────────────────────────────────────────────────
+COPY --chown=agent:agent SYSTEM_PROMPT.md /home/agent/github/AGENTS.md
+
+# ── Entrypoint ───────────────────────────────────────────────────────────────
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
+WORKDIR /home/agent/github
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bash"]

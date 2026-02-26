@@ -196,7 +196,7 @@ class AgentClient:
                 del _sessions[slack_thread_key]
 
         client = _docker_client()
-        workdir = f"/repos/{repo}" if repo else "/repos"
+        workdir = f"/home/agent/github/{repo}" if repo else "/home/agent/github"
 
         container = client.containers.run(
             _image(),
@@ -223,6 +223,7 @@ class AgentClient:
             "state": "running",
             "created_at": time.time(),
             "last_activity": time.time(),
+            "turns": [],
         }
         _sessions[slack_thread_key] = session
 
@@ -258,6 +259,7 @@ class AgentClient:
 
         session["state"] = "working"
         session["last_activity"] = time.time()
+        started_ts = time.time()
         log.info(
             "agent_exec_start",
             thread=slack_thread_key,
@@ -310,6 +312,17 @@ class AgentClient:
         if err_buf.strip():
             stderr_lines.append(err_buf)
 
+        # Capture events for thread viewer
+        turn_events = []
+        for raw_line in lines:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                turn_events.append(json.loads(stripped))
+            except json.JSONDecodeError:
+                turn_events.append({"type": "raw", "text": stripped})
+
         # If timed out, kill the exec process
         if timed_out:
             with contextlib.suppress(Exception):
@@ -330,6 +343,20 @@ class AgentClient:
 
         if agent_thread_id:
             session["agent_thread_id"] = agent_thread_id
+
+        # Store turn for thread viewer
+        turn = {
+            "turn_id": len(session.get("turns", [])) + 1,
+            "user_message": message,
+            "events": turn_events,
+            "result": result_text,
+            "started_at": started_ts,
+            "finished_at": time.time(),
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "duration_s": round(time.time() - started_ts, 1),
+        }
+        session.setdefault("turns", []).append(turn)
 
         session["state"] = "idle"
         session["last_activity"] = time.time()
@@ -380,6 +407,64 @@ class AgentClient:
 
         del _sessions[slack_thread_key]
         return {"session_id": slack_thread_key, "status": "stopped"}
+
+    def threads(self) -> dict[str, Any]:
+        """List all agent threads with summary info for the thread viewer."""
+        # Recover any running containers not in _sessions (e.g. after API restart)
+        self._recover_docker_sessions()
+        result = []
+        for key, session in _sessions.items():
+            turns = session.get("turns", [])
+            result.append(
+                {
+                    "slack_thread_key": key,
+                    "container_id": session["container_id"][:12],
+                    "harness": session["harness"],
+                    "agent_thread_id": session.get("agent_thread_id"),
+                    "state": session["state"],
+                    "created_at": session["created_at"],
+                    "last_activity": session["last_activity"],
+                    "turn_count": len(turns),
+                    "last_result": turns[-1]["result"][:200] if turns else "",
+                }
+            )
+        return {"threads": result, "count": len(result)}
+
+    def thread_detail(self, slack_thread_key: str) -> dict[str, Any]:
+        """Get full event stream for a specific thread including all turns and tool calls."""
+        session = _sessions.get(slack_thread_key)
+        if not session:
+            return {"error": f"No session for '{slack_thread_key}'"}
+        return {
+            "slack_thread_key": slack_thread_key,
+            "container_id": session["container_id"][:12],
+            "harness": session["harness"],
+            "agent_thread_id": session.get("agent_thread_id"),
+            "state": session["state"],
+            "created_at": session["created_at"],
+            "last_activity": session["last_activity"],
+            "turns": session.get("turns", []),
+        }
+
+    def _recover_docker_sessions(self) -> None:
+        """Discover running agent containers not yet tracked in _sessions."""
+        try:
+            client = _docker_client()
+            containers = client.containers.list(filters={"label": "tempo.agent=true"})
+            for container in containers:
+                key = container.labels.get("tempo.thread", "")
+                if key and key not in _sessions:
+                    _sessions[key] = {
+                        "container_id": container.id,
+                        "harness": container.labels.get("tempo.harness", "amp"),
+                        "agent_thread_id": None,
+                        "state": container.status,
+                        "created_at": time.time(),
+                        "last_activity": time.time(),
+                        "turns": [],
+                    }
+        except Exception:
+            pass
 
     def interrupt(self, slack_thread_key: str) -> dict[str, Any]:
         """Interrupt the currently running command in a sandbox."""

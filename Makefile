@@ -1,4 +1,4 @@
-.PHONY: install lint test migrate sync api etl agent-build fmt clean
+.PHONY: install lint test migrate sync api etl agent-clone agent-build fmt clean
 
 install:
 	uv sync
@@ -26,8 +26,11 @@ api:
 etl:
 	uv run ai-v2 continuous
 
+agent-clone:
+	plugins/agent/clone-repos.sh
+
 agent-build:
-	docker build -t tempo-agent:latest plugins/agent/
+	docker build -t agent2:latest plugins/agent/
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
