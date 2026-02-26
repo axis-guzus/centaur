@@ -20,6 +20,7 @@ dependencies = [
     "mcp>=1.0.0",
     "typer>=0.12.0",
     "toon-format @ git+https://github.com/toon-format/toon-python.git",
+    "docker>=7.0.0",
 ]
 
 [project.scripts]
