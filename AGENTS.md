@@ -36,19 +36,19 @@ Memory-augmented agent system. Postgres+pgvector data plane, FastAPI+MCP API, 60
 
 ### Agent Plugin (Cloud Agent)
 
-The agent plugin (`plugins/agent/`) is the cloud coding agent. The Chat SDK
+The agent module (`src/api/agent.py`) is the cloud coding agent. The Chat SDK
 (or any REST caller) triggers it via the API, and it manages Docker containers
 running harness CLIs (amp, claude-code, codex).
 
 ```
 Chat SDK                  API                     Agent Plugin              Docker
   │                        │                          │                       │
-  ├─ POST /plugins/agent/spawn ──────────────────────►│                       │
+  ├─ POST /agent/spawn ──────────────────────────────►│                       │
   │                        │                          ├─ docker run ─────────►│
   │                        │                          │   (sibling container) │
   │◄─ { session_id, status } ◄────────────────────────┤                       │
   │                        │                          │                       │
-  ├─ POST /plugins/agent/execute ────────────────────►│                       │
+  ├─ POST /agent/execute ────────────────────────────►│                       │
   │                        │                          ├─ docker exec ────────►│
   │                        │                          │   amp -x "message"    │
   │                        │                          │◄── result ────────────┤
@@ -73,14 +73,13 @@ Key details:
 ### Agent plugin files
 
 ```
-plugins/agent/
-  __init__.py        # Plugin docstring
-  pyproject.toml     # Plugin config (depends on docker>=7.0.0)
-  .env.example       # Required secrets
-  client.py          # AgentClient: spawn, execute, status, stop, interrupt
-  cli.py             # Typer CLI for standalone use
+src/api/agent.py       # AgentClient: spawn, execute, status, stop, interrupt
+src/api/routers/agent.py  # REST routes at /agent/*
+sandbox/
   Dockerfile         # Sandbox image (Ubuntu 24.04 + uv + gh + node + rust + amp)
   entrypoint.sh      # Injects MCP configs from env, optional repo sync
+  SYSTEM_PROMPT.md   # Copied as AGENTS.md into containers
+  config/            # Harness config templates (amp, claude, codex)
 ```
 
 ## Structure
@@ -107,7 +106,7 @@ plugins/agent/
   - `src/lib/bot.ts` — Chat SDK wiring: onMention → spawn → execute → post
   - `src/lib/harness.ts` — REST client for the agent plugin API
 - `plugins/` — 60+ self-contained plugins (see Plugin System below)
-- `plugins/agent/` — Cloud agent sandbox (Dockerfile, entrypoint, container lifecycle)
+- `sandbox/` — Agent sandbox Docker image (Dockerfile, entrypoint, system prompt)
 - `migrations/` — Alembic PG migrations
 - `scripts/` — Deployment and migration scripts
 
@@ -263,7 +262,7 @@ uv run mypy src/api src/etl src/shared
 - **Orchestration**: `docker compose` (API, ETL, Postgres, Redis, Slackbot)
 - **Tunnel**: Cloudflare tunnel (`cloudflared`) → `https://svc-ai.paradigm.xyz/mcp/`
 - **MCP URL**: `https://svc-ai.paradigm.xyz/mcp/` (Bearer auth with API_SECRET_KEY)
-- **Agent image**: Built separately on host via `docker build -t agent:latest plugins/agent/`
+- **Agent image**: Built separately on host via `docker build -t agent2:latest sandbox/`
 
 ### Deploy steps
 
@@ -272,8 +271,10 @@ ssh ubuntu@206.223.235.69
 cd ~/github/paradigmxyz/ai_v2
 git pull --ff-only
 docker compose up -d --build api        # Rebuild + restart API
-docker build -t agent:latest plugins/agent/  # Rebuild agent image
+docker build -t agent2:latest sandbox/  # Rebuild agent image
 ```
+
+**IMPORTANT**: The agent image MUST be tagged `agent2:latest` (not `agent:latest`). The client defaults to `AGENT_IMAGE=agent2:latest`. Always use `docker build -t agent2:latest` when rebuilding.
 
 ## Running Locally
 

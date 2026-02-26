@@ -34,7 +34,7 @@ etl:
 	uv run ai-v2 continuous
 
 agent-build:
-	$(RUN) docker build -t agent2:latest plugins/agent/
+	$(RUN) docker build -t agent2:latest sandbox/
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
@@ -125,11 +125,11 @@ deploy-etl: pull
 
 deploy-agent: pull
 	@echo "🚀 Building agent image..."
-	@ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && docker build -t agent2:latest plugins/agent/"
+	@ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && docker build -t agent2:latest sandbox/"
 
 deploy-all: pull
 	@echo "🚀 Deploying all services + agent image..."
-	@ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && docker compose up -d --build && docker build -t agent2:latest plugins/agent/"
+	@ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && docker compose up -d --build && docker build -t agent2:latest sandbox/"
 
 # SSH into the deploy host
 ssh:
