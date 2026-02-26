@@ -22,15 +22,15 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from shared.plugin_sdk import secret
+
 # PID file for persistent tunnel
 TUNNEL_PID_FILE = Path.home() / ".reshift-tunnel.pid"
 
-# Database connection details
+# Database connection details — all resolved via secret() at connect time.
 DB_HOST = "10.78.18.5"
 DB_PORT = 5432
 DB_NAME = "pmadmin"
-DB_USER = "bigquery"
-DB_PASSWORD = "Lm~~i}L5MkF6(EOu"
 
 def _find_free_port() -> int:
     """Find a free local port."""
@@ -204,17 +204,25 @@ class Database:
         db_host: str = DB_HOST,
         db_port: int = DB_PORT,
         db_name: str = DB_NAME,
-        db_user: str = DB_USER,
-        db_password: str = DB_PASSWORD,
+        db_user: str | None = None,
+        db_password: str | None = None,
     ):
         self.db_host = db_host
         self.db_port = db_port
         self.db_name = db_name
-        self.db_user = db_user
-        self.db_password = db_password
+        self._db_user = db_user
+        self._db_password = db_password
         self._tunnel: SSHTunnel | None = None
         self._conn: psycopg.Connection | None = None
         self._using_external_tunnel = False
+
+    @property
+    def db_user(self) -> str:
+        return self._db_user or secret("RESHIFT_DB_USER")
+
+    @property
+    def db_password(self) -> str:
+        return self._db_password or secret("RESHIFT_DB_PASSWORD")
 
     def _check_external_tunnel(self) -> bool:
         """Check if an external tunnel is already running on the default port."""
@@ -257,7 +265,10 @@ class Database:
                 local_port = tunnel.local_bind_port
                 self._using_external_tunnel = False
 
-            dsn = f"postgresql://{self.db_user}:{self.db_password}@127.0.0.1:{local_port}/{self.db_name}"
+            dsn = (
+                f"postgresql://{self.db_user}:{self.db_password}"
+                f"@127.0.0.1:{local_port}/{self.db_name}"
+            )
             self._conn = psycopg.connect(dsn, row_factory=dict_row)
         return self._conn
 

@@ -1,6 +1,12 @@
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git curl unzip && rm -rf /var/lib/apt/lists/*
+
+# Install 1Password CLI
+RUN curl -sSfo /tmp/op.zip "https://cache.agilebits.com/dist/1P/op2/pkg/v2.30.3/op_linux_arm64_v2.30.3.zip" \
+    && unzip -o /tmp/op.zip -d /usr/local/bin/ op \
+    && rm /tmp/op.zip \
+    && chmod +x /usr/local/bin/op
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 

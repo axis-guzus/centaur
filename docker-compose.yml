@@ -31,10 +31,15 @@ services:
     build: .
     ports:
       - "127.0.0.1:8000:8000"
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://tempo:tempo_dev@postgres:5432/ai_v2
       SLACKBOT_URL: http://slackbot:3001
+      OP_VAULT: AI-V2
+    secrets:
+      - op_token
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -45,9 +50,14 @@ services:
   etl:
     build: .
     command: ["uv", "run", "ai-v2", "continuous"]
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://tempo:tempo_dev@postgres:5432/ai_v2
+      OP_VAULT: AI-V2
+    secrets:
+      - op_token
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,7 +68,9 @@ services:
       context: apps/slackbot
     ports:
       - "127.0.0.1:3001:3001"
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       REDIS_URL: redis://redis:6379
       AI_V2_API_URL: http://api:8000
@@ -69,6 +81,10 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+
+secrets:
+  op_token:
+    environment: OP_SERVICE_ACCOUNT_TOKEN
 
 volumes:
   pgdata:

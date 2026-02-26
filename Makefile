@@ -1,4 +1,4 @@
-.PHONY: install lint test migrate sync api etl agent-clone agent-build fmt clean
+.PHONY: install lint test migrate sync api etl agent-clone agent-build fmt clean deploy
 
 install:
 	uv sync
@@ -37,3 +37,20 @@ clean:
 	find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name .mypy_cache -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name .ruff_cache -exec rm -rf {} + 2>/dev/null || true
+
+DEPLOY_HOST := ubuntu@206.223.235.69
+DEPLOY_DIR  := ~/github/paradigmxyz/ai_v2
+
+deploy:
+	@echo "🔐 Authenticating with 1Password (Touch ID)..."
+	@OP_SA_TOKEN=$$(op read "op://AI-V2/OP_SA_TOKEN/password") && \
+	API_KEY=$$(op read "op://AI-V2/API_SECRET_KEY/password") && \
+	echo "🚀 Deploying to $(DEPLOY_HOST)..." && \
+	ssh $(DEPLOY_HOST) "\
+		cd $(DEPLOY_DIR) && \
+		git pull --ff-only && \
+		OP_SERVICE_ACCOUNT_TOKEN='$$OP_SA_TOKEN' \
+		API_SECRET_KEY='$$API_KEY' \
+		docker compose up -d --build api etl && \
+		docker build -t tempo-agent:latest plugins/agent/ && \
+		echo '✅ deployed'"

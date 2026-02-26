@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
+import shutil
+import subprocess
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,12 +38,99 @@ def get_plugin_context() -> PluginContext:
     return _plugin_ctx.get()
 
 
-def secret(key: str, default: str | None = None) -> str:
-    """Get a secret. Resolution order: plugin context → os.environ.
+# ---------------------------------------------------------------------------
+# 1Password backend
+# ---------------------------------------------------------------------------
 
-    This allows secrets to be defined centrally in one root .env file,
-    overridden per-plugin, or injected via environment (Docker/k8s/sops/1pw).
-    Works standalone (no plugin context) by falling back to os.environ.
+# Vault name to read from — override with OP_VAULT env var.
+_OP_VAULT = os.environ.get("OP_VAULT", "AI-V2")
+
+# Docker secret path — if present, we read the service account token from here
+# instead of relying on an env var or interactive session.
+_OP_SA_TOKEN_PATH = Path("/run/secrets/op_token")
+
+# Cache: key → (value, expiry_monotonic)
+_op_cache: dict[str, tuple[str, float]] = {}
+_op_cache_lock = Lock()
+_OP_CACHE_TTL = 300  # 5 minutes
+
+# None = not checked yet, True/False = result of first check
+_op_available: bool | None = None
+
+
+def _ensure_op_auth() -> bool:
+    """Ensure the 1Password CLI is available and has credentials.
+
+    In containers the service account token is mounted at /run/secrets/op_token.
+    Locally, the user should have an active ``op signin`` session.
+    Returns True if op CLI is available. Result is cached for the process lifetime.
+    """
+    global _op_available
+    if _op_available is not None:
+        return _op_available
+
+    if not shutil.which("op"):
+        _op_available = False
+        return False
+
+    # If a Docker secret is mounted, inject it for the op CLI
+    if _OP_SA_TOKEN_PATH.exists() and not os.environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
+        token = _OP_SA_TOKEN_PATH.read_text().strip()
+        if token:
+            os.environ["OP_SERVICE_ACCOUNT_TOKEN"] = token
+
+    _op_available = True
+    return True
+
+
+def _op_read(key: str) -> str | None:
+    """Fetch a secret from 1Password. Results are cached with a TTL."""
+    if not _ensure_op_auth():
+        return None
+
+    now = monotonic()
+    with _op_cache_lock:
+        cached = _op_cache.get(key)
+        if cached is not None:
+            value, expiry = cached
+            if now < expiry:
+                return value
+            del _op_cache[key]
+
+    ref = f"op://{_OP_VAULT}/{key}/password"
+    try:
+        result = subprocess.run(
+            ["op", "read", ref, "--no-newline"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+    if result.returncode != 0:
+        log.debug("op read %s failed: %s", ref, result.stderr.strip())
+        return None
+
+    value = result.stdout
+    with _op_cache_lock:
+        _op_cache[key] = (value, monotonic() + _OP_CACHE_TTL)
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def secret(key: str, default: str | None = None) -> str:
+    """Get a secret. Resolution order: plugin context → 1Password → os.environ.
+
+    - **PluginContext**: Set by PluginManager, populated from .env files (if any).
+    - **1Password**: On-demand via ``op read``, cached in-memory with 5min TTL.
+      Requires ``op`` CLI and either an interactive session (local dev) or
+      ``OP_SERVICE_ACCOUNT_TOKEN`` (deploy, via Docker secret at /run/secrets/op_token).
+    - **os.environ**: Final fallback for standalone CLI, Docker env, k8s, etc.
     """
     # 1. Check plugin context if available (server mode)
     try:
@@ -44,18 +140,21 @@ def secret(key: str, default: str | None = None) -> str:
             return val
     except LookupError:
         pass
-    # 2. Fall back to os.environ (standalone CLI, Docker, k8s, sops, 1pw)
+
+    # 2. 1Password (on-demand, cached in-memory only)
+    val = _op_read(key)
+    if val is not None:
+        return val
+
+    # 3. Fall back to os.environ (standalone CLI, Docker, k8s)
     val = os.environ.get(key)
     if val is not None:
         return val
+
     if default is not None:
         return default
+
     ctx_name = ""
-    try:
+    with contextlib.suppress(LookupError):
         ctx_name = f" for plugin '{_plugin_ctx.get().name}'"
-    except LookupError:
-        pass
     raise KeyError(f"Missing secret '{key}'{ctx_name}")
-
-
-
