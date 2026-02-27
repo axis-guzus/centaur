@@ -35,6 +35,11 @@ class EngineerSession:
     clarify_history: list[dict[str, str]] = field(default_factory=list)
     reviewer_feedback: str = ""
     iteration: int = 0
+    research_branch_count: int = 0
+    plan_branch_count: int = 0
+    early_stop_count: int = 0
+    thread_name: str | None = None
+    harness_thread_id: str | None = None
     branch_name: str | None = None
     worktree: Path | None = None
     pr_url: str | None = None
@@ -75,7 +80,11 @@ def create_session(thread_key: str, task: str) -> EngineerSession:
 def remove_session(thread_key: str) -> None:
     _sessions.pop(thread_key, None)
     task = _session_tasks.pop(thread_key, None)
-    if task and not task.done():
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        current = None
+    if task and not task.done() and task is not current:
         task.cancel()
 
 

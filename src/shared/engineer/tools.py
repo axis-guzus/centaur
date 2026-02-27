@@ -161,13 +161,16 @@ class ToolExecutor:
         raise ToolExecutionError(f"Unknown tool '{name}'")
 
     def _resolve_path(self, value: str) -> Path:
-        path = (self.worktree_root / value).resolve()
-        if not str(path).startswith(str(self.worktree_root.resolve())):
-            raise ToolExecutionError("Path escapes worktree root")
+        root = self.worktree_root.resolve()
+        path = (root / value).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            raise ToolExecutionError("Path escapes worktree root") from None
         return path
 
     def _is_protected(self, path: Path) -> bool:
-        rel = str(path.relative_to(self.worktree_root))
+        rel = str(path.resolve().relative_to(self.worktree_root.resolve()))
         return any(rel == item or rel.startswith(f"{item}/") for item in self.protected_paths)
 
     @staticmethod

@@ -9,9 +9,10 @@ class EngineerSettings(BaseSettings):
 
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = "claude-opus-4-6"
-    anthropic_model_fallback: str = "claude-sonnet-4-6"
+    anthropic_model_fallback: str = "claude-opus-4-6"
     anthropic_max_tokens: int = 16000
     anthropic_effort: str = "max"
+    anthropic_request_timeout_seconds: int = 240
 
     github_token: str = Field(default="", alias="GITHUB_TOKEN")
     github_repo_owner: str = "paradigmxyz"
@@ -29,6 +30,15 @@ class EngineerSettings(BaseSettings):
     max_tool_calls_total: int = 200
     max_wall_time_seconds: int = 1800
     max_consecutive_tool_failures: int = 5
+
+    max_parallel_tool_calls: int = 4
+    tool_call_timeout_seconds: int = 180
+    research_parallel_branches_min: int = 3
+    research_parallel_branches_max: int = 5
+    plan_parallel_branches_min: int = 2
+    plan_parallel_branches_max: int = 4
+    parallel_min_completed_before_early_stop: int = 2
+    branch_timeout_seconds: int = 360
 
     command_allowlist: str = "uv,ruff,pytest,mypy,python,python3,rg,ls,pwd"
     protected_write_paths: str = ".github/workflows,.env,.env.example"

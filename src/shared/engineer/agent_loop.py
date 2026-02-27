@@ -26,6 +26,15 @@ class AgentLoopResult:
     stop_reason: str
 
 
+SAFE_PARALLEL_TOOL_NAMES = {
+    "think",
+    "read_file",
+    "list_directory",
+    "grep_search",
+    "run_validation",
+}
+
+
 def _extract_text(content_blocks: list[Any]) -> str:
     parts: list[str] = []
     for block in content_blocks:
@@ -41,6 +50,83 @@ def _truncate(text: str, max_chars: int = 30000) -> str:
     return f"{text[:half]}\n\n...truncated...\n\n{text[-half:]}"
 
 
+def _is_unsupported_output_config_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "output_config" in text and any(
+        marker in text for marker in ("unknown", "invalid", "unexpected", "not allowed")
+    )
+
+
+def _can_parallelize_tool_calls(tool_calls: list[dict[str, Any]]) -> bool:
+    if len(tool_calls) <= 1:
+        return False
+    return all(call["name"] in SAFE_PARALLEL_TOOL_NAMES for call in tool_calls)
+
+
+async def _execute_single_tool_call(
+    *,
+    call: dict[str, Any],
+    execute_tool: Callable[[str, dict[str, Any]], Awaitable[str]],
+    guard_state: LoopGuardState,
+    tool_call_timeout_seconds: int,
+) -> tuple[str, str]:
+    signature = tool_signature(call["name"], call["input"])
+    try:
+        guard_state.add_tool_call(signature)
+        if tool_call_timeout_seconds > 0:
+            output = await asyncio.wait_for(
+                execute_tool(call["name"], call["input"]),
+                timeout=float(tool_call_timeout_seconds),
+            )
+        else:
+            output = await execute_tool(call["name"], call["input"])
+        guard_state.mark_tool_success()
+    except GuardrailStopError:
+        raise
+    except TimeoutError:
+        try:
+            guard_state.mark_tool_failure()
+        except GuardrailStopError:
+            raise
+        output = f"Tool error: timeout after {tool_call_timeout_seconds}s"
+    except Exception as exc:
+        try:
+            guard_state.mark_tool_failure()
+        except GuardrailStopError:
+            raise
+        output = f"Tool error: {exc}"
+    return call["id"], _truncate(output)
+
+
+async def _execute_tool_calls_parallel(
+    *,
+    tool_calls: list[dict[str, Any]],
+    execute_tool: Callable[[str, dict[str, Any]], Awaitable[str]],
+    guard_state: LoopGuardState,
+    max_parallel_tool_calls: int,
+    tool_call_timeout_seconds: int,
+) -> list[tuple[str, str]]:
+    semaphore = asyncio.Semaphore(max(1, max_parallel_tool_calls))
+
+    async def run_one(call: dict[str, Any]) -> tuple[str, str]:
+        async with semaphore:
+            return await _execute_single_tool_call(
+                call=call,
+                execute_tool=execute_tool,
+                guard_state=guard_state,
+                tool_call_timeout_seconds=tool_call_timeout_seconds,
+            )
+
+    return await asyncio.gather(*(run_one(call) for call in tool_calls))
+
+
+EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+async def _noop_event(_: dict[str, Any]) -> None:
+    return
+
+
 async def run_agent_loop(
     *,
     api_key: str,
@@ -52,6 +138,10 @@ async def run_agent_loop(
     execute_tool: Callable[[str, dict[str, Any]], Awaitable[str]] | None,
     guard_state: LoopGuardState,
     effort: str = "max",
+    max_parallel_tool_calls: int = 4,
+    tool_call_timeout_seconds: int = 180,
+    request_timeout_seconds: int = 240,
+    on_event: EventCallback | None = None,
 ) -> AgentLoopResult:
     try:
         from anthropic import AsyncAnthropic
@@ -61,6 +151,7 @@ async def run_agent_loop(
     if not api_key:
         raise AgentLoopError("Missing ANTHROPIC_API_KEY")
 
+    emit = on_event or _noop_event
     client = AsyncAnthropic(api_key=api_key)
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_prompt}]
     last_stop_reason = "unknown"
@@ -87,38 +178,63 @@ async def run_agent_loop(
         except GuardrailStopError as exc:
             raise AgentLoopError(str(exc)) from exc
 
-        async with client.messages.stream(
-            **create_kwargs,
-            messages=cast(Any, messages),
-        ) as stream:
-            response = await stream.get_final_message()
+        try:
+            async with asyncio.timeout(float(request_timeout_seconds)):
+                async with client.messages.stream(
+                    **create_kwargs,
+                    messages=cast(Any, messages),
+                ) as stream:
+                    response = await stream.get_final_message()
+        except Exception as exc:
+            if "output_config" in create_kwargs and _is_unsupported_output_config_error(exc):
+                create_kwargs.pop("output_config", None)
+                continue
+            raise AgentLoopError(f"Anthropic request failed: {exc}") from exc
 
         last_stop_reason = str(getattr(response, "stop_reason", "unknown"))
         content_blocks = list(getattr(response, "content", []))
         tool_calls = extract_tool_uses(content_blocks)
 
+        assistant_blocks = to_assistant_blocks(content_blocks)
+        await emit(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": assistant_blocks},
+            }
+        )
+
         if tool_calls:
             if execute_tool is None:
                 raise AgentLoopError("Model requested tools but no executor was provided")
 
-            messages.append({"role": "assistant", "content": to_assistant_blocks(content_blocks)})
+            messages.append({"role": "assistant", "content": assistant_blocks})
 
-            async def _exec_one(call: dict[str, Any]) -> tuple[str, str]:
-                signature = tool_signature(call["name"], call["input"])
-                try:
-                    guard_state.add_tool_call(signature)
-                    output = await execute_tool(call["name"], call["input"])
-                    guard_state.mark_tool_success()
-                except Exception as exc:
-                    guard_state.mark_tool_failure()
-                    output = f"Tool error: {exc}"
-                return (call["id"], _truncate(output))
+            try:
+                if _can_parallelize_tool_calls(tool_calls):
+                    tool_results = await _execute_tool_calls_parallel(
+                        tool_calls=tool_calls,
+                        execute_tool=execute_tool,
+                        guard_state=guard_state,
+                        max_parallel_tool_calls=max_parallel_tool_calls,
+                        tool_call_timeout_seconds=tool_call_timeout_seconds,
+                    )
+                else:
+                    tool_results = []
+                    for call in tool_calls:
+                        tool_results.append(
+                            await _execute_single_tool_call(
+                                call=call,
+                                execute_tool=execute_tool,
+                                guard_state=guard_state,
+                                tool_call_timeout_seconds=tool_call_timeout_seconds,
+                            )
+                        )
+            except GuardrailStopError as exc:
+                raise AgentLoopError(str(exc)) from exc
 
-            tool_results = await asyncio.gather(*[_exec_one(c) for c in tool_calls])
-
-            messages.append(
-                {"role": "user", "content": build_tool_result_blocks(list(tool_results))}
-            )
+            result_blocks = build_tool_result_blocks(list(tool_results))
+            await emit({"type": "tool", "content": result_blocks})
+            messages.append({"role": "user", "content": result_blocks})
             continue
 
         text = _extract_text(content_blocks)
