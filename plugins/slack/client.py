@@ -373,22 +373,7 @@ class SlackClient:
         Returns:
             List of message dicts
         """
-        client = self._client
-        user_cache: dict[str, str] = {}
-
-        def get_username(user_id: str) -> str:
-            if not user_id:
-                return "unknown"
-            if user_id in user_cache:
-                return user_cache[user_id]
-            try:
-                info = self._client.users_info(user=user_id)
-                name = info.get("user", {}).get("name", user_id)
-                user_cache[user_id] = name
-                return name
-            except SlackApiError:
-                user_cache[user_id] = user_id
-                return user_id
+        user_cache = self._get_user_cache()
 
         channel_id = channel
         if not channel.startswith("C") and not channel.startswith("G"):
@@ -413,7 +398,7 @@ class SlackClient:
 
             messages.append(
                 {
-                    "user": get_username(user_id),
+                    "user": user_cache.get(user_id, user_id),
                     "text": text,
                     "timestamp": ts,
                     "permalink": f"https://slack.com/archives/{channel_id}/p{ts.replace('.', '')}",
