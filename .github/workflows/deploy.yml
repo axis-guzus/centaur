@@ -11,9 +11,11 @@ concurrency:
 jobs:
   deploy:
     runs-on: self-hosted
+    env:
+      DEPLOY_DIR: /home/ubuntu/github/paradigmxyz/ai_v2
     defaults:
       run:
-        working-directory: ~/github/paradigmxyz/ai_v2
+        working-directory: /home/ubuntu/github/paradigmxyz/ai_v2
 
     steps:
       - name: Pull latest
