@@ -778,7 +778,7 @@ def _make_wrapper(tool: LoadedTool) -> Callable:
                 result = await loop.run_in_executor(None, lambda: tool.fn(**kwargs))
             if isinstance(result, str):
                 return result
-            return json.dumps(result, default=str)
+            return _to_toon(result)
         except SystemExit as e:
             return json.dumps(
                 {
