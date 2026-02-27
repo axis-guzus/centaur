@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
@@ -65,6 +66,22 @@ def _warm_plugin_caches() -> None:
     threading.Thread(target=_warm, daemon=True).start()
 
 
+async def _watch_plugins(pm: PluginManager) -> None:
+    """Watch the plugins directory and auto-reload when files change."""
+    from starlette.concurrency import run_in_threadpool
+    from watchfiles import awatch
+
+    log.info("plugin_watcher_started", path=str(pm.plugins_dir))
+    async for changes in awatch(pm.plugins_dir):
+        changed_files = [str(p) for _, p in changes]
+        log.info("plugin_files_changed", files=changed_files)
+        try:
+            result = await run_in_threadpool(pm.reload)
+            log.info("plugins_auto_reloaded", **result)
+        except Exception as e:
+            log.error("plugin_auto_reload_failed", error=str(e))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("connecting to database", url=settings.database_url.split("@")[-1])
@@ -75,7 +92,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with mcp.session_manager.run():
         log.info("mcp session manager started")
         _warm_plugin_caches()
-        yield
+        watcher_task = asyncio.create_task(_watch_plugins(plugin_manager))
+        try:
+            yield
+        finally:
+            watcher_task.cancel()
     await close_pool(pool)
     log.info("database pool closed")
 
