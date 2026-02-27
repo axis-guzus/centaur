@@ -278,7 +278,6 @@ export default function ThreadDetailPage() {
   const params = useParams();
   const threadKey = decodeURIComponent(params.id as string);
   const [thread, setThread] = useState<ThreadDetail | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -301,8 +300,6 @@ export default function ThreadDetailPage() {
       setError(null);
     } catch {
       setError("Failed to fetch thread");
-    } finally {
-      setLoading(false);
     }
   }, [threadKey]);
 
@@ -326,7 +323,6 @@ export default function ThreadDetailPage() {
         }
         setThread(data);
         setError(null);
-        setLoading(false);
         // Auto-scroll to bottom on new events
         requestAnimationFrame(() => {
           scrollRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -348,21 +344,28 @@ export default function ThreadDetailPage() {
     return () => es.close();
   }, [threadKey, fetchThread]);
 
-  if (loading) {
-    return (
-      <main style={s.main}>
-        <p style={s.loadingText}>Loading…</p>
-      </main>
-    );
-  }
-
-  if (error || !thread) {
+  if (error && !thread) {
     return (
       <main style={s.main}>
         <Link href="/threads" className="back-link" style={s.backLink}>
           ← Threads
         </Link>
-        <p style={s.errorText}>{error || "Thread not found"}</p>
+        <p style={s.errorText}>{error}</p>
+      </main>
+    );
+  }
+
+  if (!thread) {
+    return (
+      <main style={s.main}>
+        <Link href="/threads" className="back-link" style={s.backLink}>
+          ← Threads
+        </Link>
+        <div style={s.threadHeader}>
+          <div style={s.threadId}>{threadKey}</div>
+          <p style={s.loadingText}>Waiting for data…</p>
+        </div>
+        <div ref={scrollRef} />
       </main>
     );
   }

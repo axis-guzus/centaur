@@ -86,24 +86,23 @@ function createBot() {
     const threadKey = thread.id;
     const timings: Record<string, number> = {};
 
-    // On first message, spawn container and immediately post the viewer link
+    // Prepend session context on first message
+    const message = isFirstMessage
+      ? buildSessionContext(threadKey) + cleanedText
+      : cleanedText;
+
+    // On first message, spawn + post viewer link in parallel with execute start
     if (isFirstMessage) {
       const tSpawn = performance.now();
       await spawn(threadKey, harness, undefined, requestId);
       timings.spawn_ms = Math.round(performance.now() - tSpawn);
 
-      const tViewerPost = performance.now();
+      // Fire viewer link post in background — don't block execute
       const viewerUrl = `${THREAD_VIEWER_URL}/threads/${encodeURIComponent(threadKey)}`;
-      await thread.post(renderSlackMessage(`[🔗 Thread Viewer](${viewerUrl})`));
-      timings.viewer_post_ms = Math.round(performance.now() - tViewerPost);
+      thread.post(renderSlackMessage(`[🔗 Thread Viewer](${viewerUrl})`)).catch(() => {});
     }
 
     await thread.startTyping("Running...");
-
-    // Prepend session context on first message
-    const message = isFirstMessage
-      ? buildSessionContext(threadKey) + cleanedText
-      : cleanedText;
 
     // Execute message in the container
     const tExec = performance.now();
