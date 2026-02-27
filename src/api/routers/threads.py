@@ -87,18 +87,8 @@ async def list_threads(
     return {"threads": threads, "count": len(threads)}
 
 
-@router.get("/detail")
-async def get_thread(
-    key: str,
-    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
-) -> dict[str, Any]:
-    """Get full thread detail. Prefers live in-memory data, falls back to PG."""
-    # Live session — return real-time data
-    session = _sessions.get(key)
-    if session:
-        return _build_live_detail(key, session)
-
-    # Historical — read from Postgres
+async def _fetch_pg_detail(pool: asyncpg.Pool, key: str) -> dict[str, Any]:
+    """Read full thread detail from Postgres. Raises HTTPException(404) if not found."""
     row = await pool.fetchrow(
         """
         SELECT
@@ -167,11 +157,37 @@ async def get_thread(
     }
 
 
+@router.get("/detail")
+async def get_thread(
+    key: str,
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
+) -> dict[str, Any]:
+    """Get full thread detail. Prefers live in-memory data, falls back to PG."""
+    session = _sessions.get(key)
+    if session:
+        return _build_live_detail(key, session)
+    return await _fetch_pg_detail(pool, key)
+
+
 @router.get("/stream")
-async def stream_thread(key: str) -> StreamingResponse:
-    """SSE stream of live thread updates from in-memory sessions."""
+async def stream_thread(
+    key: str,
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
+) -> StreamingResponse:
+    """SSE stream of thread updates. Live sessions stream from memory;
+    historical threads send a single snapshot from Postgres."""
 
     async def generate():
+        # If not in memory, send PG snapshot immediately and close
+        session = _sessions.get(key)
+        if not session:
+            try:
+                detail = await _fetch_pg_detail(pool, key)
+                yield f"data: {json.dumps(detail, default=str)}\n\n"
+            except HTTPException:
+                yield f"event: error\ndata: {json.dumps({'error': 'not_found'})}\n\n"
+            return
+
         last_event_count = -1
         last_state = ""
         idle_ticks = 0
@@ -179,7 +195,6 @@ async def stream_thread(key: str) -> StreamingResponse:
         while True:
             session = _sessions.get(key)
             if not session:
-                yield f"event: error\ndata: {json.dumps({'error': 'not_found'})}\n\n"
                 break
 
             total_events = sum(
