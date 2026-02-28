@@ -12,8 +12,8 @@ import os
 import subprocess
 import tarfile
 import time
-from datetime import UTC, datetime
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import docker
@@ -35,6 +35,25 @@ POOL_SIZE = int(os.getenv("AGENT_POOL_SIZE", "0"))
 
 # In-memory session registry: slack_thread_key → session dict
 _sessions: dict[str, dict[str, Any]] = {}
+
+_ACTIVE_SESSION_STATES = ("working", "idle", "running")
+
+
+def has_active_non_engineer_session(thread_key: str) -> tuple[bool, str | None]:
+    """Return (True, harness) if an active non-engineer session would be overwritten."""
+    session = _sessions.get(thread_key)
+    if not session:
+        return (False, None)
+    harness = session.get("harness")
+    if harness == "engineer":
+        return (False, None)
+    if harness not in HARNESSES:
+        return (False, None)
+    state = session.get("state", "")
+    if state not in _ACTIVE_SESSION_STATES:
+        return (False, None)
+    return (True, harness)
+
 
 # Pool of pre-warmed, unclaimed containers (LIFO)
 _pool: list[str] = []  # container IDs
@@ -162,9 +181,7 @@ def _wait_ready(container: Any, timeout: int = 15) -> float:
     t0 = time.monotonic()
     deadline = t0 + timeout
     while time.monotonic() < deadline:
-        exit_code, _ = container.exec_run(
-            ["test", "-f", "/home/agent/.ready"], demux=False
-        )
+        exit_code, _ = container.exec_run(["test", "-f", "/home/agent/.ready"], demux=False)
         if exit_code == 0:
             return round(time.monotonic() - t0, 3)
         time.sleep(0.1)
@@ -496,8 +513,12 @@ class AgentClient:
                 client = _docker_client()
                 container = client.containers.get(existing["container_id"])
                 if container.status == "running":
-                    log.info("spawn_done", request_id=rid, thread=slack_thread_key,
-                             status="already_running")
+                    log.info(
+                        "spawn_done",
+                        request_id=rid,
+                        thread=slack_thread_key,
+                        status="already_running",
+                    )
                     return {
                         "session_id": slack_thread_key,
                         "container_id": existing["container_id"],
@@ -506,8 +527,7 @@ class AgentClient:
                     }
                 container.start()
                 existing["state"] = "running"
-                log.info("spawn_done", request_id=rid, thread=slack_thread_key,
-                         status="restarted")
+                log.info("spawn_done", request_id=rid, thread=slack_thread_key, status="restarted")
                 return {
                     "session_id": slack_thread_key,
                     "container_id": existing["container_id"],
@@ -539,8 +559,9 @@ class AgentClient:
                     "ai2.harness": harness,
                 },
             )
-            log.info("spawn_container_created", request_id=rid, thread=slack_thread_key,
-                     **create_timings)
+            log.info(
+                "spawn_container_created", request_id=rid, thread=slack_thread_key, **create_timings
+            )
 
         # Refill pool in background after claiming
         _refill_pool()
@@ -616,7 +637,9 @@ class AgentClient:
             file_paths = _download_files_to_container(container, files)
             if file_paths:
                 listing = "\n".join(f"- {p}" for p in file_paths)
-                message = f"{message}\n\nAttached files (already downloaded to the container):\n{listing}"
+                message = (
+                    f"{message}\n\nAttached files (already downloaded to the container):\n{listing}"
+                )
 
         cmd = _build_command(session["harness"], message, session["agent_thread_id"])
 
@@ -675,9 +698,12 @@ class AgentClient:
             if stdout_chunk:
                 if not first_output_logged:
                     first_output_logged = True
-                    log.info("exec_first_output", request_id=rid,
-                             thread=slack_thread_key,
-                             elapsed_s=round(time.monotonic() - started, 3))
+                    log.info(
+                        "exec_first_output",
+                        request_id=rid,
+                        thread=slack_thread_key,
+                        elapsed_s=round(time.monotonic() - started, 3),
+                    )
                 buf += stdout_decoder.decode(stdout_chunk)
                 while "\n" in buf:
                     idx = buf.index("\n")
@@ -856,9 +882,7 @@ class AgentClient:
         pruned = 0
 
         # 1. Load active sessions from Postgres
-        rows = _pg_read(
-            "SELECT * FROM agent_sessions WHERE state NOT IN ('stopped')"
-        )
+        rows = _pg_read("SELECT * FROM agent_sessions WHERE state NOT IN ('stopped')")
         client = _docker_client()
 
         for row in rows:
@@ -866,21 +890,24 @@ class AgentClient:
             if key in _sessions:
                 continue
 
+            harness = row.get("harness", "amp")
+            if harness == "engineer":
+                # Engineer sessions use run_id as container_id, not a Docker container.
+                continue
+
             container_id = row["container_id"]
             try:
                 container = client.containers.get(container_id)
                 if container.status != "running":
                     _pg_write(
-                        "UPDATE agent_sessions SET state = 'stopped'"
-                        " WHERE slack_thread_key = %s",
+                        "UPDATE agent_sessions SET state = 'stopped' WHERE slack_thread_key = %s",
                         (key,),
                     )
                     pruned += 1
                     continue
             except (NotFound, Exception):
                 _pg_write(
-                    "UPDATE agent_sessions SET state = 'stopped'"
-                    " WHERE slack_thread_key = %s",
+                    "UPDATE agent_sessions SET state = 'stopped' WHERE slack_thread_key = %s",
                     (key,),
                 )
                 pruned += 1
@@ -888,8 +915,7 @@ class AgentClient:
 
             # Load turns from PG
             turn_rows = _pg_read(
-                "SELECT * FROM agent_turns WHERE slack_thread_key = %s"
-                " ORDER BY turn_id",
+                "SELECT * FROM agent_turns WHERE slack_thread_key = %s ORDER BY turn_id",
                 (key,),
             )
             turns = []
@@ -899,17 +925,19 @@ class AgentClient:
                     events = json.loads(events)
                 started = tr.get("started_at")
                 finished = tr.get("finished_at")
-                turns.append({
-                    "turn_id": tr["turn_id"],
-                    "user_message": tr["user_message"],
-                    "events": events,
-                    "result": tr.get("result", ""),
-                    "started_at": started.timestamp() if started else time.time(),
-                    "finished_at": finished.timestamp() if finished else None,
-                    "exit_code": tr.get("exit_code"),
-                    "timed_out": tr.get("timed_out", False),
-                    "duration_s": tr.get("duration_s", 0),
-                })
+                turns.append(
+                    {
+                        "turn_id": tr["turn_id"],
+                        "user_message": tr["user_message"],
+                        "events": events,
+                        "result": tr.get("result", ""),
+                        "started_at": started.timestamp() if started else time.time(),
+                        "finished_at": finished.timestamp() if finished else None,
+                        "exit_code": tr.get("exit_code"),
+                        "timed_out": tr.get("timed_out", False),
+                        "duration_s": tr.get("duration_s", 0),
+                    }
+                )
 
             created = row.get("created_at")
             last_act = row.get("last_activity")
