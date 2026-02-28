@@ -212,9 +212,23 @@ async def get_thread(
 ) -> dict[str, Any]:
     """Get full thread detail. Prefers live in-memory data, falls back to PG."""
     session = get_session_state(key)
+    if not session and not key.startswith("slack:"):
+        session = get_session_state(f"slack:{key}")
+        if session:
+            key = f"slack:{key}"
+
     if session:
         return _build_live_detail(key, session)
-    return await _fetch_pg_detail(pool, key)
+
+    try:
+        return await _fetch_pg_detail(pool, key)
+    except HTTPException:
+        if not key.startswith("slack:"):
+            try:
+                return await _fetch_pg_detail(pool, f"slack:{key}")
+            except HTTPException:
+                pass
+        raise
 
 
 # SSE comment keepalive sent when no data for this many seconds (prevents proxy timeouts)
@@ -231,13 +245,26 @@ async def stream_thread(
     historical threads send a single snapshot from Postgres."""
 
     async def generate():
+        nonlocal key
         # If not in memory, send PG snapshot immediately and close
         session = get_session_state(key)
+        if not session and not key.startswith("slack:"):
+            session = get_session_state(f"slack:{key}")
+            if session:
+                key = f"slack:{key}"
+
         if not session:
             try:
                 detail = await _fetch_pg_detail(pool, key)
                 yield f"data: {json.dumps(detail, default=str)}\n\n"
             except HTTPException:
+                if not key.startswith("slack:"):
+                    try:
+                        detail = await _fetch_pg_detail(pool, f"slack:{key}")
+                        yield f"data: {json.dumps(detail, default=str)}\n\n"
+                        return
+                    except HTTPException:
+                        pass
                 # Emit a normal message event so EventSource.onmessage receives it.
                 yield f"data: {json.dumps({'error': 'not_found'})}\n\n"
             return

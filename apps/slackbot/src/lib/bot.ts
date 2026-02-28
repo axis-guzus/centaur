@@ -107,7 +107,8 @@ function createBot() {
   ) {
     const parsed = extractRunOptions(messageText);
     const requestId = crypto.randomUUID().slice(0, 8);
-    const threadKey = thread.id;
+    const rawThreadKey = thread.id;
+    const threadKey = normalizeThreadKey(rawThreadKey);
     const previous = threadModes.get(threadKey);
     const files: FileAttachment[] = (attachments || [])
       .filter((a): a is { url: string; name: string } => !!a.url && !!a.name)
@@ -221,7 +222,7 @@ function createBot() {
           })();
           await thread.post(
             toSlackMessage(
-              `${statusLine}${preferenceLine}${modeLine}\n\n<${viewerUrl}|Thread Viewer>`
+              `[🔗 Thread Viewer](${viewerUrl})\n\n${statusLine}${preferenceLine}${modeLine}`
             )
           );
           return;
@@ -280,7 +281,7 @@ function createBot() {
       let finalMessage = result;
       if (isFirstMessage) {
         const viewerUrl = `${THREAD_VIEWER_URL}/threads/${encodeURIComponent(normalizeThreadKey(threadKey))}`;
-        finalMessage += `\n\n<${viewerUrl}|Thread Viewer>`;
+        finalMessage = `[🔗 Thread Viewer](${viewerUrl})\n\n` + finalMessage;
       }
       await thread.post(toSlackMessage(finalMessage));
     } catch (error) {
@@ -310,12 +311,13 @@ function createBot() {
       // Allow plain thread replies to resume engineer clarification when session is active
       const text = (message.text || "").trim();
       if (!text) return;
-      const knownMode = threadModes.get(thread.id)?.mode;
+      const threadKey = normalizeThreadKey(thread.id);
+      const knownMode = threadModes.get(threadKey)?.mode;
       try {
         const files: FileAttachment[] = (attachments || [])
           .filter((a): a is { url: string; name: string } => !!a.url && !!a.name)
           .map((a) => ({ url: a.url, name: a.name }));
-        const reply = await replyEngineerFlow(thread.id, text, files.length > 0 ? files : undefined);
+        const reply = await replyEngineerFlow(threadKey, text, files.length > 0 ? files : undefined);
         if (reply.status === "accepted") return;
         if (reply.status === "not_waiting_for_reply") {
           if (knownMode === "eng") {
@@ -326,7 +328,7 @@ function createBot() {
           return;
         }
         if (reply.status === "no_active_session" && knownMode === "eng") {
-          threadModes.delete(thread.id);
+          threadModes.delete(threadKey);
           await thread.post(
             toSlackMessage("No active engineer session for this thread. Start a new run with `--eng`.")
           );
@@ -334,7 +336,7 @@ function createBot() {
         }
       } catch (error) {
         console.warn("engineer_plain_reply_failed", {
-          thread: thread.id,
+          thread: threadKey,
           error: error instanceof Error ? error.message : String(error),
         });
         if (knownMode === "eng") {
