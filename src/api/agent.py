@@ -373,6 +373,33 @@ def _delete_session(key: str) -> None:
     _pg_write("DELETE FROM agent_sessions WHERE slack_thread_key = %s", (key,))
 
 
+def _post_to_slack_sync(thread_key: str, text: str) -> None:
+    """Post a message to a Slack thread. Best-effort, never raises."""
+    token = os.getenv("SLACK_BOT_TOKEN", "")
+    if not token or not text.strip():
+        return
+    try:
+        parts = thread_key.split(":")
+        if len(parts) < 2:
+            return
+        channel, thread_ts = parts[0], parts[-1]
+        safe_text = text.strip()
+        if len(safe_text) > 3900:
+            safe_text = safe_text[:3882].rstrip() + "\n\n... (truncated)"
+        with httpx.Client(timeout=20) as client:
+            resp = client.post(
+                "https://slack.com/api/chat.postMessage",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"channel": channel, "thread_ts": thread_ts, "text": safe_text},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if not data.get("ok"):
+                    log.debug("slack_post_failed", error=data.get("error"))
+    except Exception as exc:
+        log.debug("slack_post_failed", error=str(exc))
+
+
 def _docker_client() -> docker.DockerClient:
     return docker.from_env()
 

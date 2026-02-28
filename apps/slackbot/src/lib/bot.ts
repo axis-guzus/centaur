@@ -132,8 +132,24 @@ function isBusyRunError(message: string): boolean {
   return normalized.includes("already in progress") || normalized.includes("run is already in progress");
 }
 
+/**
+ * Convert Slack-style links to markdown before AST parsing.
+ * LLMs sometimes output `<url|text>` or `&lt;url|text&gt;` despite being
+ * told to use markdown — this catches those and converts them so
+ * the markdown parser produces proper link nodes.
+ */
+function preprocessSlackLinks(text: string): string {
+  let result = text;
+  // HTML-encoded Slack links: &lt;https://...|text&gt; → [text](url)
+  result = result.replace(/&lt;(https?:\/\/[^|&]+)\|([^&]+)&gt;/g, "[$2]($1)");
+  // Raw Slack links: <https://...|text> → [text](url)
+  // Only matches URLs (not Slack mentions like <@U...> or <#C...>)
+  result = result.replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "[$2]($1)");
+  return result;
+}
+
 function renderSlackMessage(markdown: string) {
-  const ast = parseMarkdown(markdown);
+  const ast = parseMarkdown(preprocessSlackLinks(markdown));
   const escapeLiteralTildes = (
     node: MarkdownNode,
     inDelete = false
@@ -300,8 +316,10 @@ function createBot() {
       "",
       "## Slack Formatting Rules",
       "",
-      "- Preserve Slack user mentions (`<@UXXXXXXX>`) exactly as-is",
-      "- Use `<URL|Display Text>` format for hyperlinks — never put URLs adjacent to `*` or `_`",
+      "- Use standard markdown links `[Display Text](URL)` for all hyperlinks — they are auto-converted to Slack format",
+      "- Do NOT use Slack-native `<URL|text>` link syntax — it breaks the rendering pipeline",
+      "- Preserve Slack user mentions (`<@UXXXXXXX>`) exactly as-is — only use these for actual Slack users",
+      "- For Twitter/X handles, always link to the profile: `[@handle](https://x.com/handle)` — bare @handle gets auto-converted to a broken Slack mention",
       "- Slack enforces a 4,000 character limit per message — split long responses across multiple messages or summarize",
       "- Use Slack Block Kit formatting for tables, not markdown or ASCII",
       "- After completing a long task, tag the requester with `@username`",
