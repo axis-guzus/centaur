@@ -25,6 +25,12 @@ jobs:
           git checkout main
           git reset --hard origin/main
 
+      - name: Ensure external volumes exist
+        run: |
+          docker volume create ai_v2_firewall-certs 2>/dev/null || true
+          docker volume create ai_v2_prometheusdata 2>/dev/null || true
+          docker volume create ai_v2_lokidata 2>/dev/null || true
+
       - name: Detect changes
         id: changes
         run: |
