@@ -32,6 +32,22 @@ export function useThreadStream(threadKey: string) {
       "agent-status": z.object({ text: z.string() }),
       "phase-progress": z.object({ phase: z.string(), turn_id: z.number() }),
       "file-changes": z.object({ changes: z.array(z.object({ path: z.string(), kind: z.string() })) }),
+      "user-message": z.object({
+        id: z.string(),
+        turn_id: z.number(),
+        text: z.string(),
+        source: z.string().optional(),
+        user_id: z.string().nullable().optional(),
+        created_at: z.string().optional(),
+      }),
+      "context-message": z.object({
+        id: z.string(),
+        turn_id: z.number(),
+        text: z.string(),
+        source: z.string().optional(),
+        user_id: z.string().nullable().optional(),
+        created_at: z.string().optional(),
+      }),
       "token-usage": z.object({
         input_tokens: z.number(),
         output_tokens: z.number(),

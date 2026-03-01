@@ -267,7 +267,7 @@ export default function ThreadDetailPage() {
       </div>
 
       <div className="mx-auto flex min-h-0 w-full max-w-[980px] flex-1 flex-col">
-        <ActivityFeed steps={liveSteps} state={thread.state} />
+        <ActivityFeed steps={liveSteps} state={thread.state} participants={thread.participants} />
 
         {isEngineer && isWaiting && (
           <div className="shrink-0 px-4 pb-3 sm:px-5">

@@ -8,6 +8,7 @@ import {
   extractRunOptions,
   interrupt,
   normalizeThreadKey,
+  postThreadContextMessage,
   replyEngineerFlow,
   spawn,
   startEngineerFlow,
@@ -21,12 +22,7 @@ import { truncateSlackText } from "./slack-text";
 
 const THREAD_VIEWER_URL = process.env.THREAD_VIEWER_URL || "https://svc-ai.paradigm.xyz";
 const MAX_TRACKED_THREAD_MODES = 500;
-const SLACK_API_BASE = "https://slack.com/api";
-const MAX_SLACK_CONTEXT_MESSAGES = 18;
-const MAX_SLACK_CONTEXT_CHARS = 6000;
 const SLACK_BOT_USERNAME = process.env.SLACK_BOT_USERNAME || "paradigm-ai";
-const SLACK_RETRY_ATTEMPTS = 3;
-const DEFAULT_SLACK_RETRY_MS = 1000;
 
 type MarkdownNode = Root | Root["children"][number];
 type ThreadModeConfig = {
@@ -34,98 +30,27 @@ type ThreadModeConfig = {
   modelPreference: string | null;
   budgetMode: BudgetMode | null;
 };
-type SlackReplyMessage = {
-  ts?: string;
-  text?: string;
-  user?: string;
-  bot_id?: string;
-  subtype?: string;
-};
-type SlackDiscussionContext = {
-  instruction: string;
-  latestTs: string | null;
-};
 
 const HARNESSES: readonly Harness[] = ["amp", "claude-code", "codex", "pi-mono"] as const;
-let cachedBotUserId: string | null | undefined;
 
 function isHarness(value: string | null | undefined): value is Harness {
   return HARNESSES.includes((value ?? "") as Harness);
-}
-
-function splitThreadKey(threadKey: string): { channel: string; threadTs: string } {
-  const parts = threadKey.trim().split(":");
-  if (parts.length === 2 && parts[0] && parts[1]) {
-    return { channel: parts[0], threadTs: parts[1] };
-  }
-  if (parts.length === 3 && parts[0].toLowerCase() === "slack" && parts[1] && parts[2]) {
-    return { channel: parts[1], threadTs: parts[2] };
-  }
-  throw new Error(`Invalid thread key format: ${threadKey}`);
-}
-
-function tsToNumber(ts: string): number {
-  const parsed = Number.parseFloat(ts);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function compactText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function retryAfterMs(response: Response): number {
-  const retryAfter = response.headers.get("Retry-After");
-  const parsed = Number(retryAfter);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SLACK_RETRY_MS;
-  return Math.max(DEFAULT_SLACK_RETRY_MS, Math.min(parsed * 1000, 30_000));
-}
-
-async function slackGet<T extends Record<string, unknown>>(
-  token: string,
-  path: string,
-  query: Record<string, string>,
-): Promise<T> {
-  const url = new URL(`${SLACK_API_BASE}/${path}`);
-  for (const [k, v] of Object.entries(query)) {
-    if (v) url.searchParams.set(k, v);
-  }
-  for (let attempt = 0; attempt < SLACK_RETRY_ATTEMPTS; attempt += 1) {
-    const response = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (response.status === 429 && attempt + 1 < SLACK_RETRY_ATTEMPTS) {
-      await sleep(retryAfterMs(response));
-      continue;
-    }
-    if (!response.ok) {
-      throw new Error(`Slack API ${path} failed (${response.status})`);
-    }
-    const data = (await response.json()) as T & { ok?: boolean; error?: string };
-    if (data.ok === true) {
-      return data;
-    }
-    if (data.error === "ratelimited" && attempt + 1 < SLACK_RETRY_ATTEMPTS) {
-      await sleep(retryAfterMs(response));
-      continue;
-    }
-    throw new Error(`Slack API ${path} error: ${data.error || "unknown_error"}`);
-  }
-  throw new Error(`Slack API ${path} failed after ${SLACK_RETRY_ATTEMPTS} attempts`);
-}
-
-async function getBotUserId(token: string): Promise<string | null> {
-  if (cachedBotUserId !== undefined) return cachedBotUserId;
-  try {
-    const data = await slackGet<{ user_id?: string }>(token, "auth.test", {});
-    cachedBotUserId = typeof data.user_id === "string" && data.user_id ? data.user_id : null;
-  } catch {
-    cachedBotUserId = null;
-  }
-  return cachedBotUserId;
+function messageIdentifier(message: {
+  ts?: string;
+  userId?: string;
+  text?: string;
+  threadId?: string;
+}): string {
+  const ts = String(message.ts || "").trim();
+  if (ts) return ts;
+  const raw = `${message.threadId || ""}:${message.userId || ""}:${message.text || ""}`;
+  return crypto.createHash("sha1").update(raw).digest("hex");
 }
 
 function isBusyRunError(message: string): boolean {
@@ -188,7 +113,6 @@ function createBot() {
     state: process.env.REDIS_URL ? createRedisState() : createMemoryState(),
   });
   const threadModes = new Map<string, ThreadModeConfig>();
-  const threadContextWatermarks = new Map<string, string>();
 
   function setThreadMode(threadKey: string, config: ThreadModeConfig): void {
     if (threadModes.has(threadKey)) {
@@ -199,111 +123,6 @@ function createBot() {
       if (oldestKey) threadModes.delete(oldestKey);
     }
     threadModes.set(threadKey, config);
-  }
-
-  function setContextWatermark(threadKey: string, ts: string | null): void {
-    if (!ts) return;
-    if (threadContextWatermarks.has(threadKey)) {
-      threadContextWatermarks.delete(threadKey);
-    }
-    if (!threadContextWatermarks.has(threadKey) && threadContextWatermarks.size >= MAX_TRACKED_THREAD_MODES) {
-      const oldestKey = threadContextWatermarks.keys().next().value as string | undefined;
-      if (oldestKey) threadContextWatermarks.delete(oldestKey);
-    }
-    threadContextWatermarks.set(threadKey, ts);
-  }
-
-  async function buildSlackDiscussionContext(
-    threadKey: string,
-    instruction: string,
-  ): Promise<SlackDiscussionContext> {
-    const token = process.env.SLACK_BOT_TOKEN || "";
-    if (!token) return { instruction, latestTs: null };
-
-    let channel = "";
-    let threadTs = "";
-    try {
-      const parsed = splitThreadKey(threadKey);
-      channel = parsed.channel;
-      threadTs = parsed.threadTs;
-    } catch {
-      return { instruction, latestTs: null };
-    }
-
-    try {
-      const data = await slackGet<{ messages?: SlackReplyMessage[] }>(token, "conversations.replies", {
-        channel,
-        ts: threadTs,
-        limit: "200",
-      });
-      const messages = Array.isArray(data.messages) ? data.messages : [];
-      const latestTs = messages.length > 0 ? String(messages[messages.length - 1]?.ts || "") : null;
-      const watermark = threadContextWatermarks.get(threadKey);
-      const botUserId = await getBotUserId(token);
-      const isBotLikeMessage = (raw: SlackReplyMessage): boolean =>
-        Boolean(raw?.bot_id) ||
-        String(raw?.subtype || "").toLowerCase() === "bot_message" ||
-        (botUserId ? String(raw?.user || "") === botUserId : false);
-      const explicitMentionToBot = (text: string): boolean =>
-        Boolean(botUserId) && text.includes(`<@${botUserId}>`);
-
-      let watermarkNum = watermark ? tsToNumber(watermark) : 0;
-      if (!watermark) {
-        for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
-          const candidate = messages[idx];
-          const candidateText = compactText(String(candidate?.text || ""));
-          if (!candidate?.ts) continue;
-          if (isBotLikeMessage(candidate) || explicitMentionToBot(candidateText)) {
-            watermarkNum = tsToNumber(String(candidate.ts));
-            break;
-          }
-        }
-      }
-
-      const contextLines: string[] = [];
-      for (const raw of messages) {
-        const ts = String(raw?.ts || "");
-        if (!ts) continue;
-        if (tsToNumber(ts) <= watermarkNum) continue;
-
-        const text = compactText(String(raw?.text || ""));
-        if (!text) continue;
-
-        const isBotMessage = isBotLikeMessage(raw);
-        if (isBotMessage) continue;
-
-        if (explicitMentionToBot(text)) {
-          // Explicit AI command message itself; keep as instruction, not ambient context.
-          continue;
-        }
-
-        const author = String(raw?.user || "").trim();
-        const prefix = author ? `<@${author}>` : "thread-user";
-        contextLines.push(`- ${prefix}: ${text}`);
-      }
-
-      if (contextLines.length === 0) {
-        return { instruction, latestTs };
-      }
-
-      const selected = contextLines.slice(-MAX_SLACK_CONTEXT_MESSAGES);
-      let contextBlock =
-        "Additional Slack thread context since the last AI instruction (ambient discussion from humans):\n" +
-        selected.join("\n");
-      if (contextBlock.length > MAX_SLACK_CONTEXT_CHARS) {
-        contextBlock = contextBlock.slice(0, MAX_SLACK_CONTEXT_CHARS).trimEnd() + "\n- ... (truncated)";
-      }
-      return {
-        instruction: `${instruction}\n\n${contextBlock}`,
-        latestTs,
-      };
-    } catch (error) {
-      console.warn("slack_context_fetch_failed", {
-        thread: threadKey,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return { instruction, latestTs: null };
-    }
   }
 
   function buildSessionContext(threadId: string): string {
@@ -499,14 +318,8 @@ function createBot() {
     const harness = parsed.harness ?? previousHarness ?? "amp";
     setThreadMode(threadKey, { mode: "default", modelPreference: harness, budgetMode: null });
     try {
-      let instruction = parsed.cleanedText;
-      let nextWatermark: string | null = null;
-      if (isFirstMessage) {
-        nextWatermark = (Date.now() / 1000).toFixed(6);
-      } else {
-        const discussion = await buildSlackDiscussionContext(threadKey, instruction);
-        instruction = discussion.instruction;
-        nextWatermark = discussion.latestTs;
+      const instruction = parsed.cleanedText;
+      if (!isFirstMessage) {
         try {
           await interrupt(threadKey, requestId);
         } catch (error) {
@@ -556,8 +369,6 @@ function createBot() {
       } finally {
         stopProgress();
       }
-      setContextWatermark(threadKey, nextWatermark);
-
       let finalMessage = result;
       if (isFirstMessage) {
         const viewerUrl = `${THREAD_VIEWER_URL}/threads/${encodeURIComponent(normalizeThreadKey(threadKey))}`;
@@ -588,16 +399,31 @@ function createBot() {
     if (message.author.isBot) return;
     const attachments = message.attachments?.map((a) => ({ url: a.url, name: a.name }));
     if (!message.isMention) {
-      // Allow plain thread replies to resume engineer clarification when session is active
       const text = (message.text || "").trim();
-      if (!text) return;
       const threadKey = normalizeThreadKey(thread.id);
       const knownMode = threadModes.get(threadKey)?.mode;
+      const files: FileAttachment[] = (attachments || [])
+        .filter((a): a is { url: string; name: string } => !!a.url && !!a.name)
+        .map((a) => ({ url: a.url, name: a.name }));
+      if (!text && files.length === 0) return;
+      const messageId = messageIdentifier({
+        ts: (message as { ts?: string }).ts || (message as { id?: string }).id,
+        userId: message.author.userId,
+        text,
+        threadId: thread.id,
+      });
+
       try {
-        const files: FileAttachment[] = (attachments || [])
-          .filter((a): a is { url: string; name: string } => !!a.url && !!a.name)
-          .map((a) => ({ url: a.url, name: a.name }));
-        const reply = await replyEngineerFlow(threadKey, text, files.length > 0 ? files : undefined);
+        const reply = await replyEngineerFlow(
+          threadKey,
+          text,
+          files.length > 0 ? files : undefined,
+          {
+            source: "slack_subscribed_message",
+            userId: message.author.userId,
+            messageId,
+          },
+        );
         if (reply.status === "accepted") return;
         if (reply.status === "not_waiting_for_reply") {
           if (knownMode === "eng") {
@@ -612,7 +438,6 @@ function createBot() {
           await thread.post(
             toSlackMessage("No active engineer session for this thread. Start a new run with `--eng`.")
           );
-          return;
         }
       } catch (error) {
         console.warn("engineer_plain_reply_failed", {
@@ -624,6 +449,21 @@ function createBot() {
             toSlackMessage("Could not deliver your reply to engineer right now. Please retry.")
           );
         }
+      }
+
+      const contextText = text || "Shared attachment in thread.";
+      try {
+        await postThreadContextMessage(threadKey, contextText, {
+          source: "slack_subscribed_message",
+          userId: message.author.userId,
+          messageId,
+          attachments: files.length > 0 ? files : undefined,
+        });
+      } catch (error) {
+        console.warn("thread_context_post_failed", {
+          thread: threadKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
       return;
     }

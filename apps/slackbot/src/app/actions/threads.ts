@@ -16,6 +16,7 @@ export async function postReply(threadKey: string, reply: string, attachments?: 
       thread_key: threadKey,
       reply,
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      source: "thread_ui",
     }),
   });
   if (!res.ok) {

@@ -25,6 +25,9 @@ export async function POST(request: Request) {
   const threadKey = String(body.thread_key ?? "").trim();
   const reply = String(body.reply ?? "").trim();
   const attachments = normalizeAttachments((body as { attachments?: unknown }).attachments);
+  const source = typeof body.source === "string" ? body.source.trim() : "";
+  const userId = typeof body.user_id === "string" ? body.user_id.trim() : "";
+  const messageId = typeof body.message_id === "string" ? body.message_id.trim() : "";
 
   if (!threadKey || !reply) {
     return Response.json(
@@ -43,6 +46,9 @@ export async function POST(request: Request) {
       thread_key: threadKey,
       reply,
       ...(attachments.length > 0 ? { attachments } : {}),
+      ...(source ? { source } : {}),
+      ...(userId ? { user_id: userId } : {}),
+      ...(messageId ? { message_id: messageId } : {}),
     }),
     cache: "no-store",
     signal: request.signal,

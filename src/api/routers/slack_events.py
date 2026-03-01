@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
-from api.agent import has_active_non_engineer_session
+from api.agent import has_active_non_engineer_session, record_thread_message
 from api.deps import verify_api_key
 from shared.engineer.models import EngineerResult, Phase
 from shared.engineer.orchestrator import EngineerOrchestrator
@@ -593,6 +593,9 @@ class EngineerReplyRequest(BaseModel):
     thread_key: str
     reply: str
     attachments: list[dict[str, str]] | None = None
+    source: str | None = None
+    user_id: str | None = None
+    message_id: str | None = None
 
 
 @router.post("/start", dependencies=[Depends(verify_api_key)])
@@ -631,13 +634,39 @@ async def start_engineer(payload: EngineerStartRequest) -> JSONResponse:
 @router.post("/reply", dependencies=[Depends(verify_api_key)])
 async def reply_engineer(payload: EngineerReplyRequest) -> JSONResponse:
     try:
-        thread_key, _, _ = _normalize_thread_key(payload.thread_key, "", "")
+        thread_key, channel, thread_ts = _normalize_thread_key(payload.thread_key, "", "")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     reply_text = _append_attachments(payload.reply.strip(), payload.attachments)
     if not reply_text:
         return JSONResponse({"status": "ignored_empty"})
     status = _route_reply_to_session(thread_key, reply_text)
+    if status == "accepted":
+        record_thread_message(
+            thread_key,
+            reply_text,
+            message_type="command",
+            source=payload.source or "slack",
+            user_id=payload.user_id,
+            message_id=payload.message_id,
+        )
+        if (payload.source or "").strip().lower() == "thread_ui":
+            bot_token = engineer_settings.slack_bot_token
+            if bot_token:
+                try:
+                    attributed_reply = (
+                        f"<@{payload.user_id}>: {reply_text}"
+                        if str(payload.user_id or "").strip()
+                        else reply_text
+                    )
+                    await _post_thread_message(
+                        token=bot_token,
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text="[via Thread Viewer] " + attributed_reply,
+                    )
+                except Exception:
+                    log.exception("thread_ui_reply_mirror_failed", thread_key=thread_key)
     return JSONResponse({"status": status})
 
 

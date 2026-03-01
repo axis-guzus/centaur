@@ -110,6 +110,8 @@ export class AgentThreadTransport<UI_MESSAGE extends UIMessage = UIMessage>
             thread_key: this.threadKey,
             reply: text,
             ...(attachments.length > 0 ? { attachments } : {}),
+            source: "thread_ui",
+            ...(options.messageId ? { message_id: options.messageId } : {}),
           }),
         });
         if (!replyRes.ok) {

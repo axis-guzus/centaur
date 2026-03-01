@@ -29,12 +29,24 @@ function toolNameFromPart(part: Record<string, unknown>): string | null {
 
 export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
   const steps: Step[] = [];
-  let pendingGroup: { category: string; icon: LucideIcon; calls: ToolCall[] } | null =
+  const byId = new Map<string, number>();
+  let pendingGroup: { id: string; category: string; icon: LucideIcon; calls: ToolCall[] } | null =
     null;
+
+  const pushStep = (step: Step) => {
+    const existingIndex = byId.get(step.id);
+    if (existingIndex !== undefined) {
+      steps[existingIndex] = step;
+      return;
+    }
+    byId.set(step.id, steps.length);
+    steps.push(step);
+  };
 
   const flushGroup = () => {
     if (!pendingGroup || pendingGroup.calls.length === 0) return;
-    steps.push({
+    pushStep({
+      id: pendingGroup.id,
       type: "tool-group",
       icon: pendingGroup.icon,
       category: pendingGroup.category,
@@ -54,7 +66,12 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
         const text = asString(part.text).trim();
         if (!text) continue;
         flushGroup();
-        steps.push({ type: "result", text, streaming: asString(part.state) === "streaming" });
+        pushStep({
+          id: `result-${message.id}-${partIndex}`,
+          type: "result",
+          text,
+          streaming: asString(part.state) === "streaming",
+        });
         continue;
       }
 
@@ -62,7 +79,11 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
         const text = asString(part.text).trim();
         if (!text) continue;
         flushGroup();
-        steps.push({ type: "thinking", text });
+        pushStep({
+          id: `thinking-${message.id}-${partIndex}`,
+          type: "thinking",
+          text,
+        });
         continue;
       }
 
@@ -78,7 +99,11 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
           }))
           .filter((item) => item.path);
         if (changes.length > 0) {
-          steps.push({ type: "file-changes", changes });
+          pushStep({
+            id: `file-changes-${message.id}-${partIndex}`,
+            type: "file-changes",
+            changes,
+          });
         }
         continue;
       }
@@ -88,19 +113,76 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
         const phase = asString(data.phase);
         if (!phase) continue;
         flushGroup();
-        steps.push({ type: "phase", phase });
+        pushStep({
+          id: `phase-${message.id}-${partIndex}-${phase}`,
+          type: "phase",
+          phase,
+        });
         continue;
       }
 
       if (partType === "data-shell-command") {
         flushGroup();
         const data = asRecord(part.data);
-        steps.push({
+        pushStep({
+          id: `terminal-${message.id}-${partIndex}`,
           type: "terminal",
           description: "Ran shell command",
           command: asString(data.command),
           output: outputToText(data.output),
           exitCode: typeof data.exitCode === "number" ? data.exitCode : undefined,
+        });
+        continue;
+      }
+
+      if (partType === "data-user-message") {
+        flushGroup();
+        const data = asRecord(part.data);
+        const text = asString(data.text).trim();
+        if (!text) continue;
+        const messageId = asString(data.id) || `user-${message.id}-${partIndex}`;
+        pushStep({
+          id: `user-message-${messageId}`,
+          type: "user-message",
+          text,
+          source: asString(data.source) || undefined,
+          userId: asString(data.user_id) || undefined,
+          createdAt: asString(data.created_at) || undefined,
+        });
+        continue;
+      }
+
+      if (partType === "data-context-message") {
+        flushGroup();
+        const data = asRecord(part.data);
+        const text = asString(data.text).trim();
+        if (!text) continue;
+        const contextItemId = asString(data.id) || `context-${message.id}-${partIndex}`;
+        const turnId = Number(data.turn_id ?? 0);
+        const groupId = turnId > 0 ? `context-group-${turnId}` : "context-group";
+        const existingIndex = byId.get(groupId);
+        const existing =
+          existingIndex !== undefined
+            ? (steps[existingIndex] as Extract<Step, { type: "context-group" }>)
+            : null;
+        const items = existing ? [...existing.items] : [];
+        const itemIndex = items.findIndex((item) => item.id === contextItemId);
+        const item = {
+          id: contextItemId,
+          text,
+          source: asString(data.source) || undefined,
+          userId: asString(data.user_id) || undefined,
+          createdAt: asString(data.created_at) || undefined,
+        };
+        if (itemIndex >= 0) {
+          items[itemIndex] = item;
+        } else {
+          items.push(item);
+        }
+        pushStep({
+          id: groupId,
+          type: "context-group",
+          items: items.slice(-50),
         });
         continue;
       }
@@ -130,7 +212,8 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
           flushGroup();
           const path = asString(toolInput.path);
           const ext = path.split(".").pop()?.toLowerCase();
-          steps.push({
+          pushStep({
+            id: `diff-${toolCallId}`,
             type: "diff",
             file: path,
             lang: ext || "txt",
@@ -143,7 +226,8 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
 
         if (toolName === "shell" || toolName === "bash") {
           flushGroup();
-          steps.push({
+          pushStep({
+            id: `terminal-${toolCallId}`,
             type: "terminal",
             description: "Ran shell command",
             command: asString(toolInput.command),
@@ -157,7 +241,12 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
           pendingGroup.calls.push(call);
         } else {
           flushGroup();
-          pendingGroup = { category, icon, calls: [call] };
+          pendingGroup = {
+            id: `tool-group-${category}-${message.id}-${partIndex}`,
+            category,
+            icon,
+            calls: [call],
+          };
         }
       }
     }

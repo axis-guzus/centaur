@@ -45,8 +45,15 @@ _SLACK_TRUNCATED_SUFFIX = "\n\n... (truncated)"
 _SLACK_POST_RETRY_ATTEMPTS = 3
 _THREAD_NAME_MAX_CHARS = 60
 _THREAD_CONTEXT_DELIMITER = "---"
+_MAX_PENDING_CONTEXT_MESSAGES = 18
+_MAX_PENDING_CONTEXT_CHARS = 6000
+_CONTEXT_HEADER = (
+    "Additional Slack thread context since the last AI instruction "
+    "(ambient discussion from humans):"
+)
 _SLACK_MENTION_RE = re.compile(r"<@[^>]+>")
 _PLAIN_MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9._-]+")
+
 
 # In-memory session registry: slack_thread_key → session dict
 _sessions: dict[str, dict[str, Any]] = {}
@@ -330,12 +337,180 @@ def _extract_turn_user_id(events: list[dict[str, Any]]) -> str | None:
     for event in events:
         if not isinstance(event, dict):
             continue
-        if event.get("type") != "thread.user":
-            continue
-        user_id = str(event.get("user_id") or "").strip()
-        if user_id:
-            return user_id
+        event_type = str(event.get("type") or "")
+        if event_type in {"thread.user", "thread.message"}:
+            user_id = str(event.get("user_id") or "").strip()
+            if user_id:
+                return user_id
     return None
+
+
+def _display_user_message(message: str) -> str:
+    """Return user-visible text without system context blocks."""
+    text = message.strip()
+    if not text:
+        return ""
+    context_idx = text.find(_CONTEXT_HEADER)
+    if context_idx >= 0:
+        text = text[:context_idx].rstrip()
+        if text.endswith(_THREAD_CONTEXT_DELIMITER):
+            text = text[: -len(_THREAD_CONTEXT_DELIMITER)].rstrip()
+    if "# Session Context" in text and _THREAD_CONTEXT_DELIMITER in text:
+        tail = text.rsplit(_THREAD_CONTEXT_DELIMITER, 1)[-1].strip()
+        if tail:
+            return tail
+    if _THREAD_CONTEXT_DELIMITER in text:
+        head = text.split(_THREAD_CONTEXT_DELIMITER, 1)[0].strip()
+        if head:
+            text = head
+    return text
+
+
+def _find_session_for_thread(thread_key: str) -> tuple[str, dict[str, Any]] | None:
+    for candidate in _thread_key_aliases(thread_key):
+        session = get_session_state(candidate)
+        if session:
+            return candidate, session
+    return None
+
+
+def _context_line(source: str | None, user_id: str | None, text: str) -> str:
+    compact = " ".join(text.split()).strip()
+    if not compact:
+        return ""
+    if len(compact) > 300:
+        compact = compact[:297].rstrip() + "..."
+    source_tag = str(source or "").strip()
+    author = str(user_id or "").strip()
+    prefix_parts: list[str] = []
+    if author:
+        prefix_parts.append(f"<@{author}>")
+    if source_tag:
+        prefix_parts.append(f"[{source_tag}]")
+    if prefix_parts:
+        return f"- {' '.join(prefix_parts)}: {compact}"
+    return f"- {compact}"
+
+
+def _format_pending_context_block(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return ""
+    lines = [
+        _context_line(
+            str(item.get("source") or ""),
+            str(item.get("user_id") or ""),
+            str(item.get("text") or ""),
+        )
+        for item in items
+    ]
+    filtered = [line for line in lines if line]
+    if not filtered:
+        return ""
+    block = _CONTEXT_HEADER + "\n" + "\n".join(filtered[-_MAX_PENDING_CONTEXT_MESSAGES:])
+    if len(block) > _MAX_PENDING_CONTEXT_CHARS:
+        block = block[: _MAX_PENDING_CONTEXT_CHARS - 18].rstrip() + "\n- ... (truncated)"
+    return block
+
+
+def record_thread_message(
+    thread_key: str,
+    text: str,
+    *,
+    message_type: str,
+    source: str | None = None,
+    user_id: str | None = None,
+    message_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_text = text.strip()
+    if not normalized_text:
+        return {"status": "ignored_empty", "thread_key": _normalize_thread_key(thread_key)}
+
+    found = _find_session_for_thread(thread_key)
+    if not found:
+        return {"status": "no_active_session", "thread_key": _normalize_thread_key(thread_key)}
+
+    canonical_key, session = found
+    normalized_source = str(source or "unknown").strip().lower() or "unknown"
+    normalized_user_id = str(user_id or "").strip() or None
+    normalized_message_id = str(message_id or "").strip() or None
+
+    with _sessions_lock:
+        turns = session.setdefault("turns", [])
+        if not turns:
+            return {"status": "no_active_session", "thread_key": canonical_key}
+        target_turn = turns[-1]
+        events = target_turn.setdefault("events", [])
+        if not isinstance(events, list):
+            events = []
+            target_turn["events"] = events
+
+        if normalized_message_id:
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                if (
+                    event.get("type") == "thread.message"
+                    and str(event.get("message_id") or "").strip() == normalized_message_id
+                ):
+                    return {
+                        "status": "duplicate",
+                        "thread_key": canonical_key,
+                        "message_id": normalized_message_id,
+                    }
+
+        event_payload: dict[str, Any] = {
+            "type": "thread.message",
+            "message_type": message_type,
+            "source": normalized_source,
+            "text": normalized_text,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        if normalized_user_id:
+            event_payload["user_id"] = normalized_user_id
+        if normalized_message_id:
+            event_payload["message_id"] = normalized_message_id
+        events.append(event_payload)
+
+        if message_type == "context":
+            queue = session.setdefault("pending_context_messages", [])
+            if not isinstance(queue, list):
+                queue = []
+                session["pending_context_messages"] = queue
+            queue.append(
+                {
+                    "text": normalized_text,
+                    "source": normalized_source,
+                    "user_id": normalized_user_id,
+                    "message_id": normalized_message_id,
+                }
+            )
+            if len(queue) > _MAX_PENDING_CONTEXT_MESSAGES:
+                session["pending_context_messages"] = queue[-_MAX_PENDING_CONTEXT_MESSAGES:]
+
+        session["last_activity"] = time.time()
+
+    _persist_turn(canonical_key, target_turn)
+    _persist_session(session, canonical_key)
+    return {
+        "status": "accepted",
+        "thread_key": canonical_key,
+        "message_id": normalized_message_id,
+        "message_type": message_type,
+    }
+
+
+def drain_pending_context_messages(thread_key: str) -> list[dict[str, Any]]:
+    found = _find_session_for_thread(thread_key)
+    if not found:
+        return []
+    _, session = found
+    with _sessions_lock:
+        pending = session.get("pending_context_messages")
+        if not isinstance(pending, list) or not pending:
+            return []
+        items = [item for item in pending if isinstance(item, dict)]
+        session["pending_context_messages"] = []
+    return items
 
 
 def has_active_non_engineer_session(thread_key: str) -> tuple[bool, str | None]:
@@ -887,6 +1062,7 @@ class AgentClient:
             "created_at": time.time(),
             "last_activity": time.time(),
             "turns": [],
+            "pending_context_messages": [],
             "thread_name": None,
         }
         set_session_state(slack_thread_key, session)
@@ -928,6 +1104,7 @@ class AgentClient:
         _emit = emit or (lambda _: None)
         rid = request_id or ""
         source_tag = str(source or "api").strip().lower()
+        display_message = _display_user_message(message) or message.strip()
         mirror_to_slack = source_tag in {"thread_ui", "thread-view", "ui"}
         execute_lock = get_execute_lock(slack_thread_key)
         if not execute_lock.acquire(blocking=False):
@@ -957,9 +1134,12 @@ class AgentClient:
                 }
 
             if mirror_to_slack:
+                attributed_message = (
+                    f"<@{user_id}>: {display_message}" if str(user_id or "").strip() else display_message
+                )
                 _post_slack_thread_message(
                     slack_thread_key,
-                    "[Thread Viewer] New instruction:\n" + message,
+                    "[via Thread Viewer] " + attributed_message,
                 )
 
             # Auto-spawn if no session or container is gone
@@ -997,8 +1177,16 @@ class AgentClient:
                 if file_paths:
                     listing = "\n".join(f"- {p}" for p in file_paths)
                     message = f"{message}\n\nAttached files (already downloaded to the container):\n{listing}"
+            pending_context = _format_pending_context_block(
+                drain_pending_context_messages(slack_thread_key)
+            )
+            command_message = message
+            if pending_context:
+                command_message = (
+                    f"{message.rstrip()}\n\n{_THREAD_CONTEXT_DELIMITER}\n{pending_context}"
+                )
 
-            cmd = _build_command(session["harness"], message, session["agent_thread_id"])
+            cmd = _build_command(session["harness"], command_message, session["agent_thread_id"])
 
             started_ts = time.time()
             with _sessions_lock:
@@ -1015,7 +1203,7 @@ class AgentClient:
             # Create the turn on the session immediately so SSE can stream it live
             live_turn: dict[str, Any] = {
                 "turn_id": len(session.get("turns", [])) + 1,
-                "user_message": message,
+                "user_message": display_message,
                 "events": [],
                 "result": "",
                 "user_id": user_id,
@@ -1025,10 +1213,16 @@ class AgentClient:
                 "timed_out": False,
                 "duration_s": 0,
             }
-            if user_id:
-                # Persist lightweight user metadata in the turn event stream so historical
-                # thread views can reconstruct participants without a DB schema change.
-                live_turn["events"].append({"type": "thread.user", "user_id": user_id})
+            live_turn["events"].append(
+                {
+                    "type": "thread.message",
+                    "message_type": "command",
+                    "source": source_tag or "api",
+                    "text": display_message,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    **({"user_id": user_id} if user_id else {}),
+                }
+            )
             with _sessions_lock:
                 session.setdefault("turns", []).append(live_turn)
 
@@ -1258,7 +1452,7 @@ class AgentClient:
             if mirror_to_slack and result_text:
                 _post_slack_thread_message(
                     slack_thread_key,
-                    "[Thread Viewer] Agent update:\n" + result_text,
+                    "[via Thread Viewer] Agent update:\n" + result_text,
                 )
             _emit({"type": "final", **result})
             return result
@@ -1434,6 +1628,7 @@ class AgentClient:
                 "created_at": created.timestamp() if created else time.time(),
                 "last_activity": last_act.timestamp() if last_act else time.time(),
                 "turns": turns,
+                "pending_context_messages": [],
                 "thread_name": row.get("thread_name"),
             }
             set_session_state(key, recovered_session)
@@ -1454,6 +1649,7 @@ class AgentClient:
                         "created_at": time.time(),
                         "last_activity": time.time(),
                         "turns": [],
+                        "pending_context_messages": [],
                         "thread_name": None,
                     }
                     set_session_state(key, recovered_session)

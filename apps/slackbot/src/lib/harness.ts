@@ -280,6 +280,31 @@ export function normalizeThreadKey(threadKey: string): string {
   return `${channel}:${threadTs}`;
 }
 
+export async function postThreadContextMessage(
+  threadKey: string,
+  text: string,
+  options?: {
+    source?: string;
+    userId?: string;
+    messageId?: string;
+    attachments?: FileAttachment[];
+  },
+): Promise<{ status: string }> {
+  const normalizedThreadKey = normalizeThreadKey(threadKey);
+  const payload: Record<string, unknown> = {
+    thread_key: normalizedThreadKey,
+    text,
+    ...(options?.source ? { source: options.source } : {}),
+    ...(options?.userId ? { user_id: options.userId } : {}),
+    ...(options?.messageId ? { message_id: options.messageId } : {}),
+    ...(options?.attachments && options.attachments.length > 0
+      ? { attachments: options.attachments }
+      : {}),
+  };
+  const result = await apiCall("/api/threads/context-message", payload);
+  return { status: String(result.status ?? "accepted") };
+}
+
 export async function startEngineerFlow(
   threadKey: string,
   task: string,
@@ -308,13 +333,21 @@ export async function startEngineerFlow(
 export async function replyEngineerFlow(
   threadKey: string,
   reply: string,
-  attachments?: FileAttachment[]
+  attachments?: FileAttachment[],
+  options?: {
+    source?: string;
+    userId?: string;
+    messageId?: string;
+  },
 ): Promise<{ status: string }> {
   const normalizedThreadKey = normalizeThreadKey(threadKey);
   const result = await apiCall("/slack/reply", {
     thread_key: normalizedThreadKey,
     reply,
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
+    ...(options?.source ? { source: options.source } : {}),
+    ...(options?.userId ? { user_id: options.userId } : {}),
+    ...(options?.messageId ? { message_id: options.messageId } : {}),
   });
   return { status: (result.status as string) || "accepted" };
 }

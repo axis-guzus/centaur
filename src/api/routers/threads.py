@@ -13,15 +13,22 @@ from typing import Annotated, Any
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from starlette.responses import RedirectResponse, StreamingResponse
 
-from api.agent import get_session_state, session_items_snapshot
+from api.agent import get_session_state, record_thread_message, session_items_snapshot
 from api.deps import get_pool, verify_ui_or_api_key
 
 router = APIRouter(
     prefix="/api/threads",
     tags=["threads"],
     dependencies=[Depends(verify_ui_or_api_key)],
+)
+
+_THREAD_CONTEXT_DELIMITER = "---"
+_CONTEXT_HEADER = (
+    "Additional Slack thread context since the last AI instruction "
+    "(ambient discussion from humans):"
 )
 
 
@@ -90,15 +97,16 @@ def _raw_item_call_id(
 def _build_participants_from_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: dict[str, dict[str, Any]] = {}
     for turn in turns:
-        user_id = str(turn.get("user_id") or "").strip()
-        if not user_id:
-            events = turn.get("events")
-            if isinstance(events, list):
-                user_id = _extract_turn_user_id(events) or ""
-        if not user_id:
-            continue
-        if user_id not in seen:
-            seen[user_id] = {"id": user_id, "name": user_id, "avatar_url": None}
+        user_ids: list[str] = []
+        explicit_user_id = str(turn.get("user_id") or "").strip()
+        if explicit_user_id:
+            user_ids.append(explicit_user_id)
+        events = turn.get("events")
+        if isinstance(events, list):
+            user_ids.extend(_extract_turn_user_ids(events))
+        for user_id in user_ids:
+            if user_id not in seen:
+                seen[user_id] = {"id": user_id, "name": user_id, "avatar_url": None}
     return list(seen.values())
 
 
@@ -156,16 +164,18 @@ async def _enrich_participants(
     return enriched
 
 
-def _extract_turn_user_id(events: list[dict[str, Any]]) -> str | None:
+def _extract_turn_user_ids(events: list[dict[str, Any]]) -> list[str]:
+    seen: list[str] = []
     for event in events:
         if not isinstance(event, dict):
             continue
-        if event.get("type") != "thread.user":
+        event_type = str(event.get("type") or "")
+        if event_type not in {"thread.user", "thread.message"}:
             continue
         user_id = str(event.get("user_id") or "").strip()
-        if user_id:
-            return user_id
-    return None
+        if user_id and user_id not in seen:
+            seen.append(user_id)
+    return seen
 
 
 def _build_live_detail(key: str, session: dict[str, Any]) -> dict[str, Any]:
@@ -186,6 +196,50 @@ def _build_live_detail(key: str, session: dict[str, Any]) -> dict[str, Any]:
         "thread_name": session.get("thread_name"),
         "participants": participants,
     }
+
+
+class ContextMessageAttachment(BaseModel):
+    name: str
+    url: str
+
+
+class ContextMessageRequest(BaseModel):
+    thread_key: str
+    text: str
+    source: str | None = None
+    user_id: str | None = None
+    message_id: str | None = None
+    attachments: list[ContextMessageAttachment] = []
+
+
+def _latest_command_message_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for event in reversed(events):
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") != "thread.message":
+            continue
+        if str(event.get("message_type") or "") != "command":
+            continue
+        return event
+    return None
+
+
+def _display_user_message(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    context_idx = cleaned.find(_CONTEXT_HEADER)
+    if context_idx >= 0:
+        cleaned = cleaned[:context_idx].rstrip()
+        if cleaned.endswith(_THREAD_CONTEXT_DELIMITER):
+            cleaned = cleaned[: -len(_THREAD_CONTEXT_DELIMITER)].rstrip()
+    if "# Session Context" in cleaned and _THREAD_CONTEXT_DELIMITER in cleaned:
+        tail = cleaned.rsplit(_THREAD_CONTEXT_DELIMITER, 1)[-1].strip()
+        if tail:
+            return tail
+    if _THREAD_CONTEXT_DELIMITER in cleaned:
+        cleaned = cleaned.split(_THREAD_CONTEXT_DELIMITER, 1)[0].strip()
+    return cleaned
 
 
 @router.get("")
@@ -361,13 +415,15 @@ async def _fetch_pg_detail(pool: asyncpg.Pool, key: str) -> dict[str, Any]:
         events_raw = t["events"]
         if isinstance(events_raw, str):
             events_raw = json.loads(events_raw)
+        if not isinstance(events_raw, list):
+            events_raw = []
         turns.append(
             {
                 "turn_id": t["turn_id"],
                 "user_message": t["user_message"],
                 "events": events_raw,
                 "result": t["result"],
-                "user_id": _extract_turn_user_id(events_raw),
+                "user_id": (_extract_turn_user_ids(events_raw) or [None])[0],
                 "started_at": float(t["started_at"]) if t["started_at"] else None,
                 "finished_at": float(t["finished_at"]) if t["finished_at"] else None,
                 "exit_code": t["exit_code"],
@@ -405,7 +461,9 @@ async def _fetch_pg_participants(pool: asyncpg.Pool, key: str) -> list[dict[str,
         events_raw = row["events"]
         if isinstance(events_raw, str):
             events_raw = json.loads(events_raw)
-        turns.append({"user_id": _extract_turn_user_id(events_raw)})
+        if not isinstance(events_raw, list):
+            events_raw = []
+        turns.append({"events": events_raw})
     return _build_participants_from_turns(turns)
 
 
@@ -441,6 +499,27 @@ async def get_thread(
             except HTTPException:
                 pass
         raise
+
+
+@router.post("/context-message")
+async def post_context_message(payload: ContextMessageRequest) -> dict[str, Any]:
+    text = payload.text.strip()
+    if payload.attachments:
+        lines = [
+            f"- {item.name.strip()}: {item.url.strip()}"
+            for item in payload.attachments
+            if item.name.strip() and item.url.strip()
+        ]
+        if lines:
+            text = f"{text}\n\nAttachments:\n" + "\n".join(lines)
+    return record_thread_message(
+        payload.thread_key,
+        text,
+        message_type="context",
+        source=payload.source,
+        user_id=payload.user_id,
+        message_id=payload.message_id,
+    )
 
 
 # Per-1M token pricing (as of early 2026)
@@ -631,6 +710,35 @@ def _ui_stream_chunks_for_event(
                 },
             }
         )
+    elif event_type == "thread.message":
+        message_type = str(event.get("message_type") or "")
+        text = str(event.get("text") or "").strip()
+        if not text:
+            return chunks
+        base_data = {
+            "id": str(event.get("message_id") or f"turn-{turn_id}-thread-message-{event_index}"),
+            "turn_id": turn_id,
+            "text": text,
+            "source": str(event.get("source") or "unknown"),
+            "user_id": str(event.get("user_id") or "").strip() or None,
+            "created_at": str(event.get("created_at") or ""),
+        }
+        if message_type == "context":
+            chunks.append(
+                {
+                    "type": "data-context-message",
+                    "id": f"turn-{turn_id}-context-{event_index}",
+                    "data": base_data,
+                }
+            )
+        elif message_type == "command":
+            chunks.append(
+                {
+                    "type": "data-user-message",
+                    "id": f"turn-{turn_id}-user-message-{event_index}",
+                    "data": base_data,
+                }
+            )
     elif event_type == "error":
         chunks.append(
             {"type": "error", "errorText": str(event.get("error") or event.get("message") or "")}
@@ -737,6 +845,7 @@ async def stream_thread_ui(
         usage_model: str | None = None
         initialized_live_cursor = False
         turns_with_stream_chunks: set[int] = set()
+        emitted_turn_user_messages: set[str] = set()
         pending_tool_ids: dict[tuple[int, str], list[str]] = {}
         tool_call_counters: dict[tuple[int, str], int] = {}
 
@@ -775,10 +884,18 @@ async def stream_thread_ui(
                     turn_id = int(turn.get("turn_id") or 0)
                     if turn_id <= 0:
                         continue
-                    events = turn.get("events") or []
+                    events_raw = turn.get("events")
+                    events = events_raw if isinstance(events_raw, list) else []
                     last_event_indices[turn_id] = len(events)
                     if turn.get("result"):
                         last_event_indices[-turn_id] = 1
+                    command_event = _latest_command_message_event(events)
+                    if command_event:
+                        message_id = str(command_event.get("message_id") or "").strip()
+                        dedupe_key = f"{turn_id}:{message_id}" if message_id else f"{turn_id}:command"
+                        emitted_turn_user_messages.add(dedupe_key)
+                    elif _display_user_message(str(turn.get("user_message") or "")):
+                        emitted_turn_user_messages.add(f"{turn_id}:fallback")
                     phase = _parse_phase_label(str(turn.get("user_message") or ""))
                     if phase:
                         last_phase_by_turn[turn_id] = phase
@@ -795,33 +912,45 @@ async def stream_thread_ui(
                     last_phase_by_turn[turn_id] = phase
                     any_new_data = True
                     yield f"data: {json.dumps({'type': 'data-phase-progress', 'id': f'turn-{turn_id}-phase', 'data': {'phase': phase, 'turn_id': turn_id}})}\n\n"
-                events = turn.get("events") or []
+                events_raw = turn.get("events")
+                events = events_raw if isinstance(events_raw, list) else []
+                command_event = _latest_command_message_event(events)
+                if not command_event:
+                    fallback_text = _display_user_message(str(turn.get("user_message") or ""))
+                    fallback_key = f"{turn_id}:fallback"
+                    if fallback_text and fallback_key not in emitted_turn_user_messages:
+                        emitted_turn_user_messages.add(fallback_key)
+                        any_new_data = True
+                        yield f"data: {json.dumps({'type': 'start-step'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'data-user-message', 'id': f'turn-{turn_id}-user-fallback', 'data': {'id': f'turn-{turn_id}-user-fallback', 'turn_id': turn_id, 'text': fallback_text, 'source': 'unknown', 'user_id': str(turn.get('user_id') or '').strip() or None, 'created_at': ''}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'finish-step'})}\n\n"
                 start_index = last_event_indices.get(turn_id, 0)
                 turn_had_chunks = False
                 if start_index < len(events):
                     for index in range(start_index, len(events)):
                         event = events[index]
-                        if isinstance(event, dict):
-                            message_model = _extract_usage_model(event)
-                            if message_model:
-                                usage_model = message_model
-                            explicit_usage = _extract_numeric_usage(event)
-                            if _has_usage(explicit_usage):
-                                usage_seen = True
-                                if _is_authoritative_usage_event(event):
-                                    usage_by_turn[turn_id] = explicit_usage
-                                    usage_authoritative_turns.add(turn_id)
-                                elif turn_id not in usage_authoritative_turns:
-                                    previous = usage_by_turn.get(
-                                        turn_id,
-                                        {"input_tokens": 0, "output_tokens": 0},
-                                    )
-                                    usage_by_turn[turn_id] = {
-                                        "input_tokens": previous["input_tokens"]
-                                        + explicit_usage["input_tokens"],
-                                        "output_tokens": previous["output_tokens"]
-                                        + explicit_usage["output_tokens"],
-                                    }
+                        if not isinstance(event, dict):
+                            continue
+                        message_model = _extract_usage_model(event)
+                        if message_model:
+                            usage_model = message_model
+                        explicit_usage = _extract_numeric_usage(event)
+                        if _has_usage(explicit_usage):
+                            usage_seen = True
+                            if _is_authoritative_usage_event(event):
+                                usage_by_turn[turn_id] = explicit_usage
+                                usage_authoritative_turns.add(turn_id)
+                            elif turn_id not in usage_authoritative_turns:
+                                previous = usage_by_turn.get(
+                                    turn_id,
+                                    {"input_tokens": 0, "output_tokens": 0},
+                                )
+                                usage_by_turn[turn_id] = {
+                                    "input_tokens": previous["input_tokens"]
+                                    + explicit_usage["input_tokens"],
+                                    "output_tokens": previous["output_tokens"]
+                                    + explicit_usage["output_tokens"],
+                                }
                         chunks = _ui_stream_chunks_for_event(
                             turn_id,
                             index,
@@ -838,6 +967,13 @@ async def stream_thread_ui(
                         for chunk in chunks:
                             any_new_data = True
                             yield f"data: {json.dumps(chunk, default=str)}\n\n"
+                            if str(chunk.get("type") or "") == "data-user-message":
+                                chunk_data = chunk.get("data") if isinstance(chunk.get("data"), dict) else {}
+                                message_id = str((chunk_data or {}).get("id") or "").strip()
+                                dedupe_key = (
+                                    f"{turn_id}:{message_id}" if message_id else f"{turn_id}:command"
+                                )
+                                emitted_turn_user_messages.add(dedupe_key)
                             chunk_type = str(chunk.get("type") or "")
                             if chunk_type in {"reasoning-start", "reasoning-delta"}:
                                 yield f"data: {json.dumps({'type': 'data-agent-status', 'data': {'text': 'Thinking...'}, 'transient': True})}\n\n"

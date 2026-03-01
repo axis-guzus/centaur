@@ -20,6 +20,14 @@ export type ToolCall = {
   state?: "loading" | "done" | "error";
 };
 
+export type ContextMessageItem = {
+  id: string;
+  text: string;
+  source?: string;
+  userId?: string;
+  createdAt?: string;
+};
+
 export type ToolCallMetaKey = "path" | "query" | "cwd" | "glob" | "recursive" | "lines";
 
 export type ToolCallMetaChip = {
@@ -29,14 +37,23 @@ export type ToolCallMetaChip = {
 };
 
 export type Step =
-  | { type: "phase"; phase: string }
-  | { type: "tool-group"; icon: LucideIcon; summary: string; category: string; calls: ToolCall[] }
-  | { type: "diff"; file: string; lang: string; oldStr: string; newStr: string; result?: string }
-  | { type: "terminal"; command: string; output?: string; exitCode?: number; description: string }
-  | { type: "thinking"; text: string; durationS?: number }
-  | { type: "error"; message: string }
-  | { type: "result"; text: string; streaming?: boolean }
-  | { type: "file-changes"; changes: Array<{ path: string; kind: "add" | "delete" | "update" }> };
+  | { id: string; type: "phase"; phase: string }
+  | {
+      id: string;
+      type: "tool-group";
+      icon: LucideIcon;
+      summary: string;
+      category: string;
+      calls: ToolCall[];
+    }
+  | { id: string; type: "diff"; file: string; lang: string; oldStr: string; newStr: string; result?: string }
+  | { id: string; type: "terminal"; command: string; output?: string; exitCode?: number; description: string }
+  | { id: string; type: "thinking"; text: string; durationS?: number }
+  | { id: string; type: "error"; message: string }
+  | { id: string; type: "result"; text: string; streaming?: boolean }
+  | { id: string; type: "user-message"; text: string; source?: string; userId?: string; createdAt?: string }
+  | { id: string; type: "context-group"; items: ContextMessageItem[] }
+  | { id: string; type: "file-changes"; changes: Array<{ path: string; kind: "add" | "delete" | "update" }> };
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
