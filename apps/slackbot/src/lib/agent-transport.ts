@@ -26,6 +26,20 @@ function normalizeAttachments(value: unknown): ReplyAttachment[] {
     .filter((item) => item.url && item.name);
 }
 
+async function readErrorMessage(response: Response, fallback: string): Promise<string> {
+  const text = await response.text().catch(() => "");
+  if (!text) return fallback;
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; detail?: unknown };
+    if (typeof parsed.error === "string" && parsed.error.trim()) return parsed.error;
+    if (typeof parsed.detail === "string" && parsed.detail.trim()) return parsed.detail;
+  } catch {
+    // Fall through to raw preview.
+  }
+  const preview = text.length > 240 ? `${text.slice(0, 240)}...` : text;
+  return `${fallback}: ${preview}`;
+}
+
 async function openUiStream(
   threadKey: string,
   abortSignal: AbortSignal | undefined,
@@ -73,7 +87,7 @@ async function openUiStream(
           controller.close();
           return;
         }
-        buffer += decoder.decode(value, { stream: true });
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
       }
     },
     cancel() {
@@ -98,6 +112,10 @@ export class AgentThreadTransport<UI_MESSAGE extends UIMessage = UIMessage>
     const text = lastMessage ? extractMessageText(lastMessage) : "";
     const body = (options.body ?? {}) as Record<string, unknown>;
     const route = String(body.route ?? "execute");
+    const harness =
+      typeof body.harness === "string" && body.harness.trim().length > 0
+        ? body.harness.trim()
+        : undefined;
     const attachments = normalizeAttachments(body.attachments);
 
     if (text) {
@@ -115,7 +133,7 @@ export class AgentThreadTransport<UI_MESSAGE extends UIMessage = UIMessage>
           }),
         });
         if (!replyRes.ok) {
-          throw new Error(`reply failed (${replyRes.status})`);
+          throw new Error(await readErrorMessage(replyRes, `Reply failed (${replyRes.status})`));
         }
         const replyData = (await replyRes.json().catch(() => ({}))) as { status?: string; error?: string };
         if (replyData.error) {
@@ -138,10 +156,11 @@ export class AgentThreadTransport<UI_MESSAGE extends UIMessage = UIMessage>
           body: JSON.stringify({
             slack_thread_key: this.threadKey,
             message: text,
+            ...(harness ? { harness } : {}),
           }),
         });
         if (!executeRes.ok) {
-          throw new Error(`execute failed (${executeRes.status})`);
+          throw new Error(await readErrorMessage(executeRes, `Execute failed (${executeRes.status})`));
         }
         const executeData = (await executeRes.json().catch(() => ({}))) as { error?: string };
         if (executeData.error) {

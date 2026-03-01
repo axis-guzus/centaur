@@ -16,6 +16,8 @@ type TokenUsage = {
   model: string | null;
 };
 
+type SendRoute = "reply" | "execute";
+
 export function useThreadStream(threadKey: string) {
   const [thread, setThread] = useState<ThreadDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -133,14 +135,50 @@ export function useThreadStream(threadKey: string) {
     };
   }, [threadKey, fetchThread]);
 
-  const sendReply = useCallback(
-    async (message: string) => {
+  const sendThreadMessage = useCallback(
+    async (message: string, options?: { route?: SendRoute; harness?: ThreadDetail["harness"] }) => {
       const text = message.trim();
       if (!text) return;
-      await chat.sendMessage({ text }, { body: { route: "reply" } });
+      const route = options?.route ?? "execute";
+      await chat.sendMessage(
+        { text },
+        {
+          body: {
+            route,
+            ...(options?.harness ? { harness: options.harness } : {}),
+          },
+        },
+      );
     },
     [chat],
   );
+
+  const interruptThread = useCallback(async () => {
+    const res = await fetch(`${BASE}/api/agent/interrupt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slack_thread_key: threadKey }),
+    });
+    const raw = await res.text().catch(() => "");
+    let message = "";
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { error?: unknown; detail?: unknown };
+        if (typeof parsed.error === "string" && parsed.error.trim()) {
+          message = parsed.error;
+        } else if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+          message = parsed.detail;
+        }
+      } catch {
+        if (!res.ok) message = raw;
+      }
+    }
+
+    if (!res.ok || message) {
+      throw new Error(message || `Interrupt failed (${res.status}).`);
+    }
+  }, [threadKey]);
+
   const liveSteps = useMemo(() => stepsFromUiMessages(chat.messages), [chat.messages]);
 
   return {
@@ -151,7 +189,8 @@ export function useThreadStream(threadKey: string) {
     agentStatus,
     tokenUsage,
     chatStatus: chat.status,
-    sendReply,
+    sendThreadMessage,
+    interruptThread,
     liveSteps,
   };
 }

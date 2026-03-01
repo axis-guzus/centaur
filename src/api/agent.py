@@ -1755,9 +1755,14 @@ class AgentClient:
                 "codex": "codex",
                 "pi-mono": "pi",
             }.get(harness, "amp")
-            container.exec_run(["pkill", "-INT", "-f", target], detach=True)
-        except Exception:
-            pass
+            result = container.exec_run(["pkill", "-INT", "-f", target], detach=False)
+            exit_code = result.exit_code if hasattr(result, "exit_code") else None
+            if exit_code not in (0,):
+                return {"error": f"No active {target} process to interrupt."}
+        except NotFound:
+            return {"error": f"No active container for '{slack_thread_key}'"}
+        except Exception as exc:
+            return {"error": f"Failed to interrupt run: {exc}"}
 
         return {"session_id": slack_thread_key, "status": "interrupted"}
 

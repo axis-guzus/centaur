@@ -4,10 +4,10 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { CircleStop, Info, LoaderCircle, Menu, RefreshCw, Timer } from "lucide-react";
 import { ActivityFeed } from "@/components/thread/activity-feed";
+import { MessageInput } from "@/components/thread/message-input";
 import { useThreadLayout } from "@/components/thread/thread-layout";
 import { ParticipantAvatars } from "@/components/thread/participant-avatars";
 import { PhaseProgress } from "@/components/thread/phase-progress";
-import { ReplyInput } from "@/components/thread/reply-input";
 import { threadName } from "@/lib/thread-name";
 import { useThreadStream } from "@/hooks/use-thread-stream";
 import { useElapsed } from "@/hooks/use-elapsed";
@@ -15,7 +15,29 @@ import { HarnessBadge } from "@/components/ui/harness-badge";
 import { StateDot } from "@/components/ui/state-dot";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { BASE } from "@/lib/constants";
+
+const ENGINEER_REPLY_ONLY_MESSAGE = "Engineer threads accept input only while waiting for a reply.";
+
+function isRunBusyError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("already in progress") ||
+    message.includes("run is already in progress") ||
+    message.includes("already running") ||
+    message.includes("in progress for this thread")
+  );
+}
+
+function isBenignInterruptError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("no session") ||
+    message.includes("no active container") ||
+    (message.includes("no active") && (message.includes("interrupt") || message.includes("process")))
+  );
+}
 
 export default function ThreadDetailPage() {
   const params = useParams();
@@ -29,7 +51,8 @@ export default function ThreadDetailPage() {
     agentStatus,
     tokenUsage,
     chatStatus,
-    sendReply,
+    sendThreadMessage,
+    interruptThread,
     liveSteps,
   } = useThreadStream(threadKey);
   const humanName = thread?.thread_name || threadName(threadKey);
@@ -38,7 +61,9 @@ export default function ThreadDetailPage() {
   const isEngineer = thread?.harness === "engineer";
   const isWaiting = thread?.state === "waiting";
   const isRunning = thread?.state === "running" || thread?.state === "working";
-  const canInterrupt = !!thread && !isEngineer && isRunning;
+  const isAgentRunning = isRunning;
+  const canSendFromComposer = !isEngineer || isWaiting;
+  const canInterrupt = !!thread && !isEngineer && isAgentRunning;
   const activeTurnStartedAt =
     thread && thread.turns.length > 0 ? thread.turns[thread.turns.length - 1]?.started_at : null;
   const elapsedAnchor = isRunning ? activeTurnStartedAt : thread?.last_activity;
@@ -50,30 +75,87 @@ export default function ThreadDetailPage() {
     : "-- tok / --";
   const phases = liveSteps.flatMap((step) => (step.type === "phase" ? [step.phase] : []));
 
-  const interruptRun = useCallback(async () => {
-    if (!thread || !canInterrupt || isInterrupting) return;
+  const stopThreadRun = useCallback(async (options?: { suppressError?: boolean }) => {
+    if (!thread || !canInterrupt || isInterrupting) return false;
     setInterruptError(null);
     setIsInterrupting(true);
     try {
-      const res = await fetch(`${BASE}/api/agent/interrupt`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slack_thread_key: threadKey }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.error) {
-        const message =
-          typeof data?.error === "string"
-            ? data.error
-            : `Interrupt failed${res.ok ? "" : ` (${res.status})`}.`;
-        setInterruptError(message);
-        return;
-      }
+      await interruptThread();
       fetchThread();
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Interrupt failed.";
+      if (!options?.suppressError) {
+        setInterruptError(message);
+      }
+      throw new Error(message);
     } finally {
       setIsInterrupting(false);
     }
-  }, [canInterrupt, fetchThread, isInterrupting, thread, threadKey]);
+  }, [canInterrupt, fetchThread, interruptThread, isInterrupting, thread]);
+
+  const sendFromComposer = useCallback(
+    async (message: string) => {
+      if (!thread) return false;
+      setInterruptError(null);
+      if (!canSendFromComposer) {
+        throw new Error(ENGINEER_REPLY_ONLY_MESSAGE);
+      }
+      const route = isEngineer && isWaiting ? "reply" : "execute";
+
+      if (isAgentRunning && canInterrupt) {
+        const shouldInterrupt = window.confirm(
+          "This will interrupt the current run and send your new message. Continue?",
+        );
+        if (!shouldInterrupt) return false;
+        try {
+          await stopThreadRun({ suppressError: true });
+        } catch (error) {
+          if (!isBenignInterruptError(error)) throw error;
+          setInterruptError(null);
+        }
+      }
+
+      const sendOnce = async () => {
+        await sendThreadMessage(message, {
+          route,
+          ...(route === "execute"
+            ? { harness: thread.harness === "engineer" ? "amp" : thread.harness }
+            : {}),
+        });
+      };
+
+      const maxAttempts = route === "execute" ? 6 : 1;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        try {
+          await sendOnce();
+          setInterruptError(null);
+          fetchThread();
+          return true;
+        } catch (error) {
+          if (!isRunBusyError(error) || attempt === maxAttempts - 1) throw error;
+          await fetchThread();
+          const retryDelayMs = Math.min(2000, 200 * 2 ** attempt);
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, retryDelayMs);
+          });
+        }
+      }
+
+      return false;
+    },
+    [
+      fetchThread,
+      isAgentRunning,
+      canInterrupt,
+      canSendFromComposer,
+      isEngineer,
+      isWaiting,
+      sendThreadMessage,
+      stopThreadRun,
+      thread,
+    ],
+  );
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -94,12 +176,12 @@ export default function ThreadDetailPage() {
         if (!window.confirm("Stop the running agent for this thread?")) {
           return;
         }
-        void interruptRun();
+        void stopThreadRun().catch(() => undefined);
       }
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [canInterrupt, fetchThread, interruptRun]);
+  }, [canInterrupt, fetchThread, stopThreadRun]);
 
   useEffect(() => {
     if (!thread) return;
@@ -216,7 +298,7 @@ export default function ThreadDetailPage() {
             {canInterrupt && (
               <button
                 type="button"
-                onClick={interruptRun}
+                onClick={() => void stopThreadRun().catch(() => undefined)}
                 disabled={isInterrupting}
                 className="inline-flex cursor-pointer items-center gap-1 rounded-sm border-none bg-transparent p-0 text-[11px] text-destructive transition-colors hover:opacity-80 disabled:opacity-60"
               >
@@ -269,11 +351,17 @@ export default function ThreadDetailPage() {
       <div className="mx-auto flex min-h-0 w-full max-w-[980px] flex-1 flex-col">
         <ActivityFeed steps={liveSteps} state={thread.state} participants={thread.participants} />
 
-        {isEngineer && isWaiting && (
-          <div className="shrink-0 px-4 pb-3 sm:px-5">
-            <ReplyInput threadKey={thread.slack_thread_key} onSend={sendReply} />
-          </div>
-        )}
+        <div className="shrink-0 px-5 pb-3">
+          <MessageInput
+            mode={isEngineer && isWaiting ? "reply" : "execute"}
+            state={thread.state}
+            isAgentRunning={canInterrupt}
+            canSend={canSendFromComposer}
+            blockedReason={ENGINEER_REPLY_ONLY_MESSAGE}
+            onSend={sendFromComposer}
+            onStop={stopThreadRun}
+          />
+        </div>
       </div>
     </div>
   );
