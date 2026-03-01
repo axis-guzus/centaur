@@ -57,3 +57,31 @@ def test_pi_tool_result_without_linkage_is_dropped() -> None:
         "isError": False,
     }
     assert normalize_harness_event("pi-mono", raw_event) == []
+
+
+def test_codex_stringified_arguments_and_tool_use_id_alias_are_supported() -> None:
+    started = {
+        "type": "item.started",
+        "item": {
+            "type": "tool_call",
+            "toolName": "read_file",
+            "toolUseId": "toolu_42",
+            "arguments": '{"path":"src/api/app.py"}',
+        },
+    }
+    events = normalize_harness_event("codex", started)
+    content = events[0]["message"]["content"][0]
+
+    assert content["id"] == "toolu_42"
+    assert content["name"] == "read_file"
+    assert content["input"] == {"path": "src/api/app.py"}
+
+
+def test_codex_reasoning_item_updated_emits_reasoning_event() -> None:
+    updated = {
+        "type": "item.updated",
+        "item": {"type": "reasoning", "thinking": "Checking edge cases"},
+    }
+    assert normalize_harness_event("codex", updated) == [
+        {"type": "reasoning", "text": "Checking edge cases"}
+    ]
