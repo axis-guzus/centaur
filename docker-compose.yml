@@ -196,12 +196,21 @@ services:
 
 volumes:
   pgdata:
+    external: true
+    name: ai_v2_pgdata
   redisdata:
   grafanadata:
+    external: true
+    name: ai_v2_grafanadata
   prometheusdata:
+    external: true
+    name: ai_v2_prometheusdata
   lokidata:
+    external: true
+    name: ai_v2_lokidata
   firewall-certs:
-    name: firewall-certs
+    external: true
+    name: ai_v2_firewall-certs
 
 networks:
   secrets_net:
