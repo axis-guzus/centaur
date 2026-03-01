@@ -903,10 +903,10 @@ def _container_env() -> list[str]:
         # Stubs must look like valid keys so CLIs use direct-to-API auth
         # flows (BYOK) instead of provider proxies or interactive login.
         # The firewall overwrites these at the HTTP level with real keys.
-        "ANTHROPIC_API_KEY=sk-ant-proxy-managed-000000000000000000000000000000000000000000000000",
-        "OPENAI_API_KEY=sk-proxy-managed-000000000000000000000000000000000000000000",
+        "ANTHROPIC_API_KEY=sk-ant-api03-stub000000000000000000000000000000000000000000000000AA",
+        "OPENAI_API_KEY=sk-proj-stub0000000000000000000000000000000000000000000000000000",
         "AMP_API_KEY=FIREWALL_INJECTED",
-        "GITHUB_TOKEN=ghp_proxy_managed_0000000000000000000000000000",
+        "GITHUB_TOKEN=ghp_stub0000000000000000000000000000000000000",
         f"HTTPS_PROXY=http://{firewall_host}:8080",
         f"HTTP_PROXY=http://{firewall_host}:8080",
         f"https_proxy=http://{firewall_host}:8080",
