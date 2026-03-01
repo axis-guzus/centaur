@@ -159,7 +159,7 @@ class SensorTowerClient:
         if category:
             params["category"] = category
         else:
-            params["category"] = "36"  # Overall apps
+            params["category"] = "0"  # Overall apps
 
         if date:
             params["date"] = self._format_date(date)
