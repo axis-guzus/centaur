@@ -12,13 +12,18 @@ jobs:
   deploy:
     runs-on: self-hosted
     env:
-      DEPLOY_DIR: /home/ubuntu/github/paradigmxyz/ai_v2
+      DEPLOY_DIR: ${{ github.workspace }}
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
     defaults:
       run:
-        working-directory: /home/ubuntu/github/paradigmxyz/ai_v2
+        working-directory: ${{ github.workspace }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Pull latest
         run: |
           git fetch origin main
