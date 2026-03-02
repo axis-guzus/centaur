@@ -232,6 +232,16 @@ async def _refresh_loop(initial_delay: int) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     global _last_refresh_error
+    token = os.environ.get("OP_SERVICE_ACCOUNT_TOKEN", "")
+    if not token:
+        log.critical(
+            "OP_SERVICE_ACCOUNT_TOKEN is not set. "
+            "The secrets container MUST be started via CI (GitHub Actions) "
+            "which injects this token. NEVER manually recreate this container. "
+            "Run: gh workflow run deploy.yml --repo paradigmxyz/ai_v2"
+        )
+        raise SystemExit(1)
+
     log.info("loading secrets from vault '%s' ...", _VAULT_NAME)
     initial_delay = _REFRESH_INTERVAL
     try:

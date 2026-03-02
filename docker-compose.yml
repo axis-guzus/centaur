@@ -23,6 +23,10 @@ services:
       timeout: 5s
       retries: 5
 
+  # ⚠️  NEVER manually recreate this container — it requires OP_SERVICE_ACCOUNT_TOKEN
+  # which is only injected by CI (GitHub Actions).  Manual `docker compose up -d secrets`
+  # will start it without the token, breaking all secret resolution.
+  # To redeploy: gh workflow run deploy.yml --repo paradigmxyz/ai_v2
   secrets:
     build: .
     command: ["/app/.venv/bin/uvicorn", "secret_manager.app:app", "--host", "0.0.0.0", "--port", "8100"]

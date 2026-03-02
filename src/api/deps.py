@@ -67,18 +67,29 @@ async def verify_ui_or_api_key(
     request: Request,
     x_api_key: Annotated[str | None, Header()] = None,
 ) -> str:
-    """Accept either nginx-forwarded auth (X-Forwarded-User) or an API key.
+    """Accept nginx-forwarded auth, Docker bridge inter-service calls, or an API key.
 
-    When the request comes through nginx with a valid session cookie, nginx
-    sets ``X-Forwarded-User`` via ``auth_request``.  Only requests from
-    nginx's IP are trusted — sandboxes calling the API directly cannot
-    spoof this header.
+    Trust model for /api/threads (UI) routes:
+    - Nginx sets X-Forwarded-User via auth_request → trusted if from Docker bridge IP
+    - Internal services (slackbot) call directly from Docker bridge → trusted
+    - External callers must provide a valid API key (Bearer token)
+
+    Sandbox containers use verify_api_key (agent/tools routes) which does NOT
+    have the Docker bridge bypass.
     """
-    forwarded_user = request.headers.get("x-forwarded-user")
-    if forwarded_user:
-        client_ip = request.client.host if request.client else ""
-        if client_ip.startswith(_TRUSTED_PREFIXES) or client_ip.startswith(_NGINX_IP_PREFIX):
+    client_ip = request.client.host if request.client else ""
+
+    # Localhost always trusted
+    if client_ip.startswith(_TRUSTED_PREFIXES):
+        return "localhost-bypass"
+
+    # Docker bridge network — trusted for inter-service calls
+    if client_ip.startswith(_NGINX_IP_PREFIX):
+        forwarded_user = request.headers.get("x-forwarded-user")
+        if forwarded_user:
             return "nginx"
+        return "docker-bridge-bypass"
+
     return await verify_api_key(request, x_api_key)
 
 
