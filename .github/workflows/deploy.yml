@@ -14,14 +14,14 @@ jobs:
     # Restrict deploys to the Docker-capable self-hosted runner (ai-v2-deploy).
     runs-on: [self-hosted, linux, x64, docker]
     env:
-      DEPLOY_DIR: ${{ github.workspace }}
+      DEPLOY_DIR: /home/ubuntu/github/paradigmxyz/ai_v2
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       API_SECRET_KEY: ${{ secrets.API_SECRET_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
     defaults:
       run:
-        working-directory: ${{ github.workspace }}
+        working-directory: /home/ubuntu/github/paradigmxyz/ai_v2
 
     steps:
       - name: Checkout repository
@@ -29,10 +29,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Pull latest
+      - name: Sync canonical dir
         run: |
           git fetch origin main
-          git checkout main
           git reset --hard origin/main
 
       - name: Ensure external volumes exist
@@ -43,6 +42,7 @@ jobs:
 
       - name: Detect changes
         id: changes
+        working-directory: ${{ github.workspace }}
         run: |
           BEFORE="${{ github.event.before }}"
           if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
