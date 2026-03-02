@@ -75,11 +75,7 @@ jobs:
 
       - name: Verify Slackbot package manager consistency
         if: steps.changes.outputs.slackbot == 'true'
-        run: |
-          test ! -f apps/slackbot/package-lock.json
-          cd apps/slackbot
-          # Avoid writing /usr/bin shims on self-hosted runners without root.
-          corepack pnpm install --frozen-lockfile
+        run: test ! -f apps/slackbot/package-lock.json
 
       # Infra change → rebuild entire stack (docker-compose, Dockerfile, services/, monitoring/)
       - name: Deploy all services
