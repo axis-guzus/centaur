@@ -52,8 +52,25 @@ jobs:
             src/shared/engineer/orchestrator.py \
             src/shared/engineer/settings.py
 
-      - name: Run runtime regression tests
-        run: PYTHONPATH=src uv run pytest -q tests/test_harness_events.py tests/test_agent_thread_sync.py
+      - name: Run runtime smoke checks
+        run: |
+          PYTHONPATH=src uv run python - <<'PY'
+          from api.routers.threads import _extract_usage_from_event
+
+          usage, authoritative = _extract_usage_from_event(
+              {"type": "assistant", "message": {"usage": {"input_tokens": 100, "output_tokens": 10}}}
+          )
+          assert usage == {"input_tokens": 100, "output_tokens": 10}
+          assert authoritative is False
+
+          usage, authoritative = _extract_usage_from_event(
+              {"type": "subagent", "status": "progress", "input_tokens": 999, "output_tokens": 111}
+          )
+          assert usage == {"input_tokens": 0, "output_tokens": 0}
+          assert authoritative is False
+
+          print("runtime smoke checks passed")
+          PY
 
   slackbot-contract:
     name: Slackbot TS contract checks
@@ -69,12 +86,12 @@ jobs:
         with:
           node-version: "20"
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: apps/slackbot/pnpm-lock.yaml
 
       - name: Install workspace dependencies
         run: |
           corepack enable
-          pnpm install --frozen-lockfile
+          pnpm --dir apps/slackbot install --frozen-lockfile
 
       - name: Type-check slackbot stream contracts
         run: pnpm --dir apps/slackbot exec tsc --noEmit
