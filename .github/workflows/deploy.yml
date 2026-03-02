@@ -11,8 +11,8 @@ concurrency:
 
 jobs:
   deploy:
-    # Restrict deploys to the Docker-capable self-hosted runner labels.
-    runs-on: [self-hosted, linux, x64]
+    # Restrict deploys to the Docker-capable self-hosted runner (ai-v2-deploy).
+    runs-on: [self-hosted, linux, x64, docker]
     env:
       DEPLOY_DIR: ${{ github.workspace }}
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
