@@ -149,7 +149,7 @@ export function ThreadInfoSheet({
   function copyLink() {
     if (typeof window === "undefined") return;
     if (!navigator.clipboard?.writeText) return;
-    const viewerUrl = `${window.location.origin}/threads/${encodeURIComponent(thread.slack_thread_key)}`;
+    const viewerUrl = `${window.location.origin}/${encodeURIComponent(thread.slack_thread_key)}`;
     void navigator.clipboard
       .writeText(viewerUrl)
       .then(() => onClose())

@@ -60,6 +60,7 @@ export function ParticipantAvatars({
                   <img
                     src={participant.avatar_url}
                     alt={label}
+                    loading="lazy"
                     className="w-full h-full object-cover"
                   />
                 ) : (

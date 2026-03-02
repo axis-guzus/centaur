@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowUp, Loader2, Square } from "lucide-react";
 import { useHasHover } from "@/hooks/use-media-query";
-import { useKeyboardHeight } from "@/hooks/use-visual-viewport";
 import { cn } from "@/lib/utils";
 
 type InputMode = "idle" | "running" | "waiting" | "error";
@@ -30,12 +29,9 @@ const PLACEHOLDERS: Record<InputMode, string> = {
 export function MessageInput({ mode, onSend, onStop, className }: MessageInputProps) {
   const [value, setValue] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [isFocused, setIsFocused] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const hasHover = useHasHover();
-  const keyboardHeight = useKeyboardHeight();
-  const effectiveKeyboardHeight = isFocused ? keyboardHeight : 0;
 
   const resize = useCallback(() => {
     const el = textareaRef.current;
@@ -101,15 +97,15 @@ export function MessageInput({ mode, onSend, onStop, className }: MessageInputPr
   }, []);
 
   return (
-    <div
-      className={cn("flex-shrink-0 border-t border-border bg-background px-3 py-2 transition-[padding] duration-200", className)}
-      style={{
-        paddingBottom: `calc(max(8px, env(safe-area-inset-bottom)) + ${effectiveKeyboardHeight}px)`,
-      }}
-    >
+    <div className={cn("flex-shrink-0 bg-background px-3 pb-3 pt-2", className)}>
       <form
         onSubmit={(e) => { e.preventDefault(); void handleSend(); }}
-        className="flex items-end gap-2"
+        className={cn(
+          "relative max-w-[720px] mx-auto",
+          "rounded-2xl border border-border/60 bg-secondary/40",
+          "focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
+          "transition-colors",
+        )}
         aria-label="Message composer"
       >
         <label htmlFor="chat-input" className="sr-only">Message</label>
@@ -119,19 +115,16 @@ export function MessageInput({ mode, onSend, onStop, className }: MessageInputPr
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          onFocus={() => setIsFocused(true)}
-          onBlur={() => setIsFocused(false)}
           placeholder={PLACEHOLDERS[mode]}
           disabled={submitting}
           rows={1}
           aria-describedby="chat-input-hint"
           className={cn(
-            "flex-1 min-w-0 min-h-[44px] resize-none",
+            "w-full min-h-[44px] resize-none",
             "text-[16px] md:text-sm leading-[22px]",
-            "bg-secondary/50 rounded-xl px-4 py-2.5",
-            "border border-border/50 focus:border-ring focus:ring-1 focus:ring-ring",
+            "bg-transparent rounded-2xl pl-4 pr-14 py-3",
             "placeholder:text-muted-foreground text-foreground",
-            "outline-none transition-colors",
+            "outline-none border-none focus:ring-0",
             submitting && "opacity-50",
           )}
           style={{ maxHeight: MAX_HEIGHT, fieldSizing: "content" } as React.CSSProperties}
@@ -140,38 +133,40 @@ export function MessageInput({ mode, onSend, onStop, className }: MessageInputPr
           {hasHover ? "Press Enter to send, Shift+Enter for a new line" : "Tap send to submit"}
         </span>
 
-        {submitting ? (
-          <button
-            type="button"
-            disabled
-            className="size-[44px] flex-shrink-0 rounded-xl flex items-center justify-center bg-primary/60 text-primary-foreground"
-          >
-            <Loader2 className="size-5 animate-spin" />
-          </button>
-        ) : showStop ? (
-          <button
-            type="button"
-            onClick={() => void handleStop()}
-            className="size-[44px] flex-shrink-0 rounded-xl flex items-center justify-center bg-destructive/80 text-destructive-foreground transition-all duration-150"
-            aria-label="Stop agent"
-          >
-            <Square className="size-4" />
-          </button>
-        ) : (
-          <button
-            type="submit"
-            disabled={!hasText}
-            className={cn(
-              "size-[44px] flex-shrink-0 rounded-xl flex items-center justify-center transition-all duration-150",
-              hasText
-                ? "bg-primary text-primary-foreground"
-                : "bg-primary/40 text-primary-foreground/40 pointer-events-none",
-            )}
-            aria-label="Send message"
-          >
-            <ArrowUp className="size-5" />
-          </button>
-        )}
+        <div className="absolute right-2 bottom-2">
+          {submitting ? (
+            <button
+              type="button"
+              disabled
+              className="size-8 flex-shrink-0 rounded-lg flex items-center justify-center bg-primary/60 text-primary-foreground"
+            >
+              <Loader2 className="size-4 animate-spin" />
+            </button>
+          ) : showStop ? (
+            <button
+              type="button"
+              onClick={() => void handleStop()}
+              className="size-8 flex-shrink-0 rounded-lg flex items-center justify-center bg-destructive/80 text-destructive-foreground transition-all duration-150"
+              aria-label="Stop agent"
+            >
+              <Square className="size-3.5" />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!hasText}
+              className={cn(
+                "size-8 flex-shrink-0 rounded-lg flex items-center justify-center transition-all duration-150",
+                hasText
+                  ? "bg-foreground text-background"
+                  : "bg-muted text-muted-foreground/60 pointer-events-none",
+              )}
+              aria-label="Send message"
+            >
+              <ArrowUp className="size-4" />
+            </button>
+          )}
+        </div>
       </form>
     </div>
   );

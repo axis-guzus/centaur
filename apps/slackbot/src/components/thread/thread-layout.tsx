@@ -79,9 +79,8 @@ function useSidebarCollapsedState(): [boolean, (collapsed: boolean) => void] {
 }
 
 function parseSelectedThreadKey(pathname: string): string | null {
-  const prefix = "/threads/";
-  if (!pathname.startsWith(prefix)) return null;
-  const encoded = pathname.slice(prefix.length).split("/")[0];
+  if (pathname === "/" || pathname === "") return null;
+  const encoded = pathname.slice(1).split("/")[0];
   if (!encoded) return null;
   try {
     return decodeURIComponent(encoded);

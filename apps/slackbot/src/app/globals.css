@@ -54,14 +54,6 @@
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
 
-html {
-  touch-action: manipulation;
-}
-
-* {
-  -webkit-tap-highlight-color: transparent;
-}
-
 [data-slot="badge"] {
   font-family: var(--font-mono);
   letter-spacing: 0.05em;
@@ -76,19 +68,23 @@ textarea {
 .step-item {
   opacity: 1;
   transform: translateY(0);
-  transition: opacity 200ms ease-out, transform 200ms ease-out;
+  transition: opacity 300ms ease, transform 300ms ease;
   content-visibility: auto;
-  contain-intrinsic-size: auto 80px;
+  contain-intrinsic-size: auto 40px;
   @starting-style {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(8px);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .step-item {
-    transition: none;
-    transform: none;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 
   .streaming-cursor::after,
@@ -106,6 +102,14 @@ textarea {
     background: var(--background);
     color: var(--foreground);
   }
+}
+
+html {
+  touch-action: manipulation;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
 }
 
 .thread-shell {
@@ -187,6 +191,26 @@ textarea {
 .step-item [data-slot="badge"],
 .copy-btn {
   user-select: none;
+}
+
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.thin-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  background-clip: content-box;
 }
 
 @media (pointer: coarse) {

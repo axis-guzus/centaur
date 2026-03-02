@@ -37,7 +37,7 @@ function ToolCallItem({ call, isMobile }: { call: ToolCall; isMobile: boolean })
           <Tooltip>
             <TooltipTrigger asChild>
               <span className="ml-auto tabular-nums text-[11px]">
-                {call.output.length.toLocaleString()} ch
+                {call.output.length.toLocaleString()} chars
               </span>
             </TooltipTrigger>
             <TooltipContent>

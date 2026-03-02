@@ -129,7 +129,7 @@ export function ThreadDetailHeader({
         </button>
 
         <Link
-          href="/threads"
+          href="/"
           scroll={false}
           aria-label="Back to threads"
           className="hidden md:flex text-muted-foreground text-xs hover:text-foreground transition-colors mr-1 rounded-sm"

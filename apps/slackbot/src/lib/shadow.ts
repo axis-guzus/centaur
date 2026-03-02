@@ -167,7 +167,7 @@ async function runShadow(
     await setShadowTs(parentTs, shadowTs);
 
     // Post thread viewer link
-    const viewerUrl = `${THREAD_VIEWER_URL}/threads/${encodeURIComponent(shadowThreadKey)}`;
+    const viewerUrl = `${THREAD_VIEWER_URL}/${encodeURIComponent(shadowThreadKey)}`;
     await postSlackMessage({
       channel: AI_V2_CHANNEL,
       thread_ts: shadowTs,

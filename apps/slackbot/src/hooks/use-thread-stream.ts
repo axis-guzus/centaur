@@ -5,6 +5,8 @@ import type { ThreadDetail } from "@/lib/types";
 import { BASE } from "@/lib/constants";
 import { AgentThreadTransport } from "@/lib/agent-transport";
 import { stepsFromUiMessages } from "@/lib/chat-steps";
+import { stepsFromTurns } from "@/lib/turn-steps";
+import type { Step } from "@/lib/describe";
 
 export type TokenUsage = {
   input_tokens: number;
@@ -16,26 +18,35 @@ export type TokenUsage = {
   model: string | null;
 };
 
-const POLL_MS_VISIBLE = 5000;
-const RETRY_BASE_MS = 1000;
-const RETRY_MAX_MS = 30000;
-const RETRY_MAX_ATTEMPTS = 8;
-
 type SendRoute = "reply" | "execute";
 
-export function useThreadStream(threadKey: string) {
-  const [thread, setThread] = useState<ThreadDetail | null>(null);
+function isActiveState(state: string | undefined): boolean {
+  return state === "running" || state === "working";
+}
+
+export function useThreadStream(threadKey: string, initialThread?: Partial<ThreadDetail> | null) {
+  const [thread, setThread] = useState<ThreadDetail | null>(() => {
+    if (!initialThread) return null;
+    return {
+      turns: [],
+      participants: [],
+      ...initialThread,
+    } as ThreadDetail;
+  });
   const [error, setError] = useState<string | null>(null);
-  const [isPolling, setIsPolling] = useState(false);
   const [agentStatus, setAgentStatus] = useState<string | null>(null);
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null);
+  // Whether we've connected (or decided not to connect) the SSE stream
+  const [sseConnected, setSseConnected] = useState(false);
   const stopStreamRef = useRef<(() => void) | null>(null);
   const resumeStreamRef = useRef<(() => void) | null>(null);
   const transport = useMemo(() => new AgentThreadTransport(threadKey), [threadKey]);
+
   const chat = useChat({
     id: `thread-${threadKey}`,
     transport,
-    resume: true,
+    // Don't auto-resume — we control when to connect based on thread state
+    resume: false,
     experimental_throttle: 50,
     dataPartSchemas: {
       "agent-status": z.object({ text: z.string() }),
@@ -92,12 +103,25 @@ export function useThreadStream(threadKey: string) {
         authoritative: z.boolean().optional(),
         model: z.string().nullable().optional(),
       }),
+      "thread-detail": z.record(z.string(), z.unknown()),
     },
     onData: (part) => {
       if (part.type === "data-agent-status") {
         const data = part.data as { text?: string };
         const text = String(data.text ?? "").trim();
         setAgentStatus(text || null);
+      } else if (part.type === "data-thread-detail") {
+        const data = part.data as Record<string, unknown>;
+        setThread(prev => {
+          if (Array.isArray(data.turns)) {
+            return { participants: [], ...data } as unknown as ThreadDetail;
+          }
+          if (prev) {
+            return { ...prev, ...data } as ThreadDetail;
+          }
+          return { turns: [], participants: [], ...data } as unknown as ThreadDetail;
+        });
+        setError(null);
       } else if (part.type === "data-token-usage") {
         const payload = part.data as {
           input_tokens?: number;
@@ -126,6 +150,7 @@ export function useThreadStream(threadKey: string) {
       setAgentStatus(null);
     },
   });
+
   useEffect(() => {
     const stop = (chat as { stop?: () => void }).stop;
     const resume = (chat as { resumeStream?: () => void }).resumeStream;
@@ -165,85 +190,57 @@ export function useThreadStream(threadKey: string) {
     }
   }, [threadKey]);
 
+  // Reset state when threadKey changes; fetch full detail, then connect SSE only if running
   useEffect(() => {
-    setThread(null);
+    setThread(
+      initialThread
+        ? ({ turns: [], participants: [], ...initialThread } as ThreadDetail)
+        : null,
+    );
     setError(null);
-    setIsPolling(false);
     setAgentStatus(null);
     setTokenUsage(null);
-    void fetchThread();
+    setSseConnected(false);
 
-    let poll: ReturnType<typeof setTimeout> | null = null;
+    // Fetch full thread from Postgres, then decide on SSE
+    void fetchThread().then((ok) => {
+      // SSE connection is handled by the effect that watches thread.state
+      if (!ok) setSseConnected(true); // Don't try SSE if fetch failed
+    });
+  }, [threadKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Connect SSE only when thread is running/working
+  // Narrow dependency to thread.state (rule: rerender-dependencies)
+  const threadState = thread?.state;
+  useEffect(() => {
+    if (sseConnected) return;
+    if (!threadState) return;
+
+    if (isActiveState(threadState)) {
+      setSseConnected(true);
+      if (resumeStreamRef.current) {
+        resumeStreamRef.current();
+      }
+    } else {
+      setSseConnected(true);
+    }
+  }, [threadState, sseConnected]);
+
+  // Visibility handler: fetch once if tab was hidden >30s
+  useEffect(() => {
     let disconnectTs = 0;
-    let retryAttempt = 0;
-
-    const stopLiveStream = () => {
-      stopStreamRef.current?.();
-    };
-    const resumeLiveStream = () => {
-      resumeStreamRef.current?.();
-    };
-
-    const schedulePoll = (ms: number) => {
-      if (poll) clearTimeout(poll);
-      poll = setTimeout(() => {
-        setIsPolling(true);
-        void fetchThread()
-          .then((ok) => {
-            if (ok) {
-              retryAttempt = 0;
-              schedulePoll(POLL_MS_VISIBLE);
-              return;
-            }
-            retryAttempt = Math.min(retryAttempt + 1, RETRY_MAX_ATTEMPTS);
-            const exp = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** retryAttempt);
-            const jitter = Math.floor(exp * 0.5 * Math.random());
-            schedulePoll(Math.min(RETRY_MAX_MS, exp) + jitter);
-          })
-          .finally(() => setIsPolling(false));
-      }, ms);
-    };
-
-    const clearPoll = () => {
-      if (poll) clearTimeout(poll);
-      poll = null;
-    };
-
     const handleVisibility = () => {
       if (document.hidden) {
-        clearPoll();
-        stopLiveStream();
         disconnectTs = Date.now();
-        setIsPolling(false);
         return;
       }
-
-      const away = Date.now() - disconnectTs;
-      retryAttempt = 0;
-      clearPoll();
-      if (away >= 30_000) {
-        setIsPolling(true);
-        void fetchThread().finally(() => {
-          setIsPolling(false);
-          resumeLiveStream();
-          schedulePoll(POLL_MS_VISIBLE);
-        });
-        return;
+      if (Date.now() - disconnectTs >= 30_000) {
+        void fetchThread();
       }
-      resumeLiveStream();
-      schedulePoll(POLL_MS_VISIBLE);
     };
-
-    if (!document.hidden) {
-      schedulePoll(POLL_MS_VISIBLE);
-    }
     document.addEventListener("visibilitychange", handleVisibility);
-
-    return () => {
-      clearPoll();
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
-  }, [threadKey, fetchThread]);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [fetchThread]);
 
   const sendThreadMessage = useCallback(
     async (message: string, route: SendRoute = "execute") => {
@@ -254,17 +251,34 @@ export function useThreadStream(threadKey: string) {
     [chat.sendMessage],
   );
 
-  const liveSteps = useMemo(() => stepsFromUiMessages(chat.messages), [chat.messages]);
+  // Steps from Postgres turns (historical data)
+  const historicalSteps = useMemo(
+    () => (thread?.turns?.length ? stepsFromTurns(thread.turns) : []),
+    [thread?.turns],
+  );
+
+  // Steps from live SSE stream (only populated when connected)
+  const liveStreamSteps = useMemo(() => stepsFromUiMessages(chat.messages), [chat.messages]);
+
+  // Merge: if SSE is streaming live data, use those; otherwise use historical
+  const steps: Step[] = useMemo(() => {
+    if (liveStreamSteps.length > 0) {
+      // SSE stream has data — it replays history + live, so use it as primary
+      return liveStreamSteps;
+    }
+    // No SSE data — render from Postgres turns
+    return historicalSteps;
+  }, [historicalSteps, liveStreamSteps]);
 
   return {
     thread,
     error,
     fetchThread,
-    isReconnecting: isPolling || chat.status === "error",
+    isReconnecting: chat.status === "error",
     agentStatus,
     tokenUsage,
     chatStatus: chat.status,
     sendThreadMessage,
-    liveSteps,
+    liveSteps: steps,
   };
 }

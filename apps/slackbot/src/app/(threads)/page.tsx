@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { LoaderCircle, RefreshCw } from "lucide-react";
+import { LoaderCircle, MessageSquare, RefreshCw } from "lucide-react";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import type { ThreadSummary } from "@/lib/types";
 import { timeAgo } from "@/lib/format";
 import { BASE } from "@/lib/constants";
@@ -42,6 +43,7 @@ function runningSubtitle(thread: ThreadSummary): string | null {
 
 export default function ThreadsPage() {
   const router = useRouter();
+  const isDesktop = useMediaQuery("(min-width: 768px)");
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -68,11 +70,16 @@ export default function ThreadsPage() {
     }
   }
 
+  // Only fetch on mobile — desktop uses the sidebar's own fetch
   useEffect(() => {
+    if (isDesktop) {
+      setLoading(false);
+      return;
+    }
     void fetchThreads(false);
     const interval = setInterval(() => void fetchThreads(false), 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isDesktop]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -147,14 +154,22 @@ export default function ThreadsPage() {
     const waiting = [...threads].filter((thread) => thread.state === "waiting").sort(byRecent)[0];
     const recent = [...threads].sort(byRecent)[0];
     const candidate = running ?? waiting ?? recent;
-    return candidate ? `/threads/${encodeURIComponent(candidate.slack_thread_key)}` : undefined;
+    return candidate ? `/${encodeURIComponent(candidate.slack_thread_key)}` : undefined;
   }, [threads]);
 
   return (
     <div className="h-full flex flex-col bg-background text-foreground font-sans overflow-hidden">
+    {/* Desktop placeholder — sidebar already shows the thread list */}
+    <div className="hidden md:flex flex-1 items-center justify-center">
+      <div className="text-center">
+        <MessageSquare className="size-10 text-muted-foreground/40 mx-auto mb-3" />
+        <p className="text-sm text-muted-foreground">Select a thread from the sidebar to get started</p>
+      </div>
+    </div>
+    {/* Mobile thread list — sidebar is hidden on mobile */}
     <div
       data-thread-list-scroll="true"
-      className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 md:px-8 py-4 md:py-8 max-w-[1200px] mx-auto w-full"
+      className="md:hidden flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-4 max-w-[1200px] mx-auto w-full"
       style={{ WebkitOverflowScrolling: "touch" }}
     >
       <div className="flex justify-between items-center mb-6 pb-4 border-b border-border">
@@ -271,7 +286,7 @@ export default function ThreadsPage() {
         <div className="flex flex-col gap-2 md:grid md:grid-cols-[repeat(auto-fill,minmax(360px,1fr))] md:gap-2.5">
           {sortedThreads.map((t) => {
             const name = t.thread_name || threadName(t.slack_thread_key);
-            const href = `/threads/${encodeURIComponent(t.slack_thread_key)}`;
+            const href = `/${encodeURIComponent(t.slack_thread_key)}`;
             const rawTask = t.first_message || t.last_result || "";
             const taskPreview = rawTask.replace(/^\[[\w]+\]\s*/, "").slice(0, 100);
             const isActive = t.state === "working" || t.state === "running";
@@ -324,7 +339,7 @@ export default function ThreadsPage() {
                     {taskPreview}
                   </div>
                 )}
-                {activePhase ? <Progress value={progress} className="h-0.5 mt-3 bg-muted" /> : null}
+                {isActive && activePhase ? <Progress value={progress} className="h-0.5 mt-3 bg-muted" /> : null}
               </Link>
             );
           })}

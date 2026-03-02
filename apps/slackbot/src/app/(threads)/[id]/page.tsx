@@ -1,30 +1,38 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { LoaderCircle } from "lucide-react";
 import { ActivityFeed } from "@/components/thread/activity-feed";
-import { CommandPalette } from "@/components/thread/command-palette";
 import { MessageInput } from "@/components/thread/message-input";
 import { QuickActionChips } from "@/components/thread/quick-action-chips";
 import { MobileTabBar } from "@/components/thread/mobile-tab-bar";
 import { ThreadInfoSheet } from "@/components/thread/thread-info-sheet";
+import { ThreadSidebarDrawer } from "@/components/thread/thread-sidebar-drawer";
 import { ThreadDetailHeader } from "@/components/thread/thread-detail-header";
-import { useThreadLayout } from "@/components/thread/thread-layout";
 import { threadName } from "@/lib/thread-name";
 import { useThreadStream } from "@/hooks/use-thread-stream";
 import { useElapsed } from "@/hooks/use-elapsed";
 import { useStableStatus } from "@/hooks/use-stable-status";
 import { BASE } from "@/lib/constants";
 import type { ThreadSummary } from "@/lib/types";
-import { toast } from "sonner";
 
 export default function ThreadDetailPage() {
   const params = useParams();
   const router = useRouter();
-  const { openMobileSidebar, mobileSidebarOpen } = useThreadLayout();
   const threadKey = decodeURIComponent(params.id as string);
+  const [cachedSummary] = useState(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = sessionStorage.getItem(`thread:${threadKey}`);
+      if (raw) {
+        sessionStorage.removeItem(`thread:${threadKey}`);
+        return JSON.parse(raw);
+      }
+    } catch {}
+    return null;
+  });
   const {
     thread,
     error,
@@ -35,22 +43,20 @@ export default function ThreadDetailPage() {
     chatStatus,
     sendThreadMessage,
     liveSteps,
-  } = useThreadStream(threadKey);
+  } = useThreadStream(threadKey, cachedSummary);
   const humanName = thread?.thread_name || threadName(threadKey);
   const [isInterrupting, setIsInterrupting] = useState(false);
   const [interruptError, setInterruptError] = useState<string | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [compactMode, setCompactMode] = useState(false);
-  const [threads, setThreads] = useState<ThreadSummary[]>([]);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sidebarThreads, setSidebarThreads] = useState<ThreadSummary[]>([]);
   const closeInfoSheet = useCallback(() => setInfoOpen(false), []);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
   const isEngineer = thread?.harness === "engineer";
   const isWaiting = thread?.state === "waiting";
-  const isRunning =
-    thread?.state === "running" || thread?.state === "working" || thread?.state === "stopping";
+  const isRunning = thread?.state === "running" || thread?.state === "working";
   const isStreaming = chatStatus === "submitted" || chatStatus === "streaming";
-  const canInterrupt =
-    !!thread && !isEngineer && (thread.state === "running" || thread.state === "working");
+  const canInterrupt = !!thread && !isEngineer && isRunning;
   const activeTurnStartedAt =
     thread && thread.turns.length > 0 ? thread.turns[thread.turns.length - 1]?.started_at : null;
   const elapsedAnchor = isRunning ? activeTurnStartedAt : thread?.last_activity;
@@ -62,10 +68,6 @@ export default function ThreadDetailPage() {
       }${tokenUsage.estimated ? "~" : ""}`
     : "-- tok / --";
   const phases = liveSteps.flatMap((step) => (step.type === "phase" ? [step.phase] : []));
-  const turnDurationsById = useMemo(() => {
-    if (!thread) return {};
-    return Object.fromEntries(thread.turns.map((turn) => [turn.turn_id, turn.duration_s]));
-  }, [thread]);
   const latestUserMessage = thread?.turns[thread.turns.length - 1]?.user_message?.trim() ?? "";
   const retryMessage = latestUserMessage || "Please retry the previous request.";
 
@@ -100,13 +102,6 @@ export default function ThreadDetailPage() {
     }
   }, [canInterrupt, fetchThread, isInterrupting, thread, threadKey]);
 
-  useEffect(() => {
-    fetch(`${BASE}/api/threads`)
-      .then((res) => res.json())
-      .then((data) => setThreads(Array.isArray(data?.threads) ? data.threads : []))
-      .catch(() => {});
-  }, []);
-
   const handleSendMessage = useCallback(
     async (text: string) => {
       const route = isEngineer && isWaiting ? "reply" : "execute";
@@ -139,8 +134,16 @@ export default function ThreadDetailPage() {
   }, [interruptRun, handleSendMessage, retryMessage, sendThreadMessage]);
 
   useEffect(() => {
+    if (!drawerOpen) return;
+    fetch(`${BASE}/api/threads`)
+      .then((r: Response) => r.json())
+      .then((data: { threads?: ThreadSummary[] }) => setSidebarThreads(data.threads ?? []))
+      .catch(() => {});
+  }, [drawerOpen]);
+
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (infoOpen || mobileSidebarOpen) {
+      if (infoOpen || drawerOpen) {
         return;
       }
       const targetIsInput =
@@ -153,53 +156,36 @@ export default function ThreadDetailPage() {
           return;
         }
         e.preventDefault();
-        router.push("/threads", { scroll: false });
+        router.push("/", { scroll: false });
         return;
       }
 
       if (targetIsInput) return;
 
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setPaletteOpen(true);
-        return;
-      }
-
-      if ((e.metaKey || e.ctrlKey) && e.key === ".") {
-        e.preventDefault();
-        setCompactMode((value) => !value);
-        return;
-      }
-
-      if (e.shiftKey && e.key === "?") {
-        e.preventDefault();
-        toast("Shortcuts: Cmd/Ctrl+K, R, S, /, Esc, Cmd+., Shift+?");
-        return;
-      }
-
-      if (e.key.toLowerCase() === "r") {
+      if (e.key.toLowerCase() === "r" && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
         fetchThread();
         return;
       }
 
-      if (e.key.toLowerCase() === "s" && canInterrupt) {
+      if (e.key.toLowerCase() === "s" && !e.metaKey && !e.ctrlKey && canInterrupt) {
         e.preventDefault();
         void interruptRun();
       }
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [canInterrupt, fetchThread, infoOpen, interruptRun, mobileSidebarOpen, router]);
+  }, [canInterrupt, drawerOpen, fetchThread, infoOpen, interruptRun, router]);
 
+  const threadState = thread?.state;
   useEffect(() => {
-    if (!thread) return;
+    if (!threadState) return;
     const previousTitle = document.title;
-    if (thread.state === "working" || thread.state === "running") {
+    if (threadState === "working" || threadState === "running") {
       document.title = `Working - ${humanName}`;
-    } else if (thread.state === "waiting") {
+    } else if (threadState === "waiting") {
       document.title = `Input needed - ${humanName}`;
-    } else if (thread.state === "error") {
+    } else if (threadState === "error") {
       document.title = `Error - ${humanName}`;
     } else {
       document.title = `Done - ${humanName}`;
@@ -207,13 +193,13 @@ export default function ThreadDetailPage() {
     return () => {
       document.title = previousTitle;
     };
-  }, [humanName, thread]);
+  }, [humanName, threadState]);
 
   if (error && !thread) {
     return (
       <div className="h-dvh md:h-full flex items-center justify-center bg-background">
         <div className="text-center">
-          <p className="text-destructive text-sm mb-4">{error}</p>
+          <p role="alert" className="text-destructive text-sm mb-4">{error}</p>
           <div className="flex items-center justify-center gap-3">
             <button
               type="button"
@@ -223,7 +209,7 @@ export default function ThreadDetailPage() {
               Retry
             </button>
             <Link
-              href="/threads"
+              href="/"
               className="text-muted-foreground text-xs hover:text-foreground transition-colors rounded-sm"
             >
               Back to threads
@@ -238,8 +224,8 @@ export default function ThreadDetailPage() {
     return (
       <div className="h-dvh md:h-full flex items-center justify-center bg-background">
         <div className="text-center">
-          <p className="text-muted-foreground text-sm inline-flex items-center gap-2">
-            <LoaderCircle className="size-4 animate-spin text-primary" />
+          <p role="status" className="text-muted-foreground text-sm inline-flex items-center gap-2">
+            <LoaderCircle aria-hidden="true" className="size-4 animate-spin text-primary" />
             Connecting...
           </p>
           <p className="text-muted-foreground text-xs font-mono mt-2">{threadName(threadKey)}</p>
@@ -269,7 +255,7 @@ export default function ThreadDetailPage() {
         onInterrupt={() => void interruptRun()}
         onRefresh={() => void fetchThread()}
         onOpenInfo={() => setInfoOpen(true)}
-        onOpenDrawer={openMobileSidebar}
+        onOpenDrawer={() => setDrawerOpen(true)}
       />
 
       {/* Activity feed - the only scrollable area */}
@@ -279,7 +265,6 @@ export default function ThreadDetailPage() {
           state={thread.state}
           isStreaming={isStreaming}
           participants={thread.participants}
-          turnDurationsById={turnDurationsById}
         />
       </div>
 
@@ -295,7 +280,7 @@ export default function ThreadDetailPage() {
 
       {/* Mobile tab bar */}
       <MobileTabBar
-        activeThreadHref={`/threads/${encodeURIComponent(threadKey)}`}
+        activeThreadHref={`/${encodeURIComponent(threadKey)}`}
         hasRunningAgent={isRunning}
         hasError={thread.state === "error"}
       />
@@ -313,32 +298,11 @@ export default function ThreadDetailPage() {
           canStop={canInterrupt}
         />
       )}
-
-      <CommandPalette
-        open={paletteOpen}
-        onOpenChange={setPaletteOpen}
-        threads={threads}
-        currentThreadKey={threadKey}
-        compactMode={compactMode}
-        canInterrupt={canInterrupt}
-        isRefreshing={false}
-        onNavigate={(nextThreadKey) => router.push(`/threads/${encodeURIComponent(nextThreadKey)}`, { scroll: false })}
-        onRefresh={() => void fetchThread()}
-        onStop={() => void interruptRun()}
-        onCopyUrl={() => {
-          navigator.clipboard
-            ?.writeText(window.location.href)
-            .then(() => toast("Copied link"))
-            .catch(() => {});
-        }}
-        onToggleCompact={() => setCompactMode((value) => !value)}
-        onOpenSlack={thread.slack_thread_key.includes(":")
-          ? () => {
-              const [channel, ts] = thread.slack_thread_key.replace(/^slack:/, "").split(":");
-              window.open(`slack://app_redirect?channel=${channel}&thread_ts=${ts}`, "_blank");
-            }
-          : null}
-        onOpenShortcuts={() => toast("Shortcuts: Cmd/Ctrl+K, R, S, /, Esc, Cmd+., Shift+?")}
+      <ThreadSidebarDrawer
+        open={drawerOpen}
+        onClose={closeDrawer}
+        threads={sidebarThreads}
+        activeKey={threadKey}
       />
     </div>
   );

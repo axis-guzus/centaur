@@ -24,8 +24,8 @@ export function MobileTabBar({ activeThreadHref, hasRunningAgent, hasError }: Mo
     return () => vv.removeEventListener("resize", check);
   }, []);
 
-  const isThreads = pathname === "/threads";
-  const isActive = pathname.startsWith("/threads/");
+  const isThreads = pathname === "/";
+  const isActive = pathname.length > 1 && !pathname.startsWith("/api/");
 
   function scrollCurrentViewToTop() {
     if (isThreads) {
@@ -50,7 +50,7 @@ export function MobileTabBar({ activeThreadHref, hasRunningAgent, hasError }: Mo
       scrollCurrentViewToTop();
       return;
     }
-    router.push("/threads", { scroll: false });
+    router.push("/", { scroll: false });
   }
 
   function handleActiveTab() {
@@ -61,7 +61,7 @@ export function MobileTabBar({ activeThreadHref, hasRunningAgent, hasError }: Mo
     if (activeThreadHref) {
       router.push(activeThreadHref, { scroll: false });
     } else {
-      router.push("/threads", { scroll: false });
+      router.push("/", { scroll: false });
     }
   }
 

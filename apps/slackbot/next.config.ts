@@ -7,6 +7,21 @@ const nextConfig: NextConfig = {
   transpilePackages: ["shiki"],
   experimental: {
     reactCompiler: true,
+    optimizePackageImports: ["lucide-react", "@tanstack/react-virtual"],
+  },
+  async redirects() {
+    return [
+      {
+        source: "/threads",
+        destination: "/",
+        permanent: true,
+      },
+      {
+        source: "/threads/:path*",
+        destination: "/:path*",
+        permanent: true,
+      },
+    ];
   },
 };
 

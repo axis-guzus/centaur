@@ -28,7 +28,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`dark ${GeistSans.variable} ${GeistMono.variable}`}>
-      <body className="m-0 bg-background text-foreground antialiased font-sans fixed inset-0 overflow-hidden">
+      <body suppressHydrationWarning className="m-0 bg-background text-foreground antialiased font-sans fixed inset-0 overflow-hidden">
         <TooltipProvider delayDuration={300} skipDelayDuration={100}>
           <a
             href="#main-content"
@@ -36,7 +36,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           >
             Skip to main content
           </a>
-          <nav className="hidden md:flex items-center gap-6 px-6 py-2.5 border-b border-border bg-background/95 backdrop-blur-sm font-sans z-50 shrink-0">
+          <nav aria-label="Main" className="hidden md:flex items-center gap-6 px-6 py-2.5 border-b border-border bg-background/95 backdrop-blur-sm font-sans z-50 shrink-0">
             <Link
               href="/"
               className="text-foreground no-underline font-semibold text-[13px] tracking-tight rounded-sm"
@@ -44,7 +44,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               AI2
             </Link>
             <Link
-              href="/threads"
+              href="/"
               className="text-muted-foreground no-underline text-[13px] font-medium hover:text-foreground transition-colors rounded-sm"
             >
               Threads

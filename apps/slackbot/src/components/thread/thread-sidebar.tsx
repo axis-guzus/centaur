@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
   forwardRef,
   type KeyboardEvent as ReactKeyboardEvent,
+  memo,
   useCallback,
   useEffect,
   useId,
@@ -13,17 +14,18 @@ import {
   useRef,
   useState,
 } from "react";
-import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw } from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { Check, ChevronLeft, ChevronRight, ExternalLink, LinkIcon, LoaderCircle, RefreshCw } from "lucide-react";
 import { ParticipantAvatars } from "@/components/thread/participant-avatars";
 import { Progress } from "@/components/ui/progress";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HarnessBadge } from "@/components/ui/harness-badge";
 import { StateDot } from "@/components/ui/state-dot";
 import { useElapsed } from "@/hooks/use-elapsed";
-import { useLiveThreadStatus } from "@/hooks/use-live-thread-status";
+
 import { BASE } from "@/lib/constants";
 import { threadName } from "@/lib/thread-name";
 import { PHASES, type ThreadSummary } from "@/lib/types";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
 type ThreadStatusFilter = "all" | "active" | "idle" | "error";
@@ -72,6 +74,177 @@ function ThreadAge({ thread }: { thread: ThreadSummary }) {
   return <span>{elapsed}</span>;
 }
 
+type DateGroup = "Today" | "Yesterday" | "This Week" | "Older";
+
+function getDateGroup(epochSeconds: number): DateGroup {
+  const now = new Date();
+  const date = new Date(epochSeconds * 1000);
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterdayStart = new Date(todayStart.getTime() - 86400000);
+  const weekStart = new Date(todayStart.getTime() - todayStart.getDay() * 86400000);
+
+  if (date >= todayStart) return "Today";
+  if (date >= yesterdayStart) return "Yesterday";
+  if (date >= weekStart) return "This Week";
+  return "Older";
+}
+
+function groupThreadsByDate(threads: ThreadSummary[]): { label: DateGroup; threads: ThreadSummary[] }[] {
+  const order: DateGroup[] = ["Today", "Yesterday", "This Week", "Older"];
+  const groups = new Map<DateGroup, ThreadSummary[]>();
+  for (const thread of threads) {
+    const group = getDateGroup(thread.last_activity ?? 0);
+    const list = groups.get(group);
+    if (list) {
+      list.push(thread);
+    } else {
+      groups.set(group, [thread]);
+    }
+  }
+  return order.filter((label) => groups.has(label)).map((label) => ({ label, threads: groups.get(label)! }));
+}
+
+type ThreadCardProps = {
+  thread: ThreadSummary;
+  isSelected: boolean;
+  isFocused: boolean;
+  statusSubtitle: string | null;
+  cardRef: (node: HTMLAnchorElement | null) => void;
+  onMouseEnter: () => void;
+  onFocus: () => void;
+  onClick: () => void;
+};
+
+const ThreadCard = memo(function ThreadCard({
+  thread,
+  isSelected,
+  isFocused,
+  statusSubtitle,
+  cardRef,
+  onMouseEnter,
+  onFocus,
+  onClick,
+}: ThreadCardProps) {
+  const name = thread.thread_name || threadName(thread.slack_thread_key);
+  const href = `/${encodeURIComponent(thread.slack_thread_key)}`;
+  const rawTask =
+    thread.last_user_message || thread.first_message || thread.last_result || "";
+  const taskPreview = rawTask.replace(/^\[[\w]+\]\s*/, "").replace(/\s+/g, " ").slice(0, 120);
+  const activeState = isRunningState(thread.state);
+  const activePhase = parseActivePhase(thread);
+  const phaseIndex = activePhase
+    ? PHASES.indexOf(activePhase as (typeof PHASES)[number])
+    : -1;
+  const progress = phaseIndex >= 0 ? ((phaseIndex + 1) / PHASES.length) * 100 : 0;
+
+  return (
+    <Link
+      ref={cardRef}
+      href={href}
+      prefetch={false}
+      role="option"
+      aria-selected={isSelected}
+      aria-current={isSelected ? "page" : undefined}
+      tabIndex={isFocused ? 0 : -1}
+      onMouseEnter={onMouseEnter}
+      onFocus={onFocus}
+      onClick={onClick}
+      className={cn(
+        "group/card relative thread-sidebar-card block rounded-sm border border-border bg-card px-2.5 py-2 no-underline outline-none transition-colors hover:bg-accent/50 focus-visible:ring-1 focus-visible:ring-ring",
+        isSelected && "border-l-2 border-l-primary bg-accent",
+        activeState && "border-l-2 border-l-primary/70",
+      )}
+    >
+      <ThreadCardActions threadKey={thread.slack_thread_key} />
+      <div className="flex min-w-0 items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <HarnessBadge harness={thread.harness} className="h-5 px-1.5 text-[9px]" />
+            <span className="truncate text-xs font-medium text-foreground">{name}</span>
+          </div>
+          <div className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+            <span>
+              {thread.turn_count} turn{thread.turn_count === 1 ? "" : "s"}
+            </span>
+            <span>·</span>
+            <ThreadAge thread={thread} />
+            {thread.participants && thread.participants.length > 0 ? (
+              <>
+                <span>·</span>
+                <ParticipantAvatars participants={thread.participants} size={16} />
+              </>
+            ) : null}
+          </div>
+        </div>
+        <div className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+          <StateDot state={thread.state} className="size-2.5" />
+          <span>{thread.state}</span>
+        </div>
+      </div>
+
+      {statusSubtitle ? (
+        <div className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">{statusSubtitle}</div>
+      ) : null}
+      {taskPreview ? (
+        <div className="mt-1.5 line-clamp-1 text-[11px] leading-relaxed text-muted-foreground/90">
+          {taskPreview}
+        </div>
+      ) : null}
+      {activeState && activePhase ? <Progress value={progress} className="mt-2 h-0.5 bg-muted" /> : null}
+    </Link>
+  );
+});
+
+function ThreadCardActions({ threadKey }: { threadKey: string }) {
+  const [copied, setCopied] = useState(false);
+  const slackKey = threadKey.startsWith("slack:") ? threadKey.slice(6) : null;
+
+  function copyLink(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const url = `${window.location.origin}/${encodeURIComponent(threadKey)}`;
+    void navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  }
+
+  function openInSlack(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!slackKey) return;
+    const parts = slackKey.split("-");
+    if (parts.length >= 2) {
+      const channel = parts[0];
+      const ts = parts.slice(1).join("-");
+      window.open(`https://slack.com/app_redirect?channel=${channel}&message_ts=${ts}`, "_blank");
+    }
+  }
+
+  return (
+    <div className="absolute right-1.5 top-1.5 hidden group-hover/card:flex items-center gap-0.5">
+      <button
+        type="button"
+        onClick={copyLink}
+        aria-label="Copy link"
+        className="inline-flex size-6 items-center justify-center rounded-sm bg-card border border-border text-muted-foreground transition-colors hover:text-foreground hover:bg-accent"
+      >
+        {copied ? <Check className="size-3 text-green-500" /> : <LinkIcon className="size-3" />}
+      </button>
+      {slackKey && (
+        <button
+          type="button"
+          onClick={openInSlack}
+          aria-label="Open in Slack"
+          className="inline-flex size-6 items-center justify-center rounded-sm bg-card border border-border text-muted-foreground transition-colors hover:text-foreground hover:bg-accent"
+        >
+          <ExternalLink className="size-3" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>(function ThreadSidebar(
   {
     selectedThreadKey,
@@ -84,12 +257,12 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
   ref,
 ) {
   const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<ThreadStatusFilter>("all");
   const [focusedThreadKey, setFocusedThreadKey] = useState<string | null>(null);
   const filterId = useId();
   const searchRef = useRef<HTMLInputElement>(null);
@@ -97,13 +270,6 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
   const cardRefs = useRef<Record<string, HTMLAnchorElement | null>>({});
   const latestFetchIdRef = useRef(0);
   const detailPrefetchAtRef = useRef<Record<string, number>>({});
-  const query = searchParams.get("q") ?? "";
-  const statusParam = searchParams.get("status");
-  const statusFilter: ThreadStatusFilter =
-    statusParam === "active" || statusParam === "idle" || statusParam === "error"
-      ? statusParam
-      : "all";
-  const sidebarQueryString = searchParams.toString();
 
   const fetchThreads = useCallback(
     async (showRefreshIndicator = true) => {
@@ -182,25 +348,48 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
     }
   }, [focusedThreadKey, selectedThreadKey, sortedThreads]);
 
-  const activeThreadKeys = useMemo(() => {
-    if (!active || collapsed) return [];
-    return sortedThreads
-      .filter((thread) => isRunningState(thread.state))
-      .slice(0, 8)
-      .map((thread) => thread.slack_thread_key);
-  }, [active, collapsed, sortedThreads]);
-  const liveStatusByThread = useLiveThreadStatus(activeThreadKeys);
-
   const activeCount = useMemo(
     () => threads.filter((thread) => isRunningState(thread.state)).length,
     [threads],
   );
 
+  const groupedThreads = useMemo(() => groupThreadsByDate(sortedThreads), [sortedThreads]);
+
+  type VirtualItem = { kind: "header"; label: DateGroup } | { kind: "thread"; thread: ThreadSummary };
+  const virtualItems = useMemo<VirtualItem[]>(() => {
+    const items: VirtualItem[] = [];
+    for (const group of groupedThreads) {
+      items.push({ kind: "header", label: group.label });
+      for (const thread of group.threads) {
+        items.push({ kind: "thread", thread });
+      }
+    }
+    return items;
+  }, [groupedThreads]);
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: virtualItems.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: (index) => (virtualItems[index].kind === "header" ? 24 : 90),
+    overscan: 8,
+  });
+
   const prefetchThread = useCallback(
     (threadKey: string) => {
-      const baseHref = `/threads/${encodeURIComponent(threadKey)}`;
-      const href = sidebarQueryString ? `${baseHref}?${sidebarQueryString}` : baseHref;
+      const href = `/${encodeURIComponent(threadKey)}`;
       router.prefetch(href);
+
+      // Cache thread summary for instant hydration on navigation
+      const thread = sortedThreads.find(t => t.slack_thread_key === threadKey);
+      if (thread) {
+        try {
+          sessionStorage.setItem(
+            `thread:${threadKey}`,
+            JSON.stringify(thread),
+          );
+        } catch {}
+      }
 
       const now = Date.now();
       const previousAt = detailPrefetchAtRef.current[threadKey] ?? 0;
@@ -210,36 +399,21 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
         cache: "force-cache",
       }).catch(() => {});
     },
-    [router, sidebarQueryString],
-  );
-
-  useEffect(() => {
-    if (!active || sortedThreads.length === 0) return;
-    sortedThreads.slice(0, 5).forEach((thread) => prefetchThread(thread.slack_thread_key));
-  }, [active, prefetchThread, sortedThreads]);
-
-  const setSidebarParam = useCallback(
-    (key: "q" | "status", value: string) => {
-      const nextParams = new URLSearchParams(searchParams.toString());
-      if (!value || (key === "status" && value === "all")) {
-        nextParams.delete(key);
-      } else {
-        nextParams.set(key, value);
-      }
-      const next = nextParams.toString();
-      router.replace(next ? `${pathname}?${next}` : pathname, { scroll: false });
-    },
-    [pathname, router, searchParams],
+    [router, sortedThreads],
   );
 
   const openThread = useCallback(
     (threadKey: string) => {
-      const baseHref = `/threads/${encodeURIComponent(threadKey)}`;
-      const href = sidebarQueryString ? `${baseHref}?${sidebarQueryString}` : baseHref;
+      // Cache summary for instant hydration before navigating
+      const thread = sortedThreads.find(t => t.slack_thread_key === threadKey);
+      if (thread) {
+        try { sessionStorage.setItem(`thread:${threadKey}`, JSON.stringify(thread)); } catch {}
+      }
+      const href = `/${encodeURIComponent(threadKey)}`;
       router.push(href);
       onNavigate?.();
     },
-    [onNavigate, router, sidebarQueryString],
+    [onNavigate, router, sortedThreads],
   );
 
   const focusThreadAt = useCallback(
@@ -331,20 +505,15 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
     return (
       <div className="flex h-full w-full flex-col items-center justify-end p-2">
         {canToggle ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                ref={toggleRef}
-                type="button"
-                onClick={() => onCollapsedChange?.(false)}
-                aria-label="Expand sidebar"
-                className="inline-flex size-8 items-center justify-center rounded-sm border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                <ChevronRight className="size-4" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>Expand sidebar (Cmd+[)</TooltipContent>
-          </Tooltip>
+          <button
+            ref={toggleRef}
+            type="button"
+            onClick={() => onCollapsedChange?.(false)}
+            aria-label="Expand sidebar"
+            className="inline-flex size-8 items-center justify-center rounded-sm border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <ChevronRight className="size-4" />
+          </button>
         ) : null}
       </div>
     );
@@ -393,7 +562,7 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
             id={filterId}
             name={filterId}
             value={query}
-            onChange={(event) => setSidebarParam("q", event.target.value)}
+            onChange={(event) => setQuery(event.target.value)}
             placeholder="Filter threads… (/)"
             autoComplete="off"
             className="h-8 w-full rounded-sm border border-input bg-card px-2.5 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -402,14 +571,14 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
         <div className="mt-2 inline-flex w-full rounded-sm border border-border bg-card p-0.5 text-[11px]">
           {([
             { id: "all", label: "All" },
-            { id: "active", label: "Run" },
+            { id: "active", label: "Active" },
             { id: "idle", label: "Idle" },
-            { id: "error", label: "Err" },
+            { id: "error", label: "Error" },
           ] as const).map((item) => (
             <button
               key={item.id}
               type="button"
-              onClick={() => setSidebarParam("status", item.id)}
+              onClick={() => setStatusFilter(item.id)}
               className={cn(
                 "flex-1 rounded-[2px] px-1.5 py-1 text-center text-muted-foreground transition-colors",
                 statusFilter === item.id && "bg-accent text-foreground",
@@ -421,16 +590,11 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
         </div>
       </div>
 
-      <div className="thread-sidebar-list flex-1 min-h-0 overflow-y-auto px-2.5 py-2" role="listbox" aria-label="Thread list">
+      <ScrollArea viewportRef={scrollContainerRef} className="flex-1 min-h-0" viewportClassName="px-2.5 pt-2 pb-4" role="listbox" aria-label="Thread list">
         {loading ? (
-          <div className="space-y-2 py-1">
-            {[0, 1, 2].map((index) => (
-              <div key={index} className="rounded-sm border border-border bg-card px-2.5 py-2">
-                <div className="h-3.5 w-5/6 rounded bg-secondary animate-pulse" />
-                <div className="mt-1.5 h-3 w-2/3 rounded bg-secondary animate-pulse" />
-                <div className="mt-1.5 h-3 w-4/5 rounded bg-secondary animate-pulse" />
-              </div>
-            ))}
+          <div className="inline-flex w-full items-center justify-center gap-2 py-8 text-xs text-muted-foreground">
+            <LoaderCircle className="size-3.5 animate-spin text-primary" />
+            Loading threads...
           </div>
         ) : error && sortedThreads.length === 0 ? (
           <div className="space-y-2 py-8 text-center">
@@ -448,97 +612,68 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
             No threads match your filter.
           </div>
         ) : (
-          <div className="space-y-2">
-            {sortedThreads.map((thread) => {
-              const name = thread.thread_name || threadName(thread.slack_thread_key);
-              const baseHref = `/threads/${encodeURIComponent(thread.slack_thread_key)}`;
-              const href = sidebarQueryString ? `${baseHref}?${sidebarQueryString}` : baseHref;
-              const rawTask =
-                thread.last_user_message || thread.first_message || thread.last_result || "";
-              const taskPreview = rawTask.replace(/^\[[\w]+\]\s*/, "").replace(/\s+/g, " ").slice(0, 120);
-              const activeState = isRunningState(thread.state);
-              const statusSubtitle = liveStatusByThread[thread.slack_thread_key] ?? runningSubtitle(thread);
-              const activePhase = parseActivePhase(thread);
-              const phaseIndex = activePhase
-                ? PHASES.indexOf(activePhase as (typeof PHASES)[number])
-                : -1;
-              const progress = phaseIndex >= 0 ? ((phaseIndex + 1) / PHASES.length) * 100 : 0;
-              const isSelected = selectedThreadKey === thread.slack_thread_key;
-              const isFocused = focusedThreadKey === thread.slack_thread_key;
-
-              return (
-                <Link
-                  key={thread.slack_thread_key}
-                  ref={(node) => {
-                    cardRefs.current[thread.slack_thread_key] = node;
-                  }}
-                  href={href}
-                  prefetch={false}
-                  role="option"
-                  aria-selected={isSelected}
-                  aria-current={isSelected ? "page" : undefined}
-                  tabIndex={isFocused ? 0 : -1}
-                  onMouseEnter={() => prefetchThread(thread.slack_thread_key)}
-                  onFocus={() => {
-                    setFocusedThreadKey(thread.slack_thread_key);
-                    prefetchThread(thread.slack_thread_key);
-                  }}
-                  onClick={() => {
-                    setFocusedThreadKey(thread.slack_thread_key);
-                    onNavigate?.();
-                  }}
-                  className={cn(
-                    "thread-sidebar-card group block rounded-sm border border-border bg-card px-2.5 py-2 no-underline outline-none select-none transition-[transform,background-color,border-color] duration-100 hover:bg-accent/50 active:scale-[0.98] focus-visible:ring-1 focus-visible:ring-ring",
-                    isSelected && "border-l-2 border-l-primary bg-accent",
-                    activeState && "border-l-2 border-l-primary/70",
-                  )}
-                >
-                  <div className="flex min-w-0 items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        <HarnessBadge harness={thread.harness} className="h-5 px-1.5 text-[9px]" />
-                        <span className="truncate text-xs font-medium text-foreground">{name}</span>
-                      </div>
-                      <div className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
-                        <span>
-                          {thread.turn_count} turn{thread.turn_count === 1 ? "" : "s"}
-                        </span>
-                        <span>·</span>
-                        <ThreadAge thread={thread} />
-                        {thread.participants && thread.participants.length > 0 ? (
-                          <>
-                            <span>·</span>
-                            <ParticipantAvatars participants={thread.participants} size={16} />
-                          </>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
-                      <StateDot state={thread.state} className="size-2.5" />
-                      <span>{thread.state}</span>
-                    </div>
+          <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+            {virtualizer.getVirtualItems().map((vRow) => {
+              const item = virtualItems[vRow.index];
+              if (item.kind === "header") {
+                return (
+                  <div
+                    key={`header-${item.label}`}
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      height: vRow.size,
+                      transform: `translateY(${vRow.start}px)`,
+                    }}
+                    className="z-10 bg-card/80 backdrop-blur-sm px-1 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-medium"
+                  >
+                    {item.label}
                   </div>
-
-                  {statusSubtitle ? (
-                    <div className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">{statusSubtitle}</div>
-                  ) : null}
-                  {taskPreview ? (
-                    <>
-                      <div className="mt-1 line-clamp-1 text-[11px] leading-relaxed text-muted-foreground/90">
-                        {taskPreview}
-                      </div>
-                      <div className="hidden text-[11px] leading-relaxed text-muted-foreground/80 md:group-hover:line-clamp-2 md:group-hover:block">
-                        {taskPreview}
-                      </div>
-                    </>
-                  ) : null}
-                  {activePhase ? <Progress value={progress} className="mt-2 h-0.5 bg-muted" /> : null}
-                </Link>
+                );
+              }
+              const thread = item.thread;
+              return (
+                <div
+                  key={thread.slack_thread_key}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${vRow.start}px)`,
+                  }}
+                  ref={virtualizer.measureElement}
+                  data-index={vRow.index}
+                >
+                  <div className="pb-1.5">
+                    <ThreadCard
+                      thread={thread}
+                      isSelected={selectedThreadKey === thread.slack_thread_key}
+                      isFocused={focusedThreadKey === thread.slack_thread_key}
+                      statusSubtitle={runningSubtitle(thread)}
+                      cardRef={(node) => {
+                        cardRefs.current[thread.slack_thread_key] = node;
+                      }}
+                      onMouseEnter={() => prefetchThread(thread.slack_thread_key)}
+                      onFocus={() => {
+                        setFocusedThreadKey(thread.slack_thread_key);
+                        prefetchThread(thread.slack_thread_key);
+                      }}
+                      onClick={() => {
+                        setFocusedThreadKey(thread.slack_thread_key);
+                        try { sessionStorage.setItem(`thread:${thread.slack_thread_key}`, JSON.stringify(thread)); } catch {}
+                        onNavigate?.();
+                      }}
+                    />
+                  </div>
+                </div>
               );
             })}
           </div>
         )}
-      </div>
+      </ScrollArea>
     </div>
   );
 });
