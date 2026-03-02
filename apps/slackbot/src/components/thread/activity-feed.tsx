@@ -91,6 +91,7 @@ function renderStep(
   step: Step,
   key: string,
   participantsById: Map<string, Participant>,
+  threadStopped?: boolean,
 ): React.ReactNode {
   if (step.type === "phase") {
     return (
@@ -116,7 +117,7 @@ function renderStep(
   }
 
   if (step.type === "tool-group") {
-    return <StepGroup key={key} icon={step.icon} summary={step.summary} calls={step.calls} />;
+    return <StepGroup key={key} icon={step.icon} summary={step.summary} calls={step.calls} threadStopped={threadStopped} />;
   }
 
   if (step.type === "diff") {
@@ -270,7 +271,7 @@ export function ActivityFeed({
               {state === "idle" ? "No events yet. This thread is idle." : "Waiting for events…"}
             </div>
           ) : (
-            steps.map((step, index) => renderStep(step, `live-${index}`, participantsById))
+            steps.map((step, index) => renderStep(step, `live-${index}`, participantsById, !isStreaming && state !== "running" && state !== "working"))
           )}
         </ConversationContent>
         <ConversationScrollButton />

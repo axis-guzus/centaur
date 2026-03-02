@@ -21,7 +21,7 @@ function PillStatusIcon({ loading, error }: { loading: number; error: number }) 
   return <Check className="size-4 text-green-500 flex-shrink-0" />;
 }
 
-function ToolCallItem({ call, isMobile }: { call: ToolCall; isMobile: boolean }) {
+function ToolCallItem({ call, isMobile, threadStopped }: { call: ToolCall; isMobile: boolean; threadStopped?: boolean }) {
   const [expandedOutput, setExpandedOutput] = useState(false);
   const output = call.output ?? "";
   const outputLines = output.split("\n");
@@ -32,7 +32,7 @@ function ToolCallItem({ call, isMobile }: { call: ToolCall; isMobile: boolean })
     <Collapsible className="group/call">
       <CollapsibleTrigger className="w-full flex items-center gap-2 py-1 text-xs text-muted-foreground hover:text-foreground cursor-pointer">
         <ChevronRight className="size-3 transition-transform group-data-[state=open]/call:rotate-90" />
-        <ToolStateIcon state={call.state} hasOutput={!!call.output} />
+        <ToolStateIcon state={call.state} hasOutput={!!call.output || threadStopped} />
         <span className="truncate">{describeToolCall(call.name, call.input)}</span>
         {call.output && (
           <Tooltip>
@@ -86,15 +86,19 @@ export function StepGroup({
   icon: Icon,
   summary,
   calls,
+  threadStopped,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   summary: string;
   calls: ToolCall[];
+  threadStopped?: boolean;
 }) {
   const isMobile = useIsMobile();
-  const loadingCount = calls.filter((call) => (call.state === "loading" || !call.state) && !call.output).length;
+  const loadingCount = threadStopped ? 0 : calls.filter((call) => (call.state === "loading" || !call.state) && !call.output).length;
   const errorCount = calls.filter((call) => call.state === "error").length;
-  const doneCount = calls.filter((call) => call.state === "done" || (call.output && call.state !== "error")).length;
+  const doneCount = threadStopped
+    ? calls.length - errorCount
+    : calls.filter((call) => call.state === "done" || (call.output && call.state !== "error")).length;
   const manuallyToggled = useRef(false);
   const previousLoadingCount = useRef(loadingCount);
   const hasBeenActive = useRef(false);
@@ -185,7 +189,7 @@ export function StepGroup({
       </CollapsibleTrigger>
       <CollapsibleContent className="px-3 pb-2 pl-4 md:pl-6 space-y-1">
         {calls.map((call) => (
-          <ToolCallItem key={call.id} call={call} isMobile={isMobile} />
+          <ToolCallItem key={call.id} call={call} isMobile={isMobile} threadStopped={threadStopped} />
         ))}
       </CollapsibleContent>
     </Collapsible>

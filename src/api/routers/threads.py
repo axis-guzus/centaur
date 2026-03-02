@@ -31,7 +31,7 @@ _CONTEXT_HEADER = (
     "Additional Slack thread context since the last AI instruction "
     "(ambient discussion from humans):"
 )
-_SLACK_MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
+_SLACK_MENTION_RE = re.compile(r"<?@[A-Z0-9]{6,}>?")
 
 
 def _raw_item_call_digest(item: dict[str, Any]) -> str:
