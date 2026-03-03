@@ -6,9 +6,9 @@ import asyncpg
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from api.deps import get_pool, verify_api_key
+from api.deps import get_pool, verify_operator_api_key
 
-router = APIRouter(prefix="/api/sync", dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/api/sync", dependencies=[Depends(verify_operator_api_key)])
 
 
 class SyncRunRequest(BaseModel):

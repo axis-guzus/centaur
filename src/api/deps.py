@@ -32,6 +32,13 @@ _NGINX_RESOLVE_TTL_S = max(5, int(os.environ.get("NGINX_RESOLVE_TTL_S", "60")))
 _nginx_ips_cache_lock = threading.Lock()
 _nginx_ips_cache: tuple[str, ...] = tuple(sorted(_NGINX_TRUSTED_IPS))
 _nginx_ips_cache_expires_at = 0.0
+_SANDBOX_ALLOWED_PATH_PREFIXES = ("/agent", "/tools", "/api/search", "/api/query")
+_TRUSTED_SERVICE_HOSTS = tuple(
+    host.strip() for host in os.environ.get("TRUSTED_SERVICE_HOSTS", "nginx,slackbot,auth").split(",") if host.strip()
+)
+_trusted_service_ips_cache_lock = threading.Lock()
+_trusted_service_ips_cache: tuple[str, ...] = ()
+_trusted_service_ips_cache_expires_at = 0.0
 
 
 def _resolve_nginx_ips_uncached() -> tuple[str, ...]:
@@ -76,6 +83,41 @@ def _is_trusted_nginx_ip(client_ip: str) -> bool:
     return client_ip == _NGINX_TRUSTED_IP_PREFIX
 
 
+def _resolve_trusted_service_ips_uncached() -> tuple[str, ...]:
+    resolved: set[str] = set()
+    for host in _TRUSTED_SERVICE_HOSTS:
+        try:
+            infos = socket.getaddrinfo(host, None, family=socket.AF_UNSPEC)
+        except OSError:
+            continue
+        for info in infos:
+            sockaddr = info[4]
+            if isinstance(sockaddr, tuple) and sockaddr and isinstance(sockaddr[0], str):
+                resolved.add(sockaddr[0])
+    return tuple(sorted(resolved))
+
+
+def _resolved_trusted_service_ips() -> tuple[str, ...]:
+    global _trusted_service_ips_cache_expires_at, _trusted_service_ips_cache
+    now = time.monotonic()
+    with _trusted_service_ips_cache_lock:
+        if _trusted_service_ips_cache and now < _trusted_service_ips_cache_expires_at:
+            return _trusted_service_ips_cache
+        resolved = _resolve_trusted_service_ips_uncached()
+        if resolved:
+            _trusted_service_ips_cache = resolved
+            _trusted_service_ips_cache_expires_at = now + _NGINX_RESOLVE_TTL_S
+        else:
+            _trusted_service_ips_cache_expires_at = now + min(5, _NGINX_RESOLVE_TTL_S)
+        return _trusted_service_ips_cache
+
+
+def _is_trusted_service_ip(client_ip: str) -> bool:
+    if not client_ip:
+        return False
+    return client_ip in _resolved_trusted_service_ips()
+
+
 def _is_loopback_ip(client_ip: str) -> bool:
     if not client_ip:
         return False
@@ -87,6 +129,10 @@ def _is_loopback_ip(client_ip: str) -> bool:
 
 def _get_api_secret_key() -> str:
     return _sm_read("API_SECRET_KEY") or ""
+
+
+def _is_sandbox_allowed_path(path: str) -> bool:
+    return path.startswith(_SANDBOX_ALLOWED_PATH_PREFIXES)
 
 
 async def get_pool(request: Request) -> asyncpg.Pool:
@@ -119,7 +165,22 @@ async def verify_api_key(
 
     if not token or not secrets.compare_digest(token, api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
+    if _is_trusted_service_ip(client_ip):
+        return token
+    if not _is_trusted_nginx_ip(client_ip) and not _is_sandbox_allowed_path(request.url.path):
+        raise HTTPException(status_code=403, detail="API key scope does not permit this route")
     return token
+
+
+async def verify_operator_api_key(
+    request: Request,
+    x_api_key: Annotated[str | None, Header()] = None,
+) -> str:
+    token = await verify_api_key(request, x_api_key)
+    client_ip = request.client.host if request.client else ""
+    if _is_loopback_ip(client_ip) or _is_trusted_nginx_ip(client_ip):
+        return token
+    raise HTTPException(status_code=403, detail="Operator route requires trusted caller")
 
 
 async def verify_ui_or_api_key(
@@ -142,6 +203,8 @@ async def verify_ui_or_api_key(
         return "localhost-bypass"
 
     forwarded_user = request.headers.get("x-forwarded-user")
+    if forwarded_user and not _is_trusted_nginx_ip(client_ip):
+        raise HTTPException(status_code=403, detail="Untrusted forwarded identity header")
     if forwarded_user and _is_trusted_nginx_ip(client_ip):
         return "nginx"
 

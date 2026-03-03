@@ -6,7 +6,7 @@ import asyncpg
 from fastapi import APIRouter, Depends
 from starlette.responses import JSONResponse, PlainTextResponse
 
-from api.deps import get_pool, verify_api_key
+from api.deps import get_pool, verify_operator_api_key
 
 router = APIRouter()
 
@@ -61,7 +61,7 @@ async def metrics(pool: Annotated[asyncpg.Pool, Depends(get_pool)]) -> PlainText
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
-@router.get("/health/detail", dependencies=[Depends(verify_api_key)])
+@router.get("/health/detail", dependencies=[Depends(verify_operator_api_key)])
 async def health_detail(pool: Annotated[asyncpg.Pool, Depends(get_pool)]) -> dict:
     """Authenticated health check with sync run details."""
     db_ok = False

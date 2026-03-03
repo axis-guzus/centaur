@@ -4,11 +4,11 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from starlette.concurrency import run_in_threadpool
 
-from api.deps import verify_api_key
+from api.deps import verify_operator_api_key
 
 log = structlog.get_logger()
 
-router = APIRouter(prefix="/admin", dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/admin", dependencies=[Depends(verify_operator_api_key)])
 
 
 @router.post("/reload-tools")
