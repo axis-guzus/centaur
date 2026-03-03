@@ -48,33 +48,76 @@ function parseBool(raw: string): boolean {
   return raw.toLowerCase() === "true";
 }
 
+function parsePipeTable(raw: string): Record<string, unknown>[] | null {
+  const lines = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length < 2) return null;
+
+  // First line must be pipe-separated headers
+  if (!lines[0].includes("|")) return null;
+
+  const headers = lines[0].split("|").map((h) => h.trim());
+  if (headers.length < 2 || headers.some((h) => h.length === 0)) return null;
+
+  const rows: Record<string, unknown>[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    // Skip separator lines like "---|---|---"
+    if (/^[\s|:-]+$/.test(lines[i])) continue;
+    const cells = lines[i].split("|").map((c) => c.trim());
+    const row: Record<string, unknown> = {};
+    for (let j = 0; j < headers.length; j++) {
+      const cell = cells[j] ?? "";
+      const num = Number(cell);
+      row[headers[j]] = cell !== "" && !isNaN(num) ? num : cell;
+    }
+    rows.push(row);
+  }
+
+  return rows.length > 0 ? rows : null;
+}
+
+function dedent(raw: string): string {
+  const lines = raw.split("\n");
+  const indents = lines.filter((l) => l.trim().length > 0).map((l) => l.match(/^(\s*)/)![1].length);
+  const min = indents.length > 0 ? Math.min(...indents) : 0;
+  return min > 0 ? lines.map((l) => l.slice(min)).join("\n") : raw;
+}
+
 function decodeToonData(raw: string): Record<string, unknown>[] | null {
-  // Try wrapping as a nested TOON value first
+  const dedented = dedent(raw);
+
+  // Try direct decode first — handles TOON tabular format [N]{keys}: ...
   try {
-    const wrapped = `_:\n${raw
+    const direct = decode(dedented, { strict: false });
+    if (Array.isArray(direct) && direct.length > 0) return direct as Record<string, unknown>[];
+  } catch {
+    // Direct decode failed
+  }
+
+  // Try wrapping as a nested TOON value
+  try {
+    const wrapped = `_:\n${dedented
       .split("\n")
       .map((line) => `  ${line}`)
       .join("\n")}`;
     const result = decode(wrapped, { strict: false });
     if (result && typeof result === "object" && "_" in result) {
       const val = (result as Record<string, unknown>)["_"];
-      if (Array.isArray(val)) return val as Record<string, unknown>[];
+      if (Array.isArray(val) && val.length > 0) return val as Record<string, unknown>[];
     }
   } catch {
-    // Wrapped decode failed — fall through to direct decode
+    // Wrapped decode failed
   }
 
-  // Try direct decode (handles TOON tabular format like [N]{keys}: ...)
-  try {
-    const direct = decode(raw, { strict: false });
-    if (Array.isArray(direct)) return direct as Record<string, unknown>[];
-  } catch {
-    // Direct decode also failed
-  }
+  // Try pipe-separated table (legacy / fallback)
+  const pipeResult = parsePipeTable(dedented);
+  if (pipeResult) return pipeResult;
 
   // Try JSON fallback
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(dedented);
     if (Array.isArray(parsed)) return parsed as Record<string, unknown>[];
   } catch {
     // Not valid JSON either

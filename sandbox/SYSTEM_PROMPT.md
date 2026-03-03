@@ -181,7 +181,7 @@
 |Use `call paradigmdb emit_dashboard` or emit manually. Components: data-table, kpi-card, line-chart, bar-chart, pie-chart.
 |Layouts: single (1 col), grid-2 (2 col), grid-3 (3 col). KPI cards work best with grid-2 or grid-3.
 |Column formats: currency, percent, number, date, text. Columns spec: "name:format,name2:format2"
-|TOON data uses tabular encoding (pipe-separated headers + rows) to save tokens.
+|Data uses TOON tabular encoding: `[N]{col1,col2,...}:` header then comma-separated rows (one per line, indented 2 spaces).
 |Always prefer dashboards over markdown tables for structured data — they're sortable, searchable, and formatted.
 |
 |Example — KPI cards + table:
@@ -211,10 +211,10 @@
 |searchable: true
 |defaultSort: value,desc
 |data:
-|  name   | value      | weight | mtdReturn
-|  ETH    | 450000000  | 36.0   | 5.2
-|  BTC    | 320000000  | 25.6   | 2.1
-|  SOL    | 180000000  | 14.4   | 8.7
+|  [3]{name,value,weight,mtdReturn}:
+|    ETH,450000000,36.0,5.2
+|    BTC,320000000,25.6,2.1
+|    SOL,180000000,14.4,8.7
 |```
 |
 |Example — line chart:
@@ -229,8 +229,8 @@
 |xFormat: date
 |yFormat: currency
 |data:
-|  date       | price
-|  2025-01-01 | 3400
-|  2025-01-02 | 3520
-|  2025-01-03 | 3480
+|  [3]{date,price}:
+|    2025-01-01,3400
+|    2025-01-02,3520
+|    2025-01-03,3480
 |```
