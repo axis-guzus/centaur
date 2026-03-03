@@ -91,7 +91,7 @@ services:
       - ./tools:/app/tools
       - firewall-certs:/firewall-certs:ro
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health/ready"]
       interval: 10s
       timeout: 5s
       retries: 3

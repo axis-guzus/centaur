@@ -4,21 +4,61 @@ from typing import Annotated
 
 import asyncpg
 from fastapi import APIRouter, Depends
+from starlette.responses import JSONResponse, PlainTextResponse
 
 from api.deps import get_pool, verify_api_key
 
 router = APIRouter()
 
 
-@router.get("/health")
-async def health(pool: Annotated[asyncpg.Pool, Depends(get_pool)]) -> dict:
-    """Unauthenticated liveness check — no sensitive data."""
+async def _database_ready(pool: asyncpg.Pool) -> tuple[bool, str | None]:
     try:
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
-        return {"status": "ok"}
-    except Exception:
-        return {"status": "degraded"}
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+@router.get("/health/live")
+async def health_live() -> dict:
+    """Unauthenticated process liveness check."""
+    return {"status": "ok"}
+
+
+@router.get("/health")
+async def health() -> dict:
+    """Backward-compatible alias for liveness."""
+    return {"status": "ok"}
+
+
+@router.get("/health/ready")
+async def health_ready(pool: Annotated[asyncpg.Pool, Depends(get_pool)]) -> JSONResponse:
+    """Unauthenticated readiness check for dependency health."""
+    ready, error = await _database_ready(pool)
+    payload = {"status": "ok" if ready else "degraded", "database": ready}
+    if error:
+        payload["error"] = error
+    return JSONResponse(payload, status_code=200 if ready else 503)
+
+
+@router.get("/metrics")
+async def metrics(pool: Annotated[asyncpg.Pool, Depends(get_pool)]) -> PlainTextResponse:
+    """Minimal Prometheus metrics for API health alignment."""
+    ready, _ = await _database_ready(pool)
+    db_up = 1 if ready else 0
+    payload = "\n".join(
+        [
+            "# HELP ai_v2_api_up Process health indicator.",
+            "# TYPE ai_v2_api_up gauge",
+            "ai_v2_api_up 1",
+            "# HELP ai_v2_api_db_up Database readiness indicator.",
+            "# TYPE ai_v2_api_db_up gauge",
+            f"ai_v2_api_db_up {db_up}",
+            "",
+        ]
+    )
+    return PlainTextResponse(payload, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @router.get("/health/detail", dependencies=[Depends(verify_api_key)])
