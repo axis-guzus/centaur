@@ -128,7 +128,7 @@ def _is_loopback_ip(client_ip: str) -> bool:
 
 
 def _get_api_secret_key() -> str:
-    return _sm_read("API_SECRET_KEY") or ""
+    return _sm_read("API_SECRET_KEY") or os.environ.get("API_SECRET_KEY", "")
 
 
 def _is_sandbox_allowed_path(path: str) -> bool:

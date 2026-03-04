@@ -50,3 +50,9 @@ logs/
 
 # TypeScript incremental build state
 *.tsbuildinfo
+
+# Legal eval generated run artifacts (keep framework/cases in repo)
+evals/legal/legal-eval-*-cases/
+evals/legal/legal-eval-*.json
+evals/legal/legal-eval-*.md
+evals/legal/ben_corpus/

@@ -8,12 +8,13 @@ interface HarnessBadgeProps extends React.HTMLAttributes<HTMLDivElement> {
 }
 
 const HARNESS_STYLES: Record<string, string> = {
-  amp: "bg-muted/80 text-foreground/85",
-  "claude-code": "bg-muted text-muted-foreground",
-  codex: "bg-primary/12 text-primary",
-  "pi-mono": "bg-muted/70 text-foreground/80",
+  amp: "bg-cyan-500/10 text-cyan-400",
+  "claude-code": "bg-violet-500/10 text-violet-400",
+  codex: "bg-emerald-500/10 text-emerald-400",
+  "pi-mono": "bg-blue-500/10 text-blue-400",
   eng: "bg-primary/10 text-primary",
   engineer: "bg-primary/10 text-primary",
+  legal: "bg-amber-500/10 text-amber-400",
 };
 
 export function HarnessBadge({ harness, className, ...props }: HarnessBadgeProps) {
@@ -21,7 +22,7 @@ export function HarnessBadge({ harness, className, ...props }: HarnessBadgeProps
   return (
     <Badge
       className={cn(
-        "inline-flex items-center gap-1 rounded-[6px] text-xs font-semibold uppercase tracking-wider",
+        "rounded-sm text-[10px] font-semibold uppercase tracking-wider inline-flex items-center gap-1",
         HARNESS_STYLES[harness] ?? "bg-secondary text-muted-foreground",
         className,
       )}

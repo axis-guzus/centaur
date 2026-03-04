@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import inspect
 import json
@@ -15,6 +16,8 @@ import threading
 import tomllib
 import types
 from collections.abc import Callable
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, get_type_hints
 
@@ -29,6 +32,12 @@ from api.deps import verify_api_key
 from shared.tool_sdk import ToolContext, reset_tool_context, set_tool_context
 
 log = structlog.get_logger()
+_MAX_INLINE_TOOL_BINARY_BYTES = max(
+    1024, int(os.getenv("TOOL_BINARY_INLINE_MAX_BYTES", str(1 * 1024 * 1024)))
+)
+_TOOL_BINARY_PREVIEW_BYTES = max(
+    128, int(os.getenv("TOOL_BINARY_PREVIEW_BYTES", str(32 * 1024)))
+)
 
 
 class ToolMethod:
@@ -77,14 +86,64 @@ def _flatten_for_tabular(data: Any) -> Any:
     return flat
 
 
+def _normalize_for_serialization(data: Any) -> Any:
+    """Normalize rich Python values into JSON-friendly structures."""
+    if data is None or isinstance(data, (str, int, float, bool)):
+        return data
+    if isinstance(data, bytes):
+        if len(data) > _MAX_INLINE_TOOL_BINARY_BYTES:
+            preview_len = min(len(data), _TOOL_BINARY_PREVIEW_BYTES)
+            return {
+                "encoding": "base64",
+                "byte_length": len(data),
+                "content_base64_preview": base64.b64encode(data[:preview_len]).decode("ascii"),
+                "preview_byte_length": preview_len,
+                "inline_truncated": True,
+                "inline_max_bytes": _MAX_INLINE_TOOL_BINARY_BYTES,
+                "note": "Binary payload truncated; persist artifact and share path/ID for full content.",
+            }
+        return {
+            "encoding": "base64",
+            "byte_length": len(data),
+            "content_base64": base64.b64encode(data).decode("ascii"),
+        }
+    if isinstance(data, Enum):
+        return data.value
+    if is_dataclass(data):
+        return _normalize_for_serialization(asdict(data))
+    if isinstance(data, dict):
+        return {
+            str(key): _normalize_for_serialization(value)
+            for key, value in data.items()
+        }
+    if isinstance(data, (list, tuple, set)):
+        return [_normalize_for_serialization(item) for item in data]
+
+    model_dump = getattr(data, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _normalize_for_serialization(model_dump())
+        except TypeError:
+            pass
+
+    to_dict = getattr(data, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return _normalize_for_serialization(to_dict())
+        except TypeError:
+            pass
+    return data
+
+
 def _to_toon(data: Any) -> str:
     """Encode data as TOON for token-efficient LLM responses, falling back to JSON."""
+    normalized = _normalize_for_serialization(data)
     try:
-        toon = toon_encode(_flatten_for_tabular(data))
-        compact_json = json.dumps(data, separators=(",", ":"), default=str)
+        toon = toon_encode(_flatten_for_tabular(normalized))
+        compact_json = json.dumps(normalized, separators=(",", ":"), default=str)
         return toon if len(toon) <= len(compact_json) else compact_json
     except Exception:
-        return json.dumps(data, default=str)
+        return json.dumps(normalized, default=str)
 
 # Mapping from Python built-in types to clean names for schema output
 _BUILTIN_TYPE_NAMES: dict[type, str] = {
@@ -689,7 +748,10 @@ class ToolManager:
         """Return full method schemas for a tool's methods."""
         lt = self.tools.get(tool_name)
         if not lt:
-            return {"error": f"Tool '{tool_name}' not found"}
+            return {
+                "error": f"Tool '{tool_name}' not found",
+                "available": sorted(self.tools.keys()),
+            }
         method_schemas: list[dict[str, Any]] = []
         for method in sorted(lt.methods, key=lambda m: m.method_name):
             try:
@@ -734,12 +796,17 @@ class ToolManager:
         """Call a tool method by name and return the result as a TOON string."""
         lt = self.tools.get(tool_name)
         if not lt:
-            return json.dumps({"error": f"Tool '{tool_name}' not found"})
+            return json.dumps(
+                {"error": f"Tool '{tool_name}' not found", "available": sorted(self.tools.keys())}
+            )
 
         method = next((m for m in lt.methods if m.method_name == method_name), None)
         if not method:
             return json.dumps(
-                {"error": f"Method '{method_name}' not found in tool '{tool_name}'"}
+                {
+                    "error": f"Method '{method_name}' not found in tool '{tool_name}'",
+                    "available_methods": sorted(m.method_name for m in lt.methods),
+                }
             )
 
         token = set_tool_context(method.ctx)
@@ -792,7 +859,29 @@ class ToolManager:
 
         @router.post("/{tool_name}/{method_name}")
         async def call_tool(tool_name: str, method_name: str, request: Request):
-            body = await request.json() if await request.body() else {}
+            raw_body = await request.body()
+            body: Any = {}
+            if raw_body:
+                try:
+                    body = json.loads(raw_body)
+                except json.JSONDecodeError:
+                    error = json.dumps(
+                        {"error": "Request body must be valid JSON", "tool": tool_name, "method": method_name}
+                    )
+                    if "text/plain" in request.headers.get("accept", ""):
+                        return PlainTextResponse(error)
+                    return {"tool": tool_name, "method": method_name, "result": error}
+            if not isinstance(body, dict):
+                error = json.dumps(
+                    {
+                        "error": "Request body must be a JSON object",
+                        "tool": tool_name,
+                        "method": method_name,
+                    }
+                )
+                if "text/plain" in request.headers.get("accept", ""):
+                    return PlainTextResponse(error)
+                return {"tool": tool_name, "method": method_name, "result": error}
             result = await pm.call_tool(tool_name, method_name, body)
             if "text/plain" in request.headers.get("accept", ""):
                 return PlainTextResponse(result)

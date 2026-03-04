@@ -1,0 +1,249 @@
+{
+  "version": "v1",
+  "policy_revision": "single-file-expanded",
+  "meta": {
+    "owner": "legal-eng",
+    "status": "active",
+    "source_of_truth": "git",
+    "notes": [
+      "Single canonical policy file for legal mode and termsheet generation.",
+      "Deterministic rules live here; retrieval context comes from shared search plane."
+    ],
+    "canonical_inputs": [
+      "Internal term sheet archive (53 executed term sheets)",
+      "PortCo corporate doc archives (3 collections, 5700+ PDFs)",
+      "Preferred Stock Financing Checklist (Gunderson-sourced)",
+      "Overview of Venture Financings presentation (Gunderson 2023)",
+      "Paradigm deal agents operational handoff document",
+      "Paradigm term sheet template (DOCX)"
+    ],
+    "corpus_snapshot": {
+      "documents_discovered": 6560,
+      "documents_by_extension": { "pdf": 5739, "docx": 817, "pptx": 3, "txt": 1 },
+      "ben_term_sheets_analyzed": 53,
+      "cross_corpus_term_sheet_like_docs": 142
+    },
+    "source_precedence": [
+      {
+        "rank": 1,
+        "source": "paradigm_policy_rules",
+        "rule": "Red lines, compliance checks, and clause defaults are always controlling."
+      },
+      {
+        "rank": 2,
+        "source": "canonical_internal_financing_context",
+        "rule": "Canonical internal operating context is authoritative over precedent outliers and general market summaries."
+      },
+      {
+        "rank": 3,
+        "source": "executed_internal_precedents",
+        "rule": "Use as evidence and drafting style guidance, but do not override higher-priority policy/context."
+      },
+      {
+        "rank": 4,
+        "source": "general_market_and_law_firm_guidance",
+        "rule": "Use as supplemental context when not in conflict with higher-priority sources."
+      }
+    ],
+    "canonical_input_protocol": {
+      "first_class_inputs": [
+        "Internal term sheet archive (53 executed term sheets).",
+        "PortCo corporate document archives (multi-collection).",
+        "Preferred Stock Financing Checklist and Venture Financing Overview materials.",
+        "Internal deal-agents handoff text and current term sheet template."
+      ],
+      "usage_requirements": [
+        "For drafting and review, retrieve from first-class inputs before loading broad market context.",
+        "When source conflict appears, cite both and apply source_precedence deterministically.",
+        "Never treat a single precedent outlier as policy."
+      ]
+    }
+  },
+  "standard_terms": {
+    "term_sheet": {
+      "liquidation_preference": "1x non-participating",
+      "anti_dilution": "broad-based weighted average",
+      "debt_threshold": "$1M",
+      "qualified_ipo_threshold": ">$100M net proceeds",
+      "option_pool_percent": "10-15%",
+      "token_floor_percent": "50% for crypto",
+      "legal_fee_cap": "$75,000",
+      "no_shop_days": 45,
+      "nvca_version": "2025",
+      "economic_priority_order": ["valuation", "investment_amount", "option_pool", "board_and_voting"]
+    }
+  },
+  "red_lines": [
+    { "id": "1", "text": "Anti-dilution must be BBWA; never full ratchet." },
+    { "id": "2", "text": "Liquidation preference must be 1x non-participating." },
+    { "id": "3", "text": "Paradigm blocking rights are required when leading/meaningful owner." },
+    { "id": "4", "text": "Token issuance requires Paradigm consent." },
+    { "id": "5", "text": "IP/token transfer treated as deemed liquidation event." },
+    { "id": "6", "text": "SPA includes sanctions and outbound investment reps." },
+    { "id": "7", "text": "MRL names Paradigm Fund LP and Paradigm Two LP." },
+    { "id": "8", "text": "Major Investor qualification is explicit or any variance is surfaced." },
+    { "id": "9", "text": "Competitor carve-out excludes Paradigm affiliates." },
+    { "id": "10", "text": "Never waive DGCL Section 220 rights." },
+    { "id": "11", "text": "Paradigm consent required for key amendments." },
+    { "id": "12", "text": "Flag rights parity gaps vs other investors." },
+    { "id": "13", "text": "Sanctions language appears throughout." },
+    { "id": "14", "text": "Token warrant defaults to net exercise." },
+    { "id": "15", "text": "Lockup terms cannot be more onerous than insiders." },
+    { "id": "16", "text": "Smart contract restrictions require Paradigm consent." }
+  ],
+  "nice_to_haves": [
+    "Founder carveout at 2% (5% acceptable).",
+    "ROFR window target 30 days (45 acceptable).",
+    "Competitor list consent controls.",
+    "Generative AI representation language."
+  ],
+  "negotiation_priorities": [
+    { "priority": 1, "bucket": "economics", "items": ["valuation", "investment_amount", "option_pool", "board_and_voting"] },
+    { "priority": 2, "bucket": "critical_legal_controls", "items": ["anti_dilution", "liquidation", "amendment_veto", "sanctions_oisp"] },
+    { "priority": 3, "bucket": "structural_and_cleanup", "items": ["cross_doc_consistency", "definitions", "ancillary_alignment"] },
+    { "priority": 4, "bucket": "stylistic_nits", "items": ["drafting_style", "non_material_polish"] }
+  ],
+  "financing_process": {
+    "sequence": [
+      "term_sheet_draft", "missing_info_intake", "term_sheet_negotiation",
+      "counsel_kickoff_calls", "diligence_data_room_review",
+      "charter_review", "spa_review", "ira_review", "voting_review", "rofr_review",
+      "ancillary_doc_review", "substantially_final_circulation",
+      "signature_escrow", "charter_filing_and_close", "funding_and_receipt_confirmation"
+    ],
+    "notes": [
+      "Escalate economics to investment team.",
+      "Maintain founder relationship while preserving key protections.",
+      "Lead investor usually funds first; followers may wait for lead wire confirmation."
+    ]
+  },
+  "workflow_matrix": {
+    "review_order": [
+      { "step": 1, "document": "charter", "focus": "liquidation preference, anti-dilution, protective provisions, deemed liquidation" },
+      { "step": 2, "document": "spa", "focus": "economics, reps and warranties, closing conditions, sanctions and OISP" },
+      { "step": 3, "document": "ira", "focus": "major investor qualification, pro rata, section 220, amendment veto" },
+      { "step": 4, "document": "voting", "focus": "board composition, drag, amendment mechanics" },
+      { "step": 5, "document": "rofr", "focus": "transfer restrictions, carveouts, threshold consistency" },
+      { "step": 6, "document": "token_warrant", "focus": "net exercise, lockup MFN, smart-contract restrictions" },
+      { "step": 7, "document": "mrl_and_side_letters", "focus": "entity naming, rights parity, enforceability, closing completeness" }
+    ],
+    "phase_requirements": {
+      "intake": { "required_sections": ["Workflow", "Known Terms", "Assumptions", "Blocking Missing Fields", "DRI Follow-Ups"], "max_clarifying_questions": 5 },
+      "retrieval": { "required_sections": ["Knowledge Loaded", "Search Queries", "Evidence Table", "Evidence Gaps"], "minimum_searches": 3 },
+      "compliance": { "required_sections": ["Red Line Status", "Paradigm Check Matrix", "Leverage Calibration", "NVCA Baseline Checks", "Confidence"] }
+    },
+    "conflict_resolution": {
+      "rule": "When higher-priority sources conflict with lower-priority sources, follow the higher-priority source and explicitly note the conflict.",
+      "required_output_fields": ["conflict_detected", "higher_priority_source", "lower_priority_source", "resolution_rationale"]
+    },
+    "retrieval_query_templates": [
+      "internal canonical financing context {document_type} {clause_focus} process checklist",
+      "internal term sheet archive {stage} {intent} {document_type} drafting language",
+      "{company_name} {series} {instrument_type} term sheet protective provisions",
+      "{document_type} {clause_focus} NVCA 2025 Paradigm",
+      "{stage} {intent} {document_type} precedent drafting language"
+    ],
+    "output_contracts": {
+      "question": { "required_sections": ["Answer", "Assumptions and uncertainty boundaries", "Optional next actions", "Legal boundary"], "must_include_phrase_any": ["not a lawyer", "not legal advice"], "max_words": 450 },
+      "draft": { "required_sections": ["Scope + assumptions/defaulted fields", "Draft output summary", "Validation status", "Open risks requiring human judgment", "Suggested next action"], "max_words": 1200 },
+      "review_or_revision": { "required_sections": ["Scope and document set reviewed", "Severity-ranked findings", "Provision-level deviation detail", "Suggested language or correction direction", "Negotiation posture", "NVCA Baseline Checks", "Confidence score and unresolved uncertainties"], "severity_buckets": ["RED_LINE", "STANDARD", "NICE_TO_HAVE"], "max_words": 900 }
+    }
+  },
+  "numeric_guardrails": {
+    "defaults": {
+      "term_sheet": { "option_pool_percent": 10.0, "debt_threshold_usd": 1000000, "legal_fee_cap_usd": 75000, "no_shop_days": 45 },
+      "meaningful_owner": { "ownership_percent_min": 8.0, "investment_amount_min": 10000000 }
+    },
+    "ranges": {
+      "investment_amount_usd": { "min": 3000000, "max": 60000000 },
+      "post_money_valuation_usd": { "min": 20000000, "max": 1000000000 },
+      "ownership_percent": { "min": 5.0, "max": 30.0 },
+      "option_pool_percent": { "min": 3.0, "max": 20.0 },
+      "token_floor_percent": { "min": 30.0, "max": 60.0 },
+      "debt_threshold_usd": { "min": 250000, "max": 10000000 },
+      "legal_fee_cap_usd": { "min": 25000, "max": 100000 },
+      "no_shop_days": { "min": 21, "max": 60 }
+    },
+    "empirical_ranges_from_corpus": {
+      "option_pool_percent": { "min": 5.0, "max": 17.0, "median": 10.0, "mode": 10.0 },
+      "debt_threshold_usd": { "min": 500000, "max": 25000000, "median": 1000000, "mode": 1000000 },
+      "no_shop_days": { "min": 30, "max": 45, "mode": 45 },
+      "legal_fee_cap_usd": { "min": 25000, "max": 75000, "median": 50000, "frequent_values": [50000, 45000, 75000, 40000, 30000] }
+    }
+  },
+  "diligence_checklist": [
+    { "category": "corporate_cap_table", "priority": "critical", "items": ["Cap table reconciliation on fully diluted basis.", "Outstanding SAFE/convertible stack and conversion math.", "Option pool sufficiency and prior-round unusual terms.", "Board and stockholder approvals tie-out."] },
+    { "category": "regulatory_compliance", "priority": "critical", "items": ["Rule 506 and bad actor screening.", "Blue sky filing route and state notice obligations.", "HSR threshold analysis.", "CFIUS analysis for foreign investor exposure.", "Outbound investment and sanctions controls."] },
+    { "category": "ip_and_technology", "priority": "critical", "items": ["Employee and contractor IP assignments complete.", "Founder pre-incorporation IP chain-of-title.", "Open-source licensing and third-party restrictions.", "Smart contract ownership and upgrade rights."] },
+    { "category": "token_specific", "priority": "high", "items": ["Outstanding token rights and warrant schedule.", "Token allocation and lockup map.", "Smart contract audits and remediation status.", "Wallet custody and multisig governance."] }
+  ],
+  "exception_patterns": [
+    { "id": "participating_liq_exception", "pattern": "Participating liquidation appears in isolated deals.", "action": "Escalate and require explicit rationale before acceptance." },
+    { "id": "observer_fallback", "pattern": "Board observer used when seat not available or thresholded.", "action": "Track parity and trigger conditions explicitly." },
+    { "id": "major_investor_definition_variance", "pattern": "Major Investor thresholds vary across docs.", "action": "Force cross-document threshold tie-out." },
+    { "id": "token_package_not_universal", "pattern": "Token warrant not present in every deal.", "action": "Gate token checks on actual token relevance and doc set." }
+  ],
+  "recurring_clause_language": [
+    { "id": "clause_liq_pref", "default_language": "1x non-participating liquidation preference", "negotiation_posture": "Participating preference is exception territory." },
+    { "id": "clause_anti_dilution", "default_language": "Broad-based weighted average", "negotiation_posture": "Full-ratchet is a red-line conflict." },
+    { "id": "clause_protective_provisions", "default_language": "Preferred majority consent plus Paradigm-sensitive controls", "negotiation_posture": "Escalate missing blocking rights when lead." },
+    { "id": "clause_investor_rights", "default_language": "Major Investor based information and pro rata rights", "negotiation_posture": "Confirm qualification and rights parity." },
+    { "id": "clause_token_package", "default_language": "Net exercise, lockup MFN, consent around restrictive changes", "negotiation_posture": "Treat missing net exercise and lockup MFN as high severity." }
+  ],
+  "compliance_calibration": {
+    "late_stage_relax_rule_id": "blocking_rights",
+    "late_stage_signals": ["series h", "series g", "late-stage", "minority holder", "small holder", "1.3%"],
+    "non_lead_signals": ["not leading", "not lead investor"]
+  },
+  "compliance_rules": [
+    { "id": "anti_dilution_bbwa", "label": "Anti-dilution is broad-based weighted average", "severity": "RED_LINE", "required_any": ["broad-based weighted average", "bbwa"], "forbidden": ["full ratchet"] },
+    { "id": "liquidation_preference_1x_np", "label": "Liquidation preference is 1x non-participating", "severity": "RED_LINE", "required_any": ["1x non-participating", "1x non participating"], "forbidden": ["2x liquidation preference", "participating liquidation preference"] },
+    { "id": "blocking_rights", "label": "Paradigm blocking rights present when lead/meaningful owner", "severity": "RED_LINE", "required_all": ["paradigm", "consent", "protective provisions"] },
+    { "id": "token_issuance_consent", "label": "Token issuance requires Paradigm consent", "severity": "RED_LINE", "required_all": ["token", "consent", "paradigm"], "requires_token_relevance": true },
+    { "id": "deemed_liquidation_ip_token_transfer", "label": "IP/token transfer treated as deemed liquidation event where applicable", "severity": "RED_LINE", "required_all": ["deemed liquidation", "transfer"], "required_any": ["ip", "token"], "requires_token_relevance": true },
+    { "id": "major_investor_status", "label": "Paradigm qualifies as Major Investor", "severity": "RED_LINE", "required_all": ["major investor", "paradigm"] },
+    { "id": "competitor_carveout", "label": "Competitor carve-out excludes Paradigm affiliates", "severity": "RED_LINE", "required_any": ["in no event shall paradigm or its affiliates be a competitor"] },
+    { "id": "section_220", "label": "No waiver of DGCL Section 220 rights", "severity": "RED_LINE", "required_any": ["section 220", "dgcl section 220", "220 rights"], "forbidden": ["waive section 220", "waiver of section 220", "waiver of 220"] },
+    { "id": "amendment_veto", "label": "Amendment veto requires Paradigm written consent", "severity": "RED_LINE", "required_all": ["amend", "paradigm", "written consent"] },
+    { "id": "rights_parity", "label": "Rights parity language is preserved against other investors", "severity": "RED_LINE", "required_any": ["rights parity", "pari passu", "no less favorable than"] },
+    { "id": "mrl_named_entities", "label": "MRL names Paradigm Fund LP and Paradigm Two LP", "severity": "RED_LINE", "required_all": ["paradigm fund lp", "paradigm two lp"], "document_types": ["mrl", "mrl_and_side_letters", "side_letter"] },
+    { "id": "net_exercise_default", "label": "Token warrant defaults to net exercise", "severity": "RED_LINE", "required_any": ["net exercise"], "requires_token_relevance": true },
+    { "id": "lockup_mfn", "label": "Lockup not more onerous than insiders", "severity": "RED_LINE", "required_all": ["lockup", "not more restrictive"], "requires_token_relevance": true },
+    { "id": "smart_contract_restrictions_consent", "label": "Smart contract restrictions require Paradigm consent", "severity": "RED_LINE", "required_all": ["smart contract", "paradigm", "consent"], "requires_token_relevance": true },
+    { "id": "outbound_investment_rep", "label": "Outbound investment security representation included", "severity": "RED_LINE", "required_any": ["31 c.f.r. part 850", "outbound investment", "country of concern", "covered activity"] },
+    { "id": "sanctions_compliance", "label": "Sanctions compliance language present", "severity": "RED_LINE", "required_any": ["sanctions"] }
+  ],
+  "clause_defaults": {
+    "meaningful_owner": { "ownership_percent_min": 8.0, "investment_amount_min": 10000000 },
+    "base": {
+      "protective_provision_v_text": "any interested or related party transactions other than transactions entered into in the ordinary course of business on an arm's-length basis and benefits made available to all employees"
+    },
+    "stage_profiles": {
+      "late_minority": {
+        "protective_provision_v_text": "any interested or related party transactions above a materiality threshold, excluding ordinary-course and broad-based employee benefit actions, with board-level disclosure to Paradigm",
+        "other_rights_text": "Customary NVCA investor rights, including information rights and registration rights. Parties should use commercially reasonable efforts to preserve rights parity where practicable for a non-lead minority position."
+      },
+      "growth_lead": {
+        "protective_provision_v_text": "any interested or related party transactions other than ordinary-course arm's-length transactions and broad-based employee benefits, with Paradigm consent required for material exceptions"
+      }
+    },
+    "intent_overlays": {
+      "balanced": {},
+      "founder_friendly": {
+        "other_rights_text": "Customary NVCA investor rights with practical execution flexibility on timing and process, while preserving core Paradigm information and consent protections.",
+        "vesting_text": "Founder vesting subject to due diligence, with implementation timing coordinated to reduce operational disruption while preserving standard protection mechanics."
+      },
+      "investor_protective": {
+        "protective_provision_v_text": "any interested or related party transactions other than ordinary-course arm's-length transactions and broad-based employee benefits, with Paradigm written consent required for exceptions"
+      },
+      "token_heavy": {
+        "token_rights_text": "For any Tokens (other than non-fungible or similar ordinary-course assets), Paradigm receives its pro rata share (fully diluted) of launch supply and any insider-linked inflationary issuances, subject to net exercise defaults, lockup MFN parity, and Paradigm written-consent controls for material smart-contract restriction changes."
+      }
+    }
+  },
+  "provenance_examples": {
+    "template_docx": ["Template includes 1x non-participating liquidation preference and 45-day no-shop baseline.", "Template includes legal fee cap convention and standard NVCA framing."],
+    "handoff_txt": ["Red-line framing for BBWA, blocking rights, major investor qualification, and token controls.", "Review order and rights-parity guidance."],
+    "checklist_docx_and_gunderson_pptx": ["Regulatory diligence emphasis: Rule 506/Bad Actor, blue sky, HSR, CFIUS, OISP.", "Definitive doc package order and closing checklist discipline."]
+  }
+}

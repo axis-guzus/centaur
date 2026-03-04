@@ -67,5 +67,6 @@ export function harnessIconFor(harness: Harness | string): React.ComponentType<{
   if (harness === "codex") return OpenAIIcon;
   if (harness === "pi-mono") return PiMonoIcon;
   if (harness === "eng" || harness === "engineer") return ParadigmIcon;
+  if (harness === "legal") return ParadigmIcon;
   return PiMonoIcon;
 }

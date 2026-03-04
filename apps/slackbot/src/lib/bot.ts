@@ -1,11 +1,11 @@
-import crypto from "node:crypto";
+import * as crypto from "node:crypto";
 import { Chat, parseMarkdown, type Root } from "chat";
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createRedisState } from "@chat-adapter/state-redis";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import {
-  execute,
   extractRunOptions,
+  fetchThreadRuntimeConfig,
   interrupt,
   normalizeThreadKey,
   postThreadContextMessage,
@@ -18,8 +18,9 @@ import {
   type Harness,
 } from "./harness";
 import { ApiError } from "./api-client";
-import { truncateSlackText } from "./slack-text";
-import { renderDashboardsForSlack } from "./dashboard-slack";
+import { runModeExecution } from "./modes";
+import { buildLegalKickoffInstruction, buildLegalSessionContext } from "./modes/legal";
+import { MAX_SLACK_TEXT_CHARS, truncateSlackText } from "./slack-text";
 
 function formatErrorForSlack(error: unknown, context: string): string {
   if (error instanceof ApiError) {
@@ -42,12 +43,6 @@ const RETRY_DEFAULTS_MAX = 4;
 const THREAD_VIEWER_URL = process.env.THREAD_VIEWER_URL || "https://svc-ai.paradigm.xyz";
 const MAX_TRACKED_THREAD_MODES = 500;
 const SLACK_BOT_USERNAME = process.env.SLACK_BOT_USERNAME || "paradigm-ai";
-const REQUIRED_SLACK_ENV_KEYS = ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"] as const;
-type SlackEnvKey = (typeof REQUIRED_SLACK_ENV_KEYS)[number];
-type SlackBootstrapState = {
-  enabled: boolean;
-  missingEnvKeys: SlackEnvKey[];
-};
 
 type MarkdownNode = Root | Root["children"][number];
 type ThreadConfig = {
@@ -55,26 +50,25 @@ type ThreadConfig = {
   engine: Engine | null;
   model: string | null;
   budgetMode: BudgetMode | null;
+  legalLoopEnabled: boolean;
 };
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "";
-let slackBootstrapState: SlackBootstrapState = {
-  enabled: false,
-  missingEnvKeys: [...REQUIRED_SLACK_ENV_KEYS],
-};
+const REQUIRED_SLACK_ENV_KEYS = ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"] as const;
 
-function computeSlackBootstrapState(): SlackBootstrapState {
-  const missingEnvKeys = REQUIRED_SLACK_ENV_KEYS.filter((key) => !process.env[key]);
-  const state: SlackBootstrapState = {
-    enabled: missingEnvKeys.length === 0,
-    missingEnvKeys,
+export function getSlackBootstrapState(): { ready: boolean; missingEnvKeys: string[] } {
+  const missingEnvKeys = REQUIRED_SLACK_ENV_KEYS.filter((key) => {
+    const value = process.env[key];
+    return !value || value.trim().length === 0;
+  });
+  return {
+    ready: missingEnvKeys.length === 0,
+    missingEnvKeys: [...missingEnvKeys],
   };
-  slackBootstrapState = state;
-  return state;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function isLegalHarness(harness: Harness): boolean {
+  return harness === "legal";
 }
 
 type SlackReply = {
@@ -149,11 +143,6 @@ function messageIdentifier(message: {
   if (ts) return ts;
   const raw = `${message.threadId || ""}:${message.userId || ""}:${message.text || ""}`;
   return crypto.createHash("sha1").update(raw).digest("hex");
-}
-
-function isBusyRunError(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return normalized.includes("already in progress") || normalized.includes("run is already in progress");
 }
 
 function preprocessSlackLinks(text: string): string {
@@ -244,22 +233,102 @@ function renderSlackMessage(markdown: string) {
 }
 
 function toSlackMessage(markdown: string) {
-  return renderSlackMessage(truncateSlackText(renderDashboardsForSlack(markdown)));
+  return renderSlackMessage(truncateSlackText(markdown));
+}
+
+function splitSlackMessageChunks(markdown: string): string[] {
+  const text = markdown.trim();
+  if (!text) return [];
+  if (text.length <= MAX_SLACK_TEXT_CHARS) return [text];
+
+  const chunks: string[] = [];
+  const pushChunk = (value: string): void => {
+    const cleaned = value.trim();
+    if (cleaned) chunks.push(cleaned);
+  };
+
+  const paragraphs = text.split(/\n{2,}/);
+  let current = "";
+  for (const rawParagraph of paragraphs) {
+    const paragraph = rawParagraph.trim();
+    if (!paragraph) continue;
+
+    const paragraphCandidate = current ? `${current}\n\n${paragraph}` : paragraph;
+    if (paragraphCandidate.length <= MAX_SLACK_TEXT_CHARS) {
+      current = paragraphCandidate;
+      continue;
+    }
+
+    if (current) {
+      pushChunk(current);
+      current = "";
+    }
+
+    if (paragraph.length <= MAX_SLACK_TEXT_CHARS) {
+      current = paragraph;
+      continue;
+    }
+
+    const lines = paragraph.split("\n");
+    let lineChunk = "";
+    for (const rawLine of lines) {
+      const line = rawLine.trimEnd();
+      const lineCandidate = lineChunk ? `${lineChunk}\n${line}` : line;
+      if (lineCandidate.length <= MAX_SLACK_TEXT_CHARS) {
+        lineChunk = lineCandidate;
+        continue;
+      }
+
+      if (lineChunk) {
+        pushChunk(lineChunk);
+        lineChunk = "";
+      }
+
+      if (line.length <= MAX_SLACK_TEXT_CHARS) {
+        lineChunk = line;
+        continue;
+      }
+
+      let remainder = line;
+      while (remainder.length > MAX_SLACK_TEXT_CHARS) {
+        let cut = remainder.lastIndexOf(" ", MAX_SLACK_TEXT_CHARS);
+        if (cut < Math.floor(MAX_SLACK_TEXT_CHARS * 0.6)) {
+          cut = MAX_SLACK_TEXT_CHARS;
+        }
+        pushChunk(remainder.slice(0, cut));
+        remainder = remainder.slice(cut).trimStart();
+      }
+      lineChunk = remainder;
+    }
+    if (lineChunk) {
+      current = lineChunk;
+    }
+  }
+
+  if (current) {
+    pushChunk(current);
+  }
+  return chunks;
+}
+
+async function postThreadMarkdown(
+  thread: {
+    post: (message: ReturnType<typeof renderSlackMessage>) => Promise<unknown>;
+  },
+  markdown: string,
+): Promise<void> {
+  for (const chunk of splitSlackMessageChunks(markdown)) {
+    await thread.post(renderSlackMessage(chunk));
+  }
 }
 
 function createBot() {
-  const bootstrapState = computeSlackBootstrapState();
-  console.info(
-    "slack_adapter_bootstrap",
-    JSON.stringify({
-      enabled: bootstrapState.enabled,
-      missing_env_keys: bootstrapState.missingEnvKeys,
-    })
-  );
+  const hasSlackCreds =
+    process.env.SLACK_BOT_TOKEN && process.env.SLACK_SIGNING_SECRET;
 
   const bot = new Chat({
     userName: SLACK_BOT_USERNAME,
-    adapters: bootstrapState.enabled ? { slack: createSlackAdapter() } : {},
+    adapters: hasSlackCreds ? { slack: createSlackAdapter() } : {},
     state: process.env.REDIS_URL ? createRedisState() : createMemoryState(),
   });
   const threadConfigs = new Map<string, ThreadConfig>();
@@ -306,7 +375,6 @@ function createBot() {
     attachments?: Array<{ url?: string; name?: string }>,
     userId?: string,
   ) {
-    const parsed = extractRunOptions(messageText);
     const requestId = crypto.randomUUID().slice(0, 8);
     const rawThreadKey = thread.id;
     const threadKey = normalizeThreadKey(rawThreadKey);
@@ -315,18 +383,38 @@ function createBot() {
       .filter((a): a is { url: string; name: string } => !!a.url && !!a.name)
       .map((a) => ({ url: a.url, name: a.name }));
 
-    const harness: Harness = isFirstMessage
-      ? parsed.harness
-      : (previous?.harness ?? parsed.harness);
-    const engine = parsed.engine ?? previous?.engine ?? null;
+    let recovered: {
+      harness: Harness | null;
+      engine: Engine | null;
+      legalLoopEnabled: boolean | null;
+    } | null = null;
+    if (!isFirstMessage && !previous) {
+      try {
+        recovered = await fetchThreadRuntimeConfig(threadKey);
+      } catch (error) {
+        console.warn("thread_runtime_config_recovery_failed", {
+          thread: threadKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    const activeHarness = previous?.harness ?? recovered?.harness ?? null;
+    const activeEngine = previous?.engine ?? recovered?.engine ?? null;
+    const parsed = extractRunOptions(messageText, { activeHarness });
+    const harness: Harness = isFirstMessage ? parsed.harness : (activeHarness ?? parsed.harness);
+    const engine = parsed.engine ?? activeEngine ?? null;
     const model = parsed.model ?? previous?.model ?? null;
     const budgetMode = parsed.budgetMode ?? previous?.budgetMode ?? null;
+    const legalLoopEnabled = parsed.legalLoopExplicit
+      ? parsed.legalLoopEnabled
+      : (previous?.legalLoopEnabled ?? recovered?.legalLoopEnabled ?? true);
 
     if (
       !isFirstMessage &&
-      previous &&
+      activeHarness &&
       parsed.harnessExplicit &&
-      parsed.harness !== previous.harness
+      parsed.harness !== activeHarness
     ) {
       await thread.post(
         toSlackMessage(
@@ -337,10 +425,10 @@ function createBot() {
     }
     if (
       !isFirstMessage &&
-      previous &&
+      activeEngine &&
       parsed.engineExplicit &&
       parsed.engine &&
-      parsed.engine !== previous.engine
+      parsed.engine !== activeEngine
     ) {
       await thread.post(
         toSlackMessage(
@@ -351,18 +439,21 @@ function createBot() {
     }
 
     if (!parsed.cleanedText) {
-      await thread.post(
-        toSlackMessage(
-          "Please provide a prompt after flags. Example: `--eng implement retry logic` (after mentioning the bot)."
-        )
-      );
-      return;
+      if (!isLegalHarness(harness)) {
+        await thread.post(
+          toSlackMessage(
+            "Please provide a prompt after flags. Example: `--eng implement retry logic` (after mentioning the bot)."
+          )
+        );
+        return;
+      }
     }
 
-    setThreadConfig(threadKey, { harness, engine, model, budgetMode });
+    setThreadConfig(threadKey, { harness, engine, model, budgetMode, legalLoopEnabled });
 
     try {
-      const instruction = parsed.cleanedText;
+      const isLegalKickoff = isLegalHarness(harness) && !parsed.cleanedText;
+      const instruction = parsed.cleanedText || buildLegalKickoffInstruction();
       if (!isFirstMessage) {
         try {
           await interrupt(threadKey, requestId);
@@ -379,14 +470,20 @@ function createBot() {
 
       await thread.startTyping("Running...");
       let threadHistory = "";
+      let sessionEnvelope = "";
       if (isFirstMessage) {
         const { channel, threadTs } = splitThreadKey(threadKey);
         threadHistory = await fetchThreadHistory(channel, threadTs);
       }
 
-      let message = isFirstMessage
-        ? buildSessionContext(threadKey) + threadHistory + instruction
-        : instruction;
+      let message = instruction;
+      if (isFirstMessage) {
+        const contextPrefix = isLegalHarness(harness)
+          ? buildLegalSessionContext(threadKey, instruction, files)
+          : buildSessionContext(threadKey);
+        sessionEnvelope = contextPrefix + threadHistory;
+        message = sessionEnvelope + instruction;
+      }
 
       if (budgetMode) {
         message = `[budget: ${budgetMode}]\n\n${message}`;
@@ -397,31 +494,55 @@ function createBot() {
       });
 
       let result = "";
+      const legalMilestones = new Set([
+        "retrieval",
+        "analysis",
+        "critic",
+        "compliance",
+        "finalize",
+      ]);
+      const legalStartedAt = Date.now();
+      const postedPhaseUpdates = new Set<string>();
+      let lastMilestonePostAt = 0;
       try {
-        const maxAttempts = 6;
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          try {
-            result = await execute(
-              threadKey,
-              message,
-              harness,
-              requestId,
-              files.length > 0 ? files : undefined,
-              userId,
-              "slack",
-              model,
-              engine,
-            );
-            break;
-          } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            const shouldRetry = isBusyRunError(detail) && attempt < maxAttempts;
-            if (!shouldRetry) {
-              throw error;
-            }
-            await sleep(Math.min(500 * Math.pow(2, attempt - 1), 5000));
-          }
-        }
+        result = await runModeExecution({
+          harness,
+          legalLoopEnabled,
+          instruction,
+          message,
+          sessionEnvelope,
+          isLegalKickoff,
+          threadKey,
+          requestId,
+          files,
+          userId,
+          model,
+          engine,
+          onPhaseStatus: (phase) => {
+            thread.startTyping(`Legal phase: ${phase}...`).catch(() => {});
+            if (!isLegalHarness(harness)) return;
+            const basePhase = phase.replace(/-\d+$/, "");
+            if (!legalMilestones.has(basePhase)) return;
+            if (Date.now() - legalStartedAt < 45_000) return;
+            if (postedPhaseUpdates.has(basePhase)) return;
+            if (Date.now() - lastMilestonePostAt < 20_000) return;
+            postedPhaseUpdates.add(basePhase);
+            lastMilestonePostAt = Date.now();
+            const label =
+              basePhase === "critic"
+                ? "legal critique pass"
+                : basePhase === "compliance"
+                  ? "tool-backed compliance verification"
+                  : basePhase === "analysis"
+                    ? "deep analysis"
+                    : basePhase === "retrieval"
+                      ? "evidence retrieval across legal corpus"
+                    : "final response assembly";
+            thread
+              .post(toSlackMessage(`Legal update: ${label} in progress.`))
+              .catch(() => {});
+          },
+        });
       } finally {
         stopProgress();
       }
@@ -431,7 +552,7 @@ function createBot() {
         finalMessage = `[Thread Viewer](${viewerUrl})\n\n` + finalMessage;
       }
       if (finalMessage.trim()) {
-        await thread.post(toSlackMessage(finalMessage));
+        await postThreadMarkdown(thread, finalMessage);
       }
     } catch (error) {
       await thread.post(
@@ -492,14 +613,4 @@ let _bot: ReturnType<typeof createBot> | null = null;
 export function getBot() {
   if (!_bot) _bot = createBot();
   return _bot;
-}
-
-export function getSlackBootstrapState(): SlackBootstrapState {
-  if (!_bot) {
-    computeSlackBootstrapState();
-  }
-  return {
-    enabled: slackBootstrapState.enabled,
-    missingEnvKeys: [...slackBootstrapState.missingEnvKeys],
-  };
 }

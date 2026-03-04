@@ -1,7 +1,7 @@
-import { apiPost, ApiError, API_URL, API_KEY } from "./api-client";
+import { apiPost, apiGet, ApiError, API_URL, API_KEY } from "./api-client";
 
 export type Engine = "amp" | "claude-code" | "codex" | "pi-mono";
-export type Harness = Engine | "eng";
+export type Harness = Engine | "eng" | "legal";
 export type BudgetMode = "simple" | "auto" | "complex";
 export type FileAttachment = { url: string; name: string };
 export type ExecuteSource = "slack" | "thread_ui" | "api";
@@ -11,29 +11,41 @@ export type RunOptions = {
   engine: Engine | null;
   model: string | null;
   budgetMode: BudgetMode | null;
+  legalLoopEnabled: boolean;
+  legalLoopExplicit: boolean;
   cleanedText: string;
   harnessExplicit: boolean;
   engineExplicit: boolean;
   budgetExplicit: boolean;
 };
 
-export function extractRunOptions(text: string): RunOptions {
+type RunOptionContext = {
+  activeHarness?: Harness | null;
+};
+
+export function extractRunOptions(text: string, context: RunOptionContext = {}): RunOptions {
   let cleaned = text;
   let harness: Harness = "amp";
   let engine: Engine | null = null;
   let model: string | null = null;
   let budgetMode: BudgetMode | null = null;
+  let legalLoopEnabled = true;
+  let legalLoopExplicit = false;
   let harnessExplicit = false;
   let engineExplicit = false;
   let budgetExplicit = false;
+  const activeHarness = context.activeHarness ?? null;
+
+  const isPersonaHarness = (value: Harness): value is "eng" | "legal" =>
+    value === "eng" || value === "legal";
 
   const applyHarness = (value: Harness): void => {
-    if (value === "eng") {
-      harness = "eng";
+    if (isPersonaHarness(value)) {
+      harness = value;
       harnessExplicit = true;
       return;
     }
-    if (harness === "eng") {
+    if (isPersonaHarness(harness)) {
       engine = value;
       engineExplicit = true;
       return;
@@ -52,8 +64,16 @@ export function extractRunOptions(text: string): RunOptions {
     engRegex.lastIndex = 0;
   }
 
+  // --legal flag → harness="legal"
+  const legalRegex = /(^|\s)--legal(?=\s|$)/gi;
+  if (legalRegex.test(cleaned)) {
+    applyHarness("legal");
+    cleaned = cleaned.replace(legalRegex, " ");
+    legalRegex.lastIndex = 0;
+  }
+
   // harness=<value> key-value
-  const kvMatch = cleaned.match(/\bharness\s*=\s*(amp|claude-code|codex|pi-mono|eng)\b/i);
+  const kvMatch = cleaned.match(/\bharness\s*=\s*(amp|claude-code|codex|pi-mono|eng|legal)\b/i);
   if (kvMatch) {
     applyHarness(kvMatch[1].toLowerCase() as Harness);
     cleaned = (
@@ -86,7 +106,16 @@ export function extractRunOptions(text: string): RunOptions {
   );
   if (engineFlagMatch) {
     const parsedEngine = engineFlagMatch[2].toLowerCase() as Engine;
-    if ((harness as Harness) === "eng") {
+    const personaContextHarness =
+      isPersonaHarness(harness)
+        ? harness
+        : activeHarness && isPersonaHarness(activeHarness)
+          ? activeHarness
+          : null;
+    if (personaContextHarness) {
+      if (!isPersonaHarness(harness)) {
+        harness = personaContextHarness;
+      }
       engine = parsedEngine;
       engineExplicit = true;
     } else {
@@ -159,12 +188,39 @@ export function extractRunOptions(text: string): RunOptions {
     }
   }
 
+  // Legal loop mode flags (only relevant to --legal persona)
+  const legalSingleRegex = /(^|\s)--legal-single(?=\s|$)/gi;
+  if (legalSingleRegex.test(cleaned)) {
+    legalLoopEnabled = false;
+    legalLoopExplicit = true;
+    cleaned = cleaned.replace(legalSingleRegex, " ");
+    legalSingleRegex.lastIndex = 0;
+  }
+  const legalLoopRegex = /(^|\s)--legal-loop(?=\s|$)/gi;
+  if (legalLoopRegex.test(cleaned)) {
+    legalLoopEnabled = true;
+    legalLoopExplicit = true;
+    cleaned = cleaned.replace(legalLoopRegex, " ");
+    legalLoopRegex.lastIndex = 0;
+  }
+
+  const loopEqMatch = cleaned.match(/\blegal_loop\s*=\s*(single|multi)\b/i);
+  if (loopEqMatch) {
+    legalLoopEnabled = loopEqMatch[1].toLowerCase() === "multi";
+    legalLoopExplicit = true;
+    cleaned = (
+      cleaned.slice(0, loopEqMatch.index) + cleaned.slice(loopEqMatch.index! + loopEqMatch[0].length)
+    ).trim();
+  }
+
   cleaned = cleaned.replace(/\s+/g, " ").trim();
   return {
     harness,
     engine,
     model,
     budgetMode,
+    legalLoopEnabled,
+    legalLoopExplicit,
     cleanedText: cleaned,
     harnessExplicit,
     engineExplicit,
@@ -202,6 +258,8 @@ export async function execute(
   source: ExecuteSource = "slack",
   model?: string | null,
   engine?: Engine | null,
+  continueSession: boolean = true,
+  legalLoopEnabled?: boolean | null,
 ): Promise<string> {
   const result = await apiPost("/agent/execute", {
     slack_thread_key: threadKey,
@@ -212,6 +270,8 @@ export async function execute(
     ...(files && files.length > 0 ? { files } : {}),
     ...(userId ? { user_id: userId } : {}),
     ...(model ? { model } : {}),
+    ...(typeof legalLoopEnabled === "boolean" ? { legal_loop_enabled: legalLoopEnabled } : {}),
+    ...(continueSession ? {} : { continue_session: false }),
     source,
   });
   if (typeof result.error === "string" && result.error.trim()) {
@@ -235,6 +295,43 @@ export async function interrupt(
     sessionId: String(result.session_id ?? threadKey),
     status: String(result.status ?? "interrupted"),
   };
+}
+
+export async function fetchThreadRuntimeConfig(
+  threadKey: string
+): Promise<{ harness: Harness | null; engine: Engine | null; legalLoopEnabled: boolean | null }> {
+  const normalizedThreadKey = normalizeThreadKey(threadKey);
+  const response = await apiGet(
+    "/api/threads/detail",
+    { key: normalizedThreadKey },
+    { timeoutMs: 10_000, maxAttempts: 2 }
+  );
+  if (!response.ok) {
+    throw new ApiError(`thread detail failed (${response.status})`, response.status, response.status >= 500);
+  }
+  const payload = await response.json();
+  const rawHarness = String(payload?.harness ?? "").trim().toLowerCase();
+  const rawEngine = String(payload?.engine ?? "").trim().toLowerCase();
+  const rawMode = String(payload?.mode ?? "").trim().toLowerCase();
+  const harness: Harness | null =
+    rawHarness === "eng" || rawHarness === "engineer"
+      ? "eng"
+      : rawHarness === "legal"
+        ? "legal"
+        : rawHarness === "amp" || rawHarness === "claude-code" || rawHarness === "codex" || rawHarness === "pi-mono"
+          ? (rawHarness as Engine)
+          : null;
+  const engine: Engine | null =
+    rawEngine === "amp" || rawEngine === "claude-code" || rawEngine === "codex" || rawEngine === "pi-mono"
+      ? (rawEngine as Engine)
+      : null;
+  const legalLoopEnabled: boolean | null =
+    rawMode === "legal-single"
+      ? false
+      : rawMode === "legal-loop"
+        ? true
+        : null;
+  return { harness, engine, legalLoopEnabled };
 }
 
 export async function postThreadContextMessage(

@@ -7,9 +7,11 @@ claude-code, codex) inside them. Returns the final result text.
 import codecs
 import contextlib
 import io
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import tarfile
 import threading
@@ -17,7 +19,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import docker
 import httpx
@@ -32,13 +34,18 @@ from shared.tool_sdk import _sm_read
 log = structlog.get_logger()
 
 ENGINES = ("amp", "claude-code", "codex", "pi-mono")
-HARNESSES = (*ENGINES, "eng")
+HARNESSES = (*ENGINES, "eng", "legal")
 
 HARNESS_CONFIG: dict[str, dict[str, str]] = {
     "eng": {
         "engine": "claude-code",
         "persona": "eng",
         "repo": os.getenv("ENGINEER_DEFAULT_REPO", "paradigmxyz/ai_v2"),
+    },
+    "legal": {
+        "engine": "claude-code",
+        "persona": "legal",
+        "repo": os.getenv("LEGAL_DEFAULT_REPO", "paradigmxyz/ai_v2"),
     },
 }
 
@@ -48,6 +55,11 @@ MODEL_SHORTCUTS: dict[str, str] = {
     "haiku": "claude-haiku-3-5",
 }
 _DEFAULT_CODEX_MODEL = os.getenv("AGENT_CODEX_MODEL", "gpt-5.3-codex").strip() or "gpt-5.3-codex"
+_PROMPT_FILE_MAP: dict[str, str] = {
+    "eng": "sandbox/SYSTEM_PROMPT_ENG.md",
+    "legal": "sandbox/SYSTEM_PROMPT_LEGAL.md",
+}
+_PROMPT_CACHE: dict[str, str] = {}
 
 
 def _is_valid_engine(value: str | None) -> bool:
@@ -106,11 +118,100 @@ _CONTEXT_HEADER = (
 )
 _SLACK_MENTION_RE = re.compile(r"<@[^>]+>")
 _PLAIN_MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9._-]+")
+_UPLOAD_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_SLACK_HOST_SUFFIXES = ("slack.com", "slack-edge.com")
+_MAX_ATTACHMENT_BYTES = max(
+    1,
+    int(os.getenv("AGENT_ATTACHMENT_MAX_BYTES", str(50 * 1024 * 1024))),
+)
 
 
 def _fetch_secret(key: str) -> str:
-    """Fetch a secret from the secret manager. Returns empty string on failure."""
-    return _sm_read(key) or ""
+    """Fetch secret from manager, with env fallback for local/dev runs."""
+    return _sm_read(key) or os.getenv(key, "")
+
+
+def _session_mode_for(harness: str, legal_loop_enabled: bool | None = None) -> str:
+    """Map runtime controls to persisted session mode."""
+    if harness != "legal":
+        return "default"
+    if legal_loop_enabled is False:
+        return "legal-single"
+    return "legal-loop"
+
+
+def _host_matches_suffix(host: str, suffixes: tuple[str, ...]) -> bool:
+    host = host.strip(".").lower()
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
+
+
+def _is_private_or_local_host(host: str) -> bool:
+    lowered = host.strip().lower()
+    if not lowered or lowered == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(lowered)
+        return (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(lowered, None)
+    except socket.gaierror:
+        # Fail closed for unknown/unresolvable hosts.
+        return True
+
+    for info in infos:
+        addr = info[4][0]
+        ip = ipaddress.ip_address(addr)
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return True
+    return False
+
+
+def _sanitize_upload_filename(raw_name: str, used_names: set[str]) -> str:
+    trimmed = (raw_name or "").strip().replace("\\", "/")
+    basename = trimmed.rsplit("/", 1)[-1]
+    safe = _UPLOAD_SAFE_NAME_RE.sub("_", basename).strip("._")
+    if not safe:
+        safe = "attachment"
+
+    if len(safe) > 120:
+        stem, dot, ext = safe.rpartition(".")
+        if not dot:
+            stem = safe
+        safe = (stem[:80] + (dot + ext if dot else ""))[:120]
+
+    if safe not in used_names:
+        used_names.add(safe)
+        return safe
+
+    stem, dot, ext = safe.rpartition(".")
+    if not dot:
+        stem = safe
+    counter = 1
+    while True:
+        candidate = f"{stem}_{counter}"
+        if dot:
+            candidate = f"{candidate}.{ext}"
+        if candidate not in used_names:
+            used_names.add(candidate)
+            return candidate
+        counter += 1
 
 
 # In-memory session registry: slack_thread_key → session dict
@@ -542,56 +643,6 @@ def _extract_turn_user_id(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _max_event_seq_from_turns(turns: list[dict[str, Any]]) -> int:
-    max_seq = 0
-    for turn in turns:
-        events = turn.get("events")
-        if not isinstance(events, list):
-            continue
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            try:
-                seq = int(event.get("event_seq") or 0)
-            except Exception:
-                seq = 0
-            if seq > max_seq:
-                max_seq = seq
-    return max_seq
-
-
-def _max_event_seq_from_ledger(slack_thread_key: str) -> int:
-    try:
-        rows = _pg_read(
-            "SELECT COALESCE(MAX(event_seq), 0) AS max_seq FROM thread_events_ledger WHERE slack_thread_key = %s",
-            (slack_thread_key,),
-        )
-    except Exception:
-        return 0
-    if not rows:
-        return 0
-    try:
-        return int(rows[0].get("max_seq") or 0)
-    except Exception:
-        return 0
-
-
-def _event_seq_floor_for_session(session: dict[str, Any], slack_thread_key: str) -> int:
-    turns = session.get("turns")
-    turn_max = _max_event_seq_from_turns(turns if isinstance(turns, list) else [])
-    ledger_max = _max_event_seq_from_ledger(slack_thread_key)
-    return max(1, turn_max + 1, ledger_max + 1)
-
-
-def _harness_process_name(harness: str) -> str:
-    return {
-        "amp": "amp",
-        "claude-code": "claude",
-        "codex": "codex",
-        "pi-mono": "pi",
-    }.get(harness, "amp")
-
-
 def _display_user_message(message: str) -> str:
     """Return user-visible text without system context blocks."""
     text = message.strip()
@@ -613,64 +664,6 @@ def _display_user_message(message: str) -> str:
     return text
 
 
-def _persist_kickoff_error_turn(
-    slack_thread_key: str,
-    user_message: str,
-    error_message: str,
-    *,
-    source_tag: str,
-    user_id: str | None,
-) -> None:
-    found = _find_session_for_thread(slack_thread_key)
-    if not found:
-        return
-    canonical_key, session = found
-    now = time.time()
-    with _sessions_lock:
-        turns = session.setdefault("turns", [])
-        turn_id = len(turns) + 1
-        seq_floor = _event_seq_floor_for_session(session, canonical_key)
-        session["next_event_seq"] = max(int(session.get("next_event_seq") or 1), seq_floor)
-        turn = {
-            "turn_id": turn_id,
-            "user_message": user_message,
-            "events": [],
-            "result": f"❌ {error_message}",
-            "user_id": user_id,
-            "started_at": now,
-            "finished_at": now,
-            "exit_code": -1,
-            "timed_out": False,
-            "duration_s": 0,
-        }
-        _append_session_event(
-            session,
-            turn["events"],
-            {
-                "type": "thread.message",
-                "message_type": "command",
-                "source": source_tag or "api",
-                "text": user_message,
-                "created_at": datetime.now(UTC).isoformat(),
-                **({"user_id": user_id} if user_id else {}),
-            },
-        )
-        _append_session_event(
-            session,
-            turn["events"],
-            {
-                "type": "error",
-                "message": error_message,
-                "received_at": datetime.now(UTC).isoformat(),
-            },
-        )
-        turns.append(turn)
-        session["state"] = "error"
-        session["last_activity"] = now
-    _persist_session(session, canonical_key)
-    _persist_turn(canonical_key, turn)
-
-
 def _find_session_for_thread(thread_key: str) -> tuple[str, dict[str, Any]] | None:
     for candidate in _thread_key_aliases(thread_key):
         session = get_session_state(candidate)
@@ -683,7 +676,78 @@ def _resolve_existing_thread_key(thread_key: str) -> str:
     found = _find_session_for_thread(thread_key)
     if found:
         return found[0]
-    return thread_key.strip()
+    return _normalize_thread_key(thread_key)
+
+
+def _persist_kickoff_error_turn(
+    thread_key: str,
+    user_message: str,
+    error: str,
+    *,
+    source_tag: str,
+    user_id: str | None,
+) -> None:
+    found = _find_session_for_thread(thread_key)
+    if found:
+        canonical_key, session = found
+    else:
+        canonical_key = _normalize_thread_key(thread_key)
+        now = time.time()
+        session = {
+            "container_id": "",
+            "harness": "amp",
+            "engine": "amp",
+            "persona": None,
+            "mode": "default",
+            "repo": None,
+            "agent_thread_id": None,
+            "state": "error",
+            "created_at": now,
+            "last_activity": now,
+            "turns": [],
+            "pending_context_messages": [],
+            "thread_name": _thread_name_from_user_message(user_message),
+        }
+        set_session_state(canonical_key, session)
+
+    now = time.time()
+    event_time = datetime.now(UTC).isoformat()
+    turn = {
+        "turn_id": len(session.get("turns", [])) + 1,
+        "user_message": user_message,
+        "events": [
+            {
+                "type": "thread.message",
+                "message_type": "command",
+                "source": source_tag or "api",
+                "text": user_message,
+                "created_at": event_time,
+                **({"user_id": user_id} if user_id else {}),
+            },
+            {
+                "type": "error",
+                "error": error,
+                "received_at": event_time,
+            },
+        ],
+        "result": f"❌ {error}",
+        "user_id": user_id,
+        "started_at": now,
+        "finished_at": now,
+        "exit_code": -1,
+        "timed_out": False,
+        "duration_s": 0,
+    }
+
+    with _sessions_lock:
+        session.setdefault("turns", []).append(turn)
+        session["state"] = "error"
+        session["last_activity"] = now
+        if not str(session.get("thread_name") or "").strip():
+            session["thread_name"] = _thread_name_from_user_message(user_message)
+
+    _persist_turn(canonical_key, turn)
+    _persist_session(session, canonical_key)
 
 
 def _context_line(source: str | None, user_id: str | None, text: str) -> str:
@@ -724,21 +788,26 @@ def _format_pending_context_block(items: list[dict[str, Any]]) -> str:
     return block
 
 
-def _next_session_event_seq(session: dict[str, Any]) -> int:
-    next_seq = int(session.get("next_event_seq") or 1)
-    if next_seq < 1:
-        next_seq = 1
-    session["next_event_seq"] = next_seq + 1
-    return next_seq
-
-
-def _append_session_event(session: dict[str, Any], events: list[dict[str, Any]], payload: dict[str, Any]) -> None:
-    with _sessions_lock:
-        event = dict(payload)
-        if "event_seq" in event:
-            event["source_event_seq"] = event.get("event_seq")
-        event["event_seq"] = _next_session_event_seq(session)
-        events.append(event)
+def _extract_pending_context_files(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    files: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        attachments = item.get("attachments")
+        if not isinstance(attachments, list):
+            continue
+        for raw in attachments:
+            if not isinstance(raw, dict):
+                continue
+            url = str(raw.get("url") or "").strip()
+            name = str(raw.get("name") or "").strip()
+            if not url or not name:
+                continue
+            key = (url, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append({"url": url, "name": name})
+    return files
 
 
 def record_thread_message(
@@ -749,6 +818,7 @@ def record_thread_message(
     source: str | None = None,
     user_id: str | None = None,
     message_id: str | None = None,
+    attachments: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     normalized_text = text.strip()
     if not normalized_text:
@@ -762,13 +832,21 @@ def record_thread_message(
     normalized_source = str(source or "unknown").strip().lower() or "unknown"
     normalized_user_id = str(user_id or "").strip() or None
     normalized_message_id = str(message_id or "").strip() or None
-    seq_floor = _event_seq_floor_for_session(session, canonical_key)
+    normalized_attachments = [
+        {
+            "name": str(item.get("name") or "").strip(),
+            "url": str(item.get("url") or "").strip(),
+        }
+        for item in (attachments or [])
+        if isinstance(item, dict)
+        and str(item.get("name") or "").strip()
+        and str(item.get("url") or "").strip()
+    ]
 
     with _sessions_lock:
         turns = session.setdefault("turns", [])
         if not turns:
             return {"status": "no_active_session", "thread_key": canonical_key}
-        session["next_event_seq"] = max(int(session.get("next_event_seq") or 1), seq_floor)
         target_turn = turns[-1]
         events = target_turn.setdefault("events", [])
         if not isinstance(events, list):
@@ -800,7 +878,9 @@ def record_thread_message(
             event_payload["user_id"] = normalized_user_id
         if normalized_message_id:
             event_payload["message_id"] = normalized_message_id
-        _append_session_event(session, events, event_payload)
+        if normalized_attachments:
+            event_payload["attachments"] = normalized_attachments
+        events.append(event_payload)
 
         if message_type == "context":
             queue = session.setdefault("pending_context_messages", [])
@@ -813,6 +893,7 @@ def record_thread_message(
                     "source": normalized_source,
                     "user_id": normalized_user_id,
                     "message_id": normalized_message_id,
+                    "attachments": normalized_attachments,
                 }
             )
             if len(queue) > _MAX_PENDING_CONTEXT_MESSAGES:
@@ -844,92 +925,6 @@ def drain_pending_context_messages(thread_key: str) -> list[dict[str, Any]]:
     return items
 
 
-def _pending_context_from_ledger(thread_key: str) -> list[dict[str, Any]]:
-    aliases = _thread_key_aliases(thread_key)
-    if not aliases:
-        aliases = [thread_key]
-    rows = _pg_read(
-        """
-        SELECT e.payload
-        FROM thread_events_ledger e
-        WHERE e.slack_thread_key = ANY(%s)
-          AND (
-                e.event_type = 'thread.context'
-                OR (
-                    e.event_type = 'thread.message'
-                    AND COALESCE(e.payload->>'message_type', '') = 'context'
-                )
-          )
-          AND e.event_seq > COALESCE(
-                (
-                    SELECT MAX(cmd.event_seq)
-                    FROM thread_events_ledger cmd
-                    WHERE cmd.slack_thread_key = e.slack_thread_key
-                      AND cmd.event_type = 'thread.message'
-                      AND COALESCE(cmd.payload->>'message_type', '') = 'command'
-                ),
-                0
-          )
-        ORDER BY e.occurred_at ASC, e.event_seq ASC
-        LIMIT %s
-        """,
-        (aliases, _MAX_PENDING_CONTEXT_MESSAGES),
-    )
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        payload = row.get("payload")
-        payload_obj = payload if isinstance(payload, dict) else {}
-        text = str(payload_obj.get("text") or "").strip()
-        if not text:
-            continue
-        items.append(
-            {
-                "text": text,
-                "source": str(payload_obj.get("source") or ""),
-                "user_id": str(payload_obj.get("user_id") or ""),
-                "message_id": str(payload_obj.get("message_id") or ""),
-            }
-        )
-    return items
-
-
-def _dedupe_pending_context(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in items:
-        text = str(item.get("text") or "").strip()
-        if not text:
-            continue
-        message_id = str(item.get("message_id") or "").strip()
-        if message_id:
-            key = f"message_id:{message_id}"
-        else:
-            source = str(item.get("source") or "").strip()
-            user_id = str(item.get("user_id") or "").strip()
-            key = f"fallback:{source}:{user_id}:{text}"
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(item)
-    return deduped
-
-
-def has_active_non_engineer_session(thread_key: str) -> tuple[bool, str | None]:
-    """Return (True, harness) if an active non-engineer session would be overwritten."""
-    for candidate in _thread_key_aliases(thread_key):
-        session = get_session_state(candidate)
-        if not session:
-            continue
-        harness = session.get("harness")
-        if harness == "engineer":
-            continue
-        if harness not in HARNESSES:
-            continue
-        state = session.get("state", "")
-        if state not in _ACTIVE_SESSION_STATES:
-            continue
-        return (True, harness)
-    return (False, None)
 # Pool of pre-warmed, unclaimed containers (LIFO)
 _pool: list[str] = []  # container IDs
 _pool_lock = threading.Lock()
@@ -987,14 +982,18 @@ def _persist_session(session: dict[str, Any], key: str) -> None:
     _pg_write(
         """
         INSERT INTO agent_sessions
-            (slack_thread_key, container_id, harness, agent_thread_id,
-             state, created_at, last_activity, thread_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (slack_thread_key, container_id, harness, engine, persona, mode, agent_thread_id,
+             state, repo, created_at, last_activity, thread_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (slack_thread_key) DO UPDATE SET
             container_id    = EXCLUDED.container_id,
             harness         = EXCLUDED.harness,
+            engine          = EXCLUDED.engine,
+            persona         = EXCLUDED.persona,
+            mode            = EXCLUDED.mode,
             agent_thread_id = EXCLUDED.agent_thread_id,
             state           = EXCLUDED.state,
+            repo            = EXCLUDED.repo,
             last_activity   = EXCLUDED.last_activity,
             thread_name     = EXCLUDED.thread_name
         """,
@@ -1002,8 +1001,12 @@ def _persist_session(session: dict[str, Any], key: str) -> None:
             key,
             session["container_id"],
             session["harness"],
+            session.get("engine"),
+            session.get("persona"),
+            session.get("mode", "default"),
             session.get("agent_thread_id"),
             session["state"],
+            session.get("repo"),
             _ts(session["created_at"]),
             _ts(session["last_activity"]),
             session.get("thread_name"),
@@ -1113,104 +1116,10 @@ def _persist_turn(key: str, turn: dict[str, Any]) -> None:
             psycopg2.extras.Json(artifacts, dumps=lambda o: json.dumps(o, default=str)),
         ),
     )
-    _persist_turn_events_ledger(key, turn)
-
-
-def _persist_turn_events_ledger(key: str, turn: dict[str, Any]) -> None:
-    events = turn.get("events")
-    if not isinstance(events, list) or not events:
-        return
-    try:
-        conn = _pg_conn()
-        if not conn:
-            return
-        try:
-            with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Keep sequence allocation atomic per thread across all writers.
-                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
-                cur.execute(
-                    """
-                    SELECT COALESCE(MAX(event_seq), 0) AS max_seq
-                    FROM thread_events_ledger
-                    WHERE slack_thread_key = %s
-                    """,
-                    (key,),
-                )
-                row = cur.fetchone() or {}
-                next_seq = int(row.get("max_seq") or 0)
-                for event in events:
-                    if not isinstance(event, dict):
-                        continue
-                    try:
-                        event_seq = int(event.get("event_seq") or 0)
-                    except Exception:
-                        event_seq = 0
-                    if event_seq <= 0:
-                        next_seq += 1
-                        event_seq = next_seq
-                    elif event_seq > next_seq:
-                        next_seq = event_seq
-                    event_id = f"{key}:{turn.get('turn_id')}:{event_seq}"
-                    source = str(event.get("source") or "agent")
-                    event_type = str(event.get("type") or "event")
-                    cur.execute(
-                        """
-                        INSERT INTO thread_events_ledger
-                            (event_id, slack_thread_key, source, event_type, event_seq, occurred_at, payload)
-                        VALUES (%s, %s, %s, %s, %s, now(), %s::jsonb)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        (
-                            event_id,
-                            key,
-                            source,
-                            event_type,
-                            event_seq,
-                            json.dumps(event, default=str),
-                        ),
-                    )
-        finally:
-            conn.close()
-    except Exception as exc:
-        log.debug("persist_turn_events_ledger_failed", error=str(exc), slack_thread_key=key)
 
 
 def _delete_session(key: str) -> None:
     _pg_write("DELETE FROM agent_sessions WHERE slack_thread_key = %s", (key,))
-
-
-def _mark_session_stopped(key: str, session: dict[str, Any]) -> None:
-    session["state"] = "stopped"
-    session["last_activity"] = time.time()
-    _persist_session(session, key)
-
-
-def _max_turn_id_from_pg(slack_thread_key: str) -> int:
-    aliases = _thread_key_aliases(slack_thread_key)
-    rows = _pg_read(
-        "SELECT COALESCE(MAX(turn_id), 0) AS max_turn_id FROM agent_turns WHERE slack_thread_key = ANY(%s)",
-        (aliases,),
-    )
-    if not rows:
-        return 0
-    try:
-        return int(rows[0].get("max_turn_id") or 0)
-    except Exception:
-        return 0
-
-
-def _next_turn_id(slack_thread_key: str, session: dict[str, Any]) -> int:
-    turns = session.get("turns")
-    in_memory_max = 0
-    if isinstance(turns, list):
-        for turn in turns:
-            if not isinstance(turn, dict):
-                continue
-            try:
-                in_memory_max = max(in_memory_max, int(turn.get("turn_id") or 0))
-            except Exception:
-                continue
-    return max(in_memory_max, _max_turn_id_from_pg(slack_thread_key)) + 1
 
 
 def _docker_client() -> docker.DockerClient:
@@ -1369,15 +1278,10 @@ def _container_env() -> list[str]:
     manager key (e.g. ``GITHUB_TOKEN`` → ``SVC_PARADIGM_GITHUB_TOKEN``).
     """
     firewall_host = os.getenv("FIREWALL_HOST", "firewall")
-    api_secret = (_fetch_secret("API_SECRET_KEY") or "").strip()
-    if not api_secret:
-        api_secret = (os.getenv("API_SECRET_KEY") or "").strip()
-    if not api_secret:
-        raise RuntimeError("API_SECRET_KEY is required to launch sandbox containers")
 
     env = [
         f"AI_V2_API_URL={os.getenv('AGENT_API_URL', 'http://api:8000')}",
-        f"AI_V2_API_KEY={api_secret}",
+        f"AI_V2_API_KEY={_fetch_secret('API_SECRET_KEY')}",
     ]
 
     # Pull in every secret from the secret manager as KEY=KEY placeholders.
@@ -1425,8 +1329,39 @@ def _resolve_model(model: str | None) -> str | None:
     return MODEL_SHORTCUTS.get(model.lower(), model)
 
 
+def _load_persona_prompt(persona: str | None) -> str | None:
+    if not persona:
+        return None
+    normalized = persona.strip().lower()
+    if not normalized:
+        return None
+    if normalized in _PROMPT_CACHE:
+        return _PROMPT_CACHE[normalized]
+
+    rel_path = _PROMPT_FILE_MAP.get(normalized)
+    if not rel_path:
+        return None
+
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    prompt_path = os.path.join(root, rel_path)
+    try:
+        with open(prompt_path, encoding="utf-8") as f:
+            prompt = f.read().strip()
+    except OSError:
+        return None
+    if not prompt:
+        return None
+
+    _PROMPT_CACHE[normalized] = prompt
+    return prompt
+
+
 def _build_command(
-    harness: str, message: str, thread_id: str | None, model: str | None = None
+    harness: str,
+    message: str,
+    thread_id: str | None,
+    model: str | None = None,
+    system_prompt: str | None = None,
 ) -> list[str]:
     engine = _resolve_engine(harness)
     resolved_model = _resolve_model(model)
@@ -1438,6 +1373,7 @@ def _build_command(
             "--output-format",
             "stream-json",
             "--verbose",
+            *(["--system-prompt", system_prompt] if system_prompt else []),
             *(["--model", resolved_model] if resolved_model else []),
             *(["--session-id", thread_id] if thread_id else []),
             "-p",
@@ -1566,66 +1502,131 @@ def _extract_result(
 def _download_files_to_container(
     container: Any,
     files: list[dict[str, str]],
-) -> list[str]:
+) -> tuple[list[str], list[dict[str, str]]]:
     """Download files and copy them into the container.
 
-    Returns list of in-container paths for successfully copied files.
+    Returns (in-container paths, per-file failures).
     """
     upload_dir = "/home/agent/uploads"
     container.exec_run(["mkdir", "-p", upload_dir])
 
     slack_token = _fetch_secret("SLACK_BOT_TOKEN")
     paths: list[str] = []
+    failures: list[dict[str, str]] = []
+    used_names: set[str] = set()
 
     for f in files:
-        url = f["url"]
-        original_name = f["name"]
-        # Ensure archive members cannot escape upload_dir inside the container.
-        name = os.path.basename(original_name.replace("\x00", "").strip()) or "attachment"
-        headers: dict[str, str] = {}
-        host = (urlparse(url).hostname or "").lower()
-        if slack_token and (host == "slack.com" or host.endswith(".slack.com")):
-            headers["Authorization"] = f"Bearer {slack_token}"
+        url = str(f.get("url") or "").strip()
+        raw_name = str(f.get("name") or "").strip()
+        safe_name = _sanitize_upload_filename(raw_name, used_names)
+        current_url = url
 
         try:
-            with httpx.Client(timeout=30, follow_redirects=True) as client:
-                resp = client.get(url, headers=headers)
-                resp.raise_for_status()
-                content_type = resp.headers.get("content-type", "")
-                if "text/html" in content_type:
-                    log.warning(
-                        "file_download_got_html",
-                        url=url,
-                        name=name,
-                        hint="Bot may be missing files:read scope",
-                    )
-                    continue
-                data = resp.content
+            data = b""
+            with httpx.Client(timeout=30, follow_redirects=False) as client:
+                for _ in range(6):
+                    parsed = urlparse(current_url)
+                    host = (parsed.hostname or "").strip().lower()
+                    if parsed.scheme.lower() != "https":
+                        raise ValueError(f"unsupported attachment scheme: {parsed.scheme!r}")
+                    if not host:
+                        raise ValueError("attachment URL missing host")
+                    if _is_private_or_local_host(host):
+                        raise ValueError(f"attachment host resolves to private/local address: {host}")
+
+                    headers: dict[str, str] = {}
+                    if _host_matches_suffix(host, _SLACK_HOST_SUFFIXES) and slack_token:
+                        headers["Authorization"] = f"Bearer {slack_token}"
+
+                    with client.stream("GET", current_url, headers=headers) as resp:
+                        if resp.status_code in (301, 302, 303, 307, 308):
+                            location = str(resp.headers.get("location") or "").strip()
+                            if not location:
+                                raise ValueError(
+                                    f"redirect without location header (status={resp.status_code})"
+                                )
+                            current_url = urljoin(current_url, location)
+                            continue
+
+                        resp.raise_for_status()
+                        content_type = resp.headers.get("content-type", "")
+                        if "text/html" in content_type:
+                            log.warning(
+                                "file_download_got_html",
+                                url=current_url,
+                                name=safe_name,
+                                hint="Bot may be missing files:read scope",
+                            )
+                            failures.append(
+                                {
+                                    "name": safe_name,
+                                    "url": url,
+                                    "reason": "downloaded html instead of file content",
+                                }
+                            )
+                            data = b""
+                            break
+                        content_length = int(resp.headers.get("content-length", "0") or "0")
+                        if content_length > _MAX_ATTACHMENT_BYTES:
+                            log.warning(
+                                "file_download_too_large",
+                                url=current_url,
+                                name=safe_name,
+                                content_length=content_length,
+                                max_bytes=_MAX_ATTACHMENT_BYTES,
+                            )
+                            failures.append(
+                                {
+                                    "name": safe_name,
+                                    "url": url,
+                                    "reason": (
+                                        f"file size {content_length} exceeds max "
+                                        f"{_MAX_ATTACHMENT_BYTES} bytes"
+                                    ),
+                                }
+                            )
+                            data = b""
+                            break
+                        chunks: list[bytes] = []
+                        size = 0
+                        for chunk in resp.iter_bytes():
+                            size += len(chunk)
+                            if size > _MAX_ATTACHMENT_BYTES:
+                                raise ValueError(
+                                    f"download exceeds max size {_MAX_ATTACHMENT_BYTES} bytes"
+                                )
+                            chunks.append(chunk)
+                        data = b"".join(chunks)
+                        break
+                else:
+                    raise ValueError("too many redirects while downloading attachment")
+            if not data:
+                continue
         except Exception as exc:
-            log.warning("file_download_failed", url=url, error=str(exc))
+            log.warning("file_download_failed", url=url, name=safe_name, error=str(exc))
+            failures.append(
+                {
+                    "name": safe_name,
+                    "url": url,
+                    "reason": str(exc),
+                }
+            )
             continue
 
         # Build a tar archive in memory and put_archive into container
         tar_buf = io.BytesIO()
         with tarfile.open(fileobj=tar_buf, mode="w") as tar:
-            info = tarfile.TarInfo(name=name)
+            info = tarfile.TarInfo(name=safe_name)
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
         tar_buf.seek(0)
         container.put_archive(upload_dir, tar_buf)
 
-        dest = f"{upload_dir}/{name}"
+        dest = f"{upload_dir}/{safe_name}"
         paths.append(dest)
-        log.info(
-            "file_copied",
-            name=name,
-            original_name=original_name,
-            size=len(data),
-            dest=dest,
-            host=host,
-        )
+        log.info("file_copied", name=safe_name, size=len(data), dest=dest)
 
-    return paths
+    return paths, failures
 
 
 class AgentClient:
@@ -1643,7 +1644,7 @@ class AgentClient:
 
         Args:
             slack_thread_key: Unique thread ID (e.g. "C04ABC:1234567890.123456")
-            harness: Agent harness — amp, claude-code, codex, pi-mono, eng
+            harness: Agent harness — amp, claude-code, codex, pi-mono, eng, legal
             repo: Optional repo path to set as working directory
             request_id: Correlation ID for end-to-end latency tracing
             engine: Optional engine override (persona harnesses only)
@@ -1675,8 +1676,8 @@ class AgentClient:
                     container = client.containers.get(existing["container_id"])
                     container.stop(timeout=5)
                     container.remove()
-                _mark_session_stopped(slack_thread_key, existing)
                 pop_session_state(slack_thread_key)
+                _delete_session(slack_thread_key)
                 existing = None
 
         # Reuse existing container if alive
@@ -1734,7 +1735,9 @@ class AgentClient:
                     "ai2.thread": slack_thread_key,
                     "ai2.harness": requested_harness,
                     "ai2.engine": effective_engine,
+                    "ai2.mode": _session_mode_for(requested_harness),
                     **({"ai2.persona": persona} if persona else {}),
+                    **({"ai2.repo": effective_repo} if effective_repo else {}),
                 },
                 slack_thread_key=slack_thread_key,
                 persona=persona,
@@ -1751,6 +1754,8 @@ class AgentClient:
             "harness": requested_harness,
             "engine": effective_engine,
             "persona": persona,
+            "mode": _session_mode_for(requested_harness),
+            "repo": effective_repo,
             "agent_thread_id": None,
             "state": "running",
             "created_at": time.time(),
@@ -1758,7 +1763,6 @@ class AgentClient:
             "turns": [],
             "pending_context_messages": [],
             "thread_name": None,
-            "next_event_seq": max(1, _max_event_seq_from_ledger(slack_thread_key) + 1),
         }
         set_session_state(slack_thread_key, session)
         _persist_session(session, slack_thread_key)
@@ -1793,6 +1797,8 @@ class AgentClient:
         user_id: str | None = None,
         model: str | None = None,
         engine: str | None = None,
+        continue_session: bool = True,
+        legal_loop_enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Execute a message in a sandbox, spawning one if needed.
 
@@ -1800,7 +1806,6 @@ class AgentClient:
         and returns the final result text. If *emit* is provided, progress
         events are streamed to the caller in real-time.
         """
-        slack_thread_key = _resolve_existing_thread_key(slack_thread_key)
         _emit = emit or (lambda _: None)
         rid = request_id or ""
         source_tag = str(source or "api").strip().lower()
@@ -1808,7 +1813,6 @@ class AgentClient:
         mirror_to_slack = source_tag in {"thread_ui", "thread-view", "ui"}
         actor_key = _execution_actor_key(user_id, source_tag, slack_thread_key)
         slot_acquired = False
-        live_turn: dict[str, Any] | None = None
         execute_lock = get_execute_lock(slack_thread_key)
         if not execute_lock.acquire(blocking=False):
             return {
@@ -1825,6 +1829,7 @@ class AgentClient:
             requested_harness = (harness or "").strip() or (
                 str(session.get("harness") or "amp") if session else "amp"
             )
+            requested_mode = _session_mode_for(requested_harness, legal_loop_enabled)
             try:
                 effective_engine, effective_persona, _effective_repo = _resolve_run_profile(
                     requested_harness,
@@ -1848,8 +1853,8 @@ class AgentClient:
                         container = client.containers.get(session["container_id"])
                         container.stop(timeout=5)
                         container.remove()
-                    _mark_session_stopped(slack_thread_key, session)
                     pop_session_state(slack_thread_key)
+                    _delete_session(slack_thread_key)
                     session = None
 
             slot_acquired, queue_wait_s, queue_position = _acquire_execution_slot(
@@ -1916,29 +1921,69 @@ class AgentClient:
                 client = _docker_client()
                 container = client.containers.get(session["container_id"])
 
-            # Download and copy files into the container
-            if files:
-                _emit({"type": "status", "stage": "files.downloading", "count": len(files)})
-                file_paths = _download_files_to_container(container, files)
+            if session.get("mode") != requested_mode:
+                session["mode"] = requested_mode
+
+            pending_context_items = drain_pending_context_messages(slack_thread_key)
+            pending_context = _format_pending_context_block(pending_context_items)
+            pending_context_files = _extract_pending_context_files(pending_context_items)
+            files_to_download: list[dict[str, str]] = []
+            seen_files: set[tuple[str, str]] = set()
+            for source_files in (files or [], pending_context_files):
+                for item in source_files:
+                    url = str(item.get("url") or "").strip()
+                    name = str(item.get("name") or "").strip()
+                    if not url or not name:
+                        continue
+                    key = (url, name)
+                    if key in seen_files:
+                        continue
+                    seen_files.add(key)
+                    files_to_download.append({"url": url, "name": name})
+
+            # Download and copy files into the container.
+            if files_to_download:
+                _emit(
+                    {
+                        "type": "status",
+                        "stage": "files.downloading",
+                        "count": len(files_to_download),
+                    }
+                )
+                file_paths, file_failures = _download_files_to_container(
+                    container,
+                    files_to_download,
+                )
+                if file_failures:
+                    failure_text = "\n".join(
+                        f"- {item.get('name')}: {item.get('reason')}"
+                        for item in file_failures
+                    )
+                    return {
+                        "error": (
+                            "Attachment download failed for one or more files. "
+                            "Please fix the files and retry.\n"
+                            f"{failure_text}"
+                        )
+                    }
                 if file_paths:
                     listing = "\n".join(f"- {p}" for p in file_paths)
-                    message = f"{message}\n\nAttached files (already downloaded to the container):\n{listing}"
-            pending_context_items = drain_pending_context_messages(slack_thread_key)
-            pending_context_items.extend(_pending_context_from_ledger(slack_thread_key))
-            pending_context = _format_pending_context_block(
-                _dedupe_pending_context(pending_context_items)
-            )
+                    message = (
+                        f"{message}\n\nAttached files (already downloaded to the container):\n{listing}"
+                    )
             command_message = message
             if pending_context:
                 command_message = (
                     f"{message.rstrip()}\n\n{_THREAD_CONTEXT_DELIMITER}\n{pending_context}"
                 )
 
+            persona_prompt = _load_persona_prompt(str(session.get("persona") or ""))
             cmd = _build_command(
                 str(session.get("engine") or session["harness"]),
                 command_message,
-                session["agent_thread_id"],
+                session["agent_thread_id"] if continue_session else None,
                 model,
+                persona_prompt,
             )
 
             started_ts = time.time()
@@ -1953,65 +1998,31 @@ class AgentClient:
                 harness=session["harness"],
             )
 
-            seq_floor = _event_seq_floor_for_session(session, slack_thread_key)
-
-            # Create the turn on the session immediately so SSE can stream it live.
-            with _sessions_lock:
-                session["next_event_seq"] = max(
-                    int(session.get("next_event_seq") or 1),
-                    seq_floor,
-                )
-                turn_id = _next_turn_id(slack_thread_key, session)
-                live_turn = {
-                    "turn_id": turn_id,
-                    "user_message": display_message,
-                    "events": [],
-                    "result": "",
-                    "user_id": user_id,
-                    "started_at": started_ts,
-                    "finished_at": None,
-                    "exit_code": None,
-                    "timed_out": False,
-                    "duration_s": 0,
+            # Create the turn on the session immediately so SSE can stream it live
+            live_turn: dict[str, Any] = {
+                "turn_id": len(session.get("turns", [])) + 1,
+                "user_message": display_message,
+                "events": [],
+                "result": "",
+                "user_id": user_id,
+                "started_at": started_ts,
+                "finished_at": None,
+                "exit_code": None,
+                "timed_out": False,
+                "duration_s": 0,
+            }
+            live_turn["events"].append(
+                {
+                    "type": "thread.message",
+                    "message_type": "command",
+                    "source": source_tag or "api",
+                    "text": display_message,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    **({"user_id": user_id} if user_id else {}),
                 }
-                _append_session_event(
-                    session,
-                    live_turn["events"],
-                    {
-                        "type": "thread.message",
-                        "message_type": "command",
-                        "source": source_tag or "api",
-                        "text": display_message,
-                        "created_at": datetime.now(UTC).isoformat(),
-                        **({"user_id": user_id} if user_id else {}),
-                    },
-                )
+            )
+            with _sessions_lock:
                 session.setdefault("turns", []).append(live_turn)
-            # Persist a turn stub early so in-flight runs survive process crashes.
-            _persist_turn(slack_thread_key, live_turn)
-
-            checkpoint_last_persisted = time.monotonic()
-            events_since_checkpoint = 0
-            checkpoint_interval_s = 3.0
-            checkpoint_event_batch = 20
-
-            def checkpoint_turn(force: bool = False) -> None:
-                nonlocal checkpoint_last_persisted, events_since_checkpoint
-                if (
-                    not force
-                    and events_since_checkpoint < checkpoint_event_batch
-                    and (time.monotonic() - checkpoint_last_persisted) < checkpoint_interval_s
-                ):
-                    return
-                _persist_turn(slack_thread_key, live_turn)
-                checkpoint_last_persisted = time.monotonic()
-                events_since_checkpoint = 0
-
-            def append_live_event(payload: dict[str, Any]) -> None:
-                nonlocal events_since_checkpoint
-                _append_session_event(session, live_turn["events"], payload)
-                events_since_checkpoint += 1
-                checkpoint_turn()
 
             # Use low-level exec API for streaming
             api = client.api
@@ -2040,7 +2051,6 @@ class AgentClient:
             buf = ""
             err_buf = ""
             timed_out = False
-            shutdown_interrupted = False
             first_output_logged = False
             started = time.monotonic()
             last_output_at = started
@@ -2052,7 +2062,6 @@ class AgentClient:
                     # instead of trying to continue a corrupted session
                     with _sessions_lock:
                         session["agent_thread_id"] = None
-                    shutdown_interrupted = True
                     break
                 if time.monotonic() - last_output_at > EXEC_IDLE_TIMEOUT:
                     timed_out = True
@@ -2096,10 +2105,10 @@ class AgentClient:
                                     for normalized in normalized_events:
                                         normalized["received_at"] = now
                                         normalized["elapsed_s"] = elapsed
-                                        append_live_event(normalized)
+                                        live_turn["events"].append(normalized)
                                         _emit(normalized)
                                 else:
-                                    append_live_event(
+                                    live_turn["events"].append(
                                         {
                                             "type": "raw",
                                             "text": stripped,
@@ -2108,7 +2117,7 @@ class AgentClient:
                                         }
                                     )
                             except json.JSONDecodeError:
-                                append_live_event(
+                                live_turn["events"].append(
                                     {
                                         "type": "raw",
                                         "text": stripped,
@@ -2141,10 +2150,10 @@ class AgentClient:
                         for normalized in normalized_events:
                             normalized["received_at"] = now
                             normalized["elapsed_s"] = elapsed
-                            append_live_event(normalized)
+                            live_turn["events"].append(normalized)
                             _emit(normalized)
                     else:
-                        append_live_event(
+                        live_turn["events"].append(
                             {
                                 "type": "raw",
                                 "text": stripped,
@@ -2153,14 +2162,14 @@ class AgentClient:
                             }
                         )
                 except json.JSONDecodeError:
-                    append_live_event(
+                    live_turn["events"].append(
                         {"type": "raw", "text": stripped, "received_at": now, "elapsed_s": elapsed}
                     )
             if err_buf.strip():
                 stderr_lines.append(err_buf)
 
             # If timed out, kill the exec process
-            if timed_out or shutdown_interrupted:
+            if timed_out:
                 with contextlib.suppress(Exception):
                     kill_target = str(session.get("engine") or _resolve_engine(session["harness"]))
                     container.exec_run(["pkill", "-TERM", "-f", kill_target], detach=True)
@@ -2180,15 +2189,13 @@ class AgentClient:
                     f"❌ Agent appears hung — no output for {EXEC_IDLE_TIMEOUT}s"
                     f" (ran for {elapsed_total}s total)."
                 )
-            elif shutdown_interrupted and not result_text:
-                result_text = "❌ Execution interrupted during service shutdown."
             elif exit_code and exit_code != 0 and not result_text:
                 result_text = f"❌ Agent exited with code {exit_code}."
                 if stderr_lines:
                     tail = "\n".join(stderr_lines[-5:])
                     result_text += f"\n```\n{tail}\n```"
 
-            if agent_thread_id:
+            if continue_session and agent_thread_id:
                 with _sessions_lock:
                     session["agent_thread_id"] = agent_thread_id
 
@@ -2198,6 +2205,9 @@ class AgentClient:
             live_turn["exit_code"] = exit_code
             live_turn["timed_out"] = timed_out
             live_turn["duration_s"] = round(time.time() - started_ts, 1)
+
+            # Persist to PG in background
+            _persist_turn(slack_thread_key, live_turn)
 
             with _sessions_lock:
                 if live_turn["turn_id"] == 1 and not str(session.get("thread_name") or "").strip():
@@ -2212,14 +2222,12 @@ class AgentClient:
                     if not result_text.strip():
                         live_turn["result"] = "Stopped by user."
                         result_text = live_turn["result"]
-                elif shutdown_interrupted or timed_out or (exit_code not in (0, None)):
+                elif timed_out or (exit_code not in (0, None)):
                     session["state"] = "error"
                 else:
                     session["state"] = "idle"
                 session["last_activity"] = time.time()
             _persist_session(session, slack_thread_key)
-            # Persist turn after all state/result mutations (e.g. stop override).
-            _persist_turn(slack_thread_key, live_turn)
             # Compute per-turn LLM stats from events
             llm_calls = 0
             total_input_tokens = 0
@@ -2273,23 +2281,6 @@ class AgentClient:
                 )
             _emit({"type": "final", **result})
             return result
-        except Exception as exc:
-            log.exception("exec_failed", thread=slack_thread_key, error=str(exc))
-            if "session" in locals() and isinstance(session, dict):
-                finished_at = time.time()
-                with _sessions_lock:
-                    if live_turn is not None and not live_turn.get("finished_at"):
-                        live_turn["result"] = f"❌ Execution failed: {exc}"
-                        live_turn["finished_at"] = finished_at
-                        live_turn["exit_code"] = -1
-                        live_turn["timed_out"] = False
-                        live_turn["duration_s"] = round(finished_at - (live_turn.get("started_at") or finished_at), 1)
-                    session["state"] = "error"
-                    session["last_activity"] = finished_at
-                _persist_session(session, slack_thread_key)
-                if live_turn is not None:
-                    _persist_turn(slack_thread_key, live_turn)
-            return {"error": f"Execution failed: {exc}"}
         finally:
             if slot_acquired:
                 _release_execution_slot(actor_key)
@@ -2307,6 +2298,7 @@ class AgentClient:
         user_id: str | None = None,
         model: str | None = None,
         engine: str | None = None,
+        legal_loop_enabled: bool | None = None,
     ) -> dict[str, Any]:
         resolved_thread_key = _resolve_existing_thread_key(slack_thread_key)
         display_message = _display_user_message(message) or message.strip()
@@ -2362,6 +2354,7 @@ class AgentClient:
                     user_id,
                     model,
                     engine,
+                    legal_loop_enabled=legal_loop_enabled,
                 )
                 kickoff_error = str(result.get("error") or "").strip()
                 if kickoff_error:
@@ -2391,7 +2384,6 @@ class AgentClient:
             "session_id": resolved_thread_key,
             "request_id": request_id,
         }
-
     def status(self, slack_thread_key: str | None = None) -> dict[str, Any]:
         """Get session status. If no key given, list all sessions."""
         if slack_thread_key:
@@ -2434,8 +2426,8 @@ class AgentClient:
         except Exception:
             pass
 
-        _mark_session_stopped(slack_thread_key, session)
         pop_session_state(slack_thread_key)
+        _delete_session(slack_thread_key)
         return {"session_id": slack_thread_key, "status": "stopped"}
 
     def threads(self) -> dict[str, Any]:
@@ -2496,26 +2488,6 @@ class AgentClient:
             if get_session_state(key):
                 continue
 
-            harness = row.get("harness", "amp")
-            if harness == "engineer":
-                # Engineer sessions use run_id as container_id, not a Docker container.
-                # If one was mid-run during restart, mark it interrupted.
-                if row.get("state") == "working":
-                    interrupted_result = (
-                        "⚠️ Interrupted by API restart — automatic retry disabled. "
-                        "Please retry manually."
-                    )
-                    _pg_write(
-                        "UPDATE agent_turns SET finished_at = now(), result = %s, exit_code = -1 "
-                        "WHERE slack_thread_key = %s AND finished_at IS NULL",
-                        (interrupted_result, key),
-                    )
-                    _pg_write(
-                        "UPDATE agent_sessions SET state = 'error', last_activity = now() "
-                        "WHERE slack_thread_key = %s",
-                        (key,),
-                    )
-                continue
             container_id = row["container_id"]
             try:
                 container = client.containers.get(container_id)
@@ -2564,13 +2536,17 @@ class AgentClient:
             created = row.get("created_at")
             last_act = row.get("last_activity")
             recovered_harness = row.get("harness", "amp")
-            recovered_engine = _resolve_engine(recovered_harness)
-            recovered_persona = HARNESS_CONFIG.get(recovered_harness, {}).get("persona")
+            recovered_engine = row.get("engine") or _resolve_engine(recovered_harness)
+            recovered_persona = row.get("persona") or HARNESS_CONFIG.get(recovered_harness, {}).get(
+                "persona"
+            )
             recovered_session = {
                 "container_id": container_id,
                 "harness": recovered_harness,
                 "engine": recovered_engine,
                 "persona": recovered_persona,
+                "mode": str(row.get("mode") or _session_mode_for(recovered_harness)),
+                "repo": row.get("repo"),
                 "agent_thread_id": row.get("agent_thread_id"),
                 "state": "idle",
                 "created_at": created.timestamp() if created else time.time(),
@@ -2578,11 +2554,6 @@ class AgentClient:
                 "turns": turns,
                 "pending_context_messages": [],
                 "thread_name": row.get("thread_name"),
-                "next_event_seq": max(
-                    _max_event_seq_from_turns(turns),
-                    _max_event_seq_from_ledger(key),
-                )
-                + 1,
             }
             set_session_state(key, recovered_session)
             recovered += 1
@@ -2600,11 +2571,17 @@ class AgentClient:
                         _resolve_engine(discovered_harness),
                     )
                     discovered_persona = container.labels.get("ai2.persona")
+                    discovered_mode = container.labels.get(
+                        "ai2.mode",
+                        _session_mode_for(discovered_harness),
+                    )
                     recovered_session = {
                         "container_id": container.id,
                         "harness": discovered_harness,
                         "engine": discovered_engine,
                         "persona": discovered_persona,
+                        "mode": discovered_mode,
+                        "repo": container.labels.get("ai2.repo"),
                         "agent_thread_id": None,
                         "state": "idle",
                         "created_at": time.time(),
@@ -2612,7 +2589,6 @@ class AgentClient:
                         "turns": [],
                         "pending_context_messages": [],
                         "thread_name": None,
-                        "next_event_seq": 1,
                     }
                     set_session_state(key, recovered_session)
                     _persist_session(recovered_session, key)
@@ -2632,20 +2608,6 @@ class AgentClient:
             session = get_session_state(key)
             if not session:
                 continue
-
-            # Ensure stale in-container harness processes are terminated before
-            # we allow future executions for this thread.
-            with contextlib.suppress(Exception):
-                container_id = str(session.get("container_id") or "")
-                if container_id:
-                    recovered_engine = str(
-                        session.get("engine")
-                        or _resolve_engine(str(session.get("harness") or "amp"))
-                    )
-                    kill_target = _harness_process_name(recovered_engine)
-                    client.containers.get(container_id).exec_run(
-                        ["pkill", "-TERM", "-f", kill_target], detach=True
-                    )
 
             # Find the last unfinished turn
             incomplete = _pg_read(
@@ -2720,15 +2682,13 @@ class AgentClient:
                 if isinstance(last_turn, dict) and last_turn.get("finished_at") is None:
                     events = last_turn.setdefault("events", [])
                     if isinstance(events, list):
-                        _append_session_event(
-                            session,
-                            events,
+                        events.append(
                             {
                                 "type": "status",
                                 "stage": "interrupt.requested",
                                 "source": "api",
                                 "received_at": datetime.now(UTC).isoformat(),
-                            },
+                            }
                         )
                         turn_to_persist = dict(last_turn)
         _persist_session(session, slack_thread_key)

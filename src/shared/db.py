@@ -36,8 +36,36 @@ async def fetchrow(pool: asyncpg.Pool, query: str, *args: Any) -> asyncpg.Record
     return await pool.fetchrow(query, *args)
 
 
+async def _drop_orphan_composite_type(conn: asyncpg.Connection, relation_name: str) -> None:
+    """Drop leftover row-type if table was removed but type remains."""
+    table_exists = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = current_schema()
+              AND c.relname = $1
+              AND c.relkind = 'r'
+        )
+        """,
+        relation_name,
+    )
+    if table_exists:
+        return
+
+    type_exists = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_type WHERE typname = $1)",
+        relation_name,
+    )
+    if type_exists:
+        await conn.execute(f'DROP TYPE IF EXISTS "{relation_name}"')
+        log.warning("dropped_orphan_composite_type", relation=relation_name)
+
+
 async def _ensure_schema(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
+        await _drop_orphan_composite_type(conn, "agent_sessions")
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         await conn.execute(
             """
@@ -150,6 +178,9 @@ async def _ensure_schema(pool: asyncpg.Pool) -> None:
                 slack_thread_key TEXT PRIMARY KEY,
                 container_id     TEXT NOT NULL,
                 harness          TEXT NOT NULL DEFAULT 'amp',
+                engine           TEXT,
+                persona          TEXT,
+                mode             TEXT NOT NULL DEFAULT 'default',
                 agent_thread_id  TEXT,
                 state            TEXT NOT NULL DEFAULT 'running',
                 repo             TEXT,
@@ -160,6 +191,15 @@ async def _ensure_schema(pool: asyncpg.Pool) -> None:
         )
         await conn.execute(
             "ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS thread_name TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'default'"
+        )
+        await conn.execute(
+            "ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS engine TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS persona TEXT"
         )
         await conn.execute(
             """
@@ -183,23 +223,69 @@ async def _ensure_schema(pool: asyncpg.Pool) -> None:
             """
         )
         await conn.execute(
-            "ALTER TABLE agent_turns ADD COLUMN IF NOT EXISTS artifacts JSONB NOT NULL DEFAULT '[]'"
+            """
+            ALTER TABLE agent_turns
+            ADD COLUMN IF NOT EXISTS artifacts JSONB NOT NULL DEFAULT '[]'::jsonb
+            """
         )
         await conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS thread_events_ledger (
-                event_id           TEXT PRIMARY KEY,
-                slack_thread_key   TEXT NOT NULL,
-                source             TEXT NOT NULL,
-                event_type         TEXT NOT NULL,
-                event_seq          BIGINT NOT NULL,
-                occurred_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-                payload            JSONB NOT NULL DEFAULT '{}'
+            CREATE TABLE IF NOT EXISTS legal_documents (
+                id               TEXT PRIMARY KEY,
+                document_type    TEXT NOT NULL,
+                company_name     TEXT,
+                title            TEXT NOT NULL,
+                status           TEXT NOT NULL DEFAULT 'draft',
+                current_version  INT NOT NULL DEFAULT 0,
+                deal_id          TEXT,
+                slack_thread_key TEXT,
+                requester_id     TEXT,
+                playbook_id      TEXT,
+                terms            JSONB NOT NULL DEFAULT '{}'::jsonb,
+                metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
             );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_events_ledger_thread_seq
-                ON thread_events_ledger (slack_thread_key, event_seq);
-            CREATE INDEX IF NOT EXISTS idx_thread_events_ledger_thread_time
-                ON thread_events_ledger (slack_thread_key, occurred_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_legal_documents_company
+                ON legal_documents (company_name, document_type, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_legal_documents_deal
+                ON legal_documents (deal_id);
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS legal_document_versions (
+                id                BIGSERIAL PRIMARY KEY,
+                document_id       TEXT NOT NULL REFERENCES legal_documents(id) ON DELETE CASCADE,
+                version           INT NOT NULL,
+                terms             JSONB NOT NULL DEFAULT '{}'::jsonb,
+                content_text      TEXT NOT NULL,
+                source_file_url   TEXT,
+                source_file_hash  TEXT,
+                diff_summary      TEXT,
+                diff_details      JSONB,
+                compliance_report JSONB,
+                requested_by      TEXT,
+                request_text      TEXT,
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (document_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_legal_doc_versions_doc
+                ON legal_document_versions (document_id, version DESC);
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS legal_audit_log (
+                id          BIGSERIAL PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES legal_documents(id) ON DELETE CASCADE,
+                action      TEXT NOT NULL,
+                actor_id    TEXT,
+                details     JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_legal_audit_doc
+                ON legal_audit_log (document_id, created_at DESC);
             """
         )
     log.info("schema_ensured")

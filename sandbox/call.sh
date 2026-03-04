@@ -8,31 +8,76 @@
 U="${AI_V2_API_URL:-http://api:8000}"
 T="Accept: text/plain"
 J="Content-Type: application/json"
-A="${AI_V2_API_KEY:-}"
+A="Authorization: Bearer ${AI_V2_API_KEY:-}"
+tool="$1"
+method="$2"
+body="$3"
 
-curl_api() {
-  if [ -n "$A" ]; then
-    curl -s -H "Authorization: Bearer $A" "$@"
-  else
-    curl -s "$@"
+auth_headers=()
+if [ -n "${AI_V2_API_KEY:-}" ]; then
+  auth_headers=(-H "$A")
+fi
+
+request() {
+  local http_method="$1"
+  local url="$2"
+  local data="${3:-}"
+  local timeout_s="${CALL_TIMEOUT_SECONDS:-30}"
+
+  local curl_args=(
+    -sS
+    --max-time "$timeout_s"
+    --retry 2
+    --retry-connrefused
+    -X "$http_method"
+    "${auth_headers[@]}"
+    -H "$T"
+    "$url"
+  )
+  if [ -n "$data" ]; then
+    curl_args+=(-H "$J" -d "$data")
   fi
+
+  local response
+  response="$(curl "${curl_args[@]}" --write-out $'\n__HTTP_STATUS__:%{http_code}')"
+  local curl_exit=$?
+  if [ "$curl_exit" -ne 0 ]; then
+    printf '{"error":"transport_error","exit_code":%d,"url":%s}\n' \
+      "$curl_exit" \
+      "$(printf '%s' "$url" | jq -Rs .)"
+    return 1
+  fi
+
+  local status="${response##*__HTTP_STATUS__:}"
+  local body="${response%$'\n'__HTTP_STATUS__:*}"
+  if [[ "$status" =~ ^2 ]]; then
+    printf '%s\n' "$body"
+    return 0
+  fi
+
+  local snippet="${body:0:1200}"
+  printf '{"error":"http_error","status":%s,"url":%s,"body":%s}\n' \
+    "$status" \
+    "$(printf '%s' "$url" | jq -Rs .)" \
+    "$(printf '%s' "$snippet" | jq -Rs .)"
+  return 1
 }
 
-case "$1" in
+case "$tool" in
   search)
-    curl_api -H "$J" -H "$T" -d "{\"query\":$(printf '%s' "$2" | jq -Rs .),\"limit\":${3:-20}}" "$U/api/search"
+    request "POST" "$U/api/search" "{\"query\":$(printf '%s' "$2" | jq -Rs .),\"limit\":${3:-20}}"
     ;;
   sql)
-    curl_api -H "$J" -H "$T" -d "{\"query\":$(printf '%s' "$2" | jq -Rs .)}" "$U/api/search/sql"
+    request "POST" "$U/api/search/sql" "{\"query\":$(printf '%s' "$2" | jq -Rs .)}"
     ;;
   discover)
-    curl_api "$U/tools/$2"
+    request "GET" "$U/tools/$2"
     ;;
   *)
-    if [ -z "$3" ]; then
-      curl_api -H "$T" -X POST "$U/tools/$1/$2"
+    if [ -z "$body" ]; then
+      request "POST" "$U/tools/$tool/$method"
     else
-      curl_api -H "$J" -H "$T" -d "$3" "$U/tools/$1/$2"
+      request "POST" "$U/tools/$tool/$method" "$body"
     fi
     ;;
 esac

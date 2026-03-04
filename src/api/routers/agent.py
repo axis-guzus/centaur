@@ -8,9 +8,9 @@ import queue
 import threading
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.agent import get_agent
 from api.deps import verify_api_key
@@ -45,7 +45,9 @@ class ExecuteRequest(BaseModel):
     user_id: str | None = None
     model: str | None = None
     engine: str | None = None
-    files: list[FileAttachment] = []
+    continue_session: bool = True
+    legal_loop_enabled: bool | None = None
+    files: list[FileAttachment] = Field(default_factory=list)
 
 
 class StopRequest(BaseModel):
@@ -81,15 +83,18 @@ async def execute(req: ExecuteRequest) -> dict[str, Any]:
         req.user_id,
         req.model,
         req.engine,
+        req.continue_session,
+        req.legal_loop_enabled,
     )
 
 
-@router.post("/execute-kickoff", status_code=202)
+@router.post("/execute-kickoff")
 async def execute_kickoff(req: ExecuteRequest) -> dict[str, Any]:
-    """Kick off execution asynchronously for UI callers."""
+    """Kick off execution asynchronously for thread UI requests."""
     agent = get_agent()
     files = [{"url": f.url, "name": f.name} for f in req.files] if req.files else None
-    result = agent.execute_kickoff(
+    return await asyncio.to_thread(
+        agent.execute_kickoff,
         req.slack_thread_key,
         req.message,
         req.harness,
@@ -100,12 +105,8 @@ async def execute_kickoff(req: ExecuteRequest) -> dict[str, Any]:
         req.user_id,
         req.model,
         req.engine,
+        req.legal_loop_enabled,
     )
-    if result.get("status") == "busy":
-        raise HTTPException(status_code=409, detail=str(result.get("error") or "Run already in progress"))
-    if result.get("error"):
-        raise HTTPException(status_code=400, detail=str(result["error"]))
-    return result
 
 
 @router.post("/execute_stream")
@@ -129,6 +130,8 @@ async def execute_stream(req: ExecuteRequest) -> StreamingResponse:
                 user_id=req.user_id,
                 model=req.model,
                 engine=req.engine,
+                continue_session=req.continue_session,
+                legal_loop_enabled=req.legal_loop_enabled,
             )
         except Exception as e:
             q.put({"type": "error", "message": str(e)})

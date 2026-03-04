@@ -1,7 +1,10 @@
 """JSON file-based persistence for deals."""
 
+import fcntl
 import json
 import os
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -16,21 +19,44 @@ def _get_store_path() -> Path:
     return store_dir / "deals.json"
 
 
-def _load_deals() -> dict[str, dict]:
+@contextmanager
+def _store_lock():
+    lock_path = _get_store_path().with_suffix(".lock")
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _load_deals_unlocked() -> dict[str, dict]:
     store_path = _get_store_path()
     if not store_path.exists():
         return {}
     try:
-        with open(store_path) as f:
+        with store_path.open(encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
         return {}
 
 
-def _save_deals(deals: dict[str, dict]) -> None:
+def _save_deals_unlocked(deals: dict[str, dict]) -> None:
     store_path = _get_store_path()
-    with open(store_path, "w") as f:
-        json.dump(deals, f, indent=2)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=store_path.parent,
+        prefix=f"{store_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp_file:
+        json.dump(deals, tmp_file, indent=2)
+        tmp_file.flush()
+        os.fsync(tmp_file.fileno())
+        temp_path = Path(tmp_file.name)
+    os.replace(temp_path, store_path)
 
 
 def create_deal(
@@ -41,8 +67,6 @@ def create_deal(
     slack_channel: str,
     slack_thread_ts: str,
 ) -> Deal:
-    deals = _load_deals()
-
     deal_id = f"TS-{uuid.uuid4().hex[:8].upper()}"
     now = datetime.now(timezone.utc).isoformat()
 
@@ -59,21 +83,25 @@ def create_deal(
         updated_at=now,
     )
 
-    deals[deal_id] = deal.to_dict()
-    _save_deals(deals)
+    with _store_lock():
+        deals = _load_deals_unlocked()
+        deals[deal_id] = deal.to_dict()
+        _save_deals_unlocked(deals)
 
     return deal
 
 
 def get_deal(deal_id: str) -> Optional[Deal]:
-    deals = _load_deals()
+    with _store_lock():
+        deals = _load_deals_unlocked()
     if deal_id not in deals:
         return None
     return Deal.from_dict(deals[deal_id])
 
 
 def get_deal_by_company(company_name: str) -> Optional[Deal]:
-    deals = _load_deals()
+    with _store_lock():
+        deals = _load_deals_unlocked()
     company_lower = company_name.lower()
     for deal_data in deals.values():
         if deal_data["company_name"].lower() == company_lower:
@@ -82,7 +110,8 @@ def get_deal_by_company(company_name: str) -> Optional[Deal]:
 
 
 def get_deal_by_thread(slack_channel: str, slack_thread_ts: str) -> Optional[Deal]:
-    deals = _load_deals()
+    with _store_lock():
+        deals = _load_deals_unlocked()
     for deal_data in deals.values():
         if (
             deal_data["slack_channel"] == slack_channel
@@ -93,7 +122,8 @@ def get_deal_by_thread(slack_channel: str, slack_thread_ts: str) -> Optional[Dea
 
 
 def list_deals(status: Optional[DealStatus] = None) -> list[Deal]:
-    deals = _load_deals()
+    with _store_lock():
+        deals = _load_deals_unlocked()
     result = []
     for deal_data in deals.values():
         if status is None or deal_data["status"] == status.value:
@@ -108,46 +138,47 @@ def update_deal(
     approved_by: Optional[str] = None,
     revision_note: Optional[str] = None,
 ) -> Optional[Deal]:
-    deals = _load_deals()
-    if deal_id not in deals:
-        return None
+    with _store_lock():
+        deals = _load_deals_unlocked()
+        if deal_id not in deals:
+            return None
 
-    deal_data = deals[deal_id]
-    now = datetime.now(timezone.utc).isoformat()
+        deal_data = deals[deal_id]
+        now = datetime.now(timezone.utc).isoformat()
 
-    if revision_note:
-        if "revision_history" not in deal_data:
-            deal_data["revision_history"] = []
-        deal_data["revision_history"].append(
-            {
-                "timestamp": now,
-                "note": revision_note,
-                "previous_status": deal_data["status"],
-            }
-        )
+        if revision_note:
+            if "revision_history" not in deal_data:
+                deal_data["revision_history"] = []
+            deal_data["revision_history"].append(
+                {
+                    "timestamp": now,
+                    "note": revision_note,
+                    "previous_status": deal_data["status"],
+                }
+            )
 
-    if status:
-        deal_data["status"] = status.value
-        if status == DealStatus.APPROVED:
-            deal_data["approved_at"] = now
-            deal_data["approved_by"] = approved_by
-        elif status == DealStatus.SENT:
-            deal_data["sent_at"] = now
+        if status:
+            deal_data["status"] = status.value
+            if status == DealStatus.APPROVED:
+                deal_data["approved_at"] = now
+                deal_data["approved_by"] = approved_by
+            elif status == DealStatus.SENT:
+                deal_data["sent_at"] = now
 
-    if term_sheet:
-        deal_data["term_sheet"] = term_sheet.to_dict()
+        if term_sheet:
+            deal_data["term_sheet"] = term_sheet.to_dict()
 
-    deal_data["updated_at"] = now
-    deals[deal_id] = deal_data
-    _save_deals(deals)
-
-    return Deal.from_dict(deal_data)
+        deal_data["updated_at"] = now
+        deals[deal_id] = deal_data
+        _save_deals_unlocked(deals)
+        return Deal.from_dict(deal_data)
 
 
 def delete_deal(deal_id: str) -> bool:
-    deals = _load_deals()
-    if deal_id not in deals:
-        return False
-    del deals[deal_id]
-    _save_deals(deals)
-    return True
+    with _store_lock():
+        deals = _load_deals_unlocked()
+        if deal_id not in deals:
+            return False
+        del deals[deal_id]
+        _save_deals_unlocked(deals)
+        return True

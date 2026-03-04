@@ -16,6 +16,7 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 from etl.config import ETLSettings
 from etl.embeddings import EmbeddingService, hybrid_search
+from etl.legal_corpus import build_embedding_records
 from etl.pipeline import run_continuous, run_sync
 from shared.cli_tables import render_text_table
 from shared.config import Settings
@@ -155,6 +156,90 @@ def embed(source: str | None, batch_size: int) -> None:
                 total_stored += stored
                 click.echo(f"  Embedded batch {i // batch_size + 1}: {stored} records")
             click.echo(f"Embedding complete: {total_stored} records")
+        finally:
+            await close_pool(pool)
+
+    asyncio.run(_run())
+
+
+@cli.command("ingest-legal-corpus")
+@click.option(
+    "--path",
+    "paths",
+    multiple=True,
+    help="Corpus file/folder path (repeat flag for multiple roots)",
+)
+@click.option("--source", default="legal_corpus", show_default=True)
+@click.option("--kind", default="legal_chunk", show_default=True)
+@click.option("--chunk-chars", default=1800, show_default=True)
+@click.option("--batch-size", default=64, show_default=True)
+@click.option("--max-files", default=0, show_default=True)
+@click.option("--rebuild/--append", default=True, show_default=True)
+def ingest_legal_corpus(
+    paths: tuple[str, ...],
+    source: str,
+    kind: str,
+    chunk_chars: int,
+    batch_size: int,
+    max_files: int,
+    rebuild: bool,
+) -> None:
+    """Ingest legal corpora into shared embeddings search plane."""
+    settings = Settings()
+    openai_key = _sm_read("OPENAI_API_KEY") or ""
+    if not openai_key:
+        click.echo("Error: OPENAI_API_KEY not set", err=True)
+        sys.exit(1)
+
+    configured_paths = list(paths)
+    if not configured_paths:
+        env_paths = os.getenv("LEGAL_CORPUS_PATHS", "")
+        configured_paths = [p.strip() for p in env_paths.split(",") if p.strip()]
+    if not configured_paths:
+        click.echo(
+            "Error: provide --path or set LEGAL_CORPUS_PATHS (comma-separated)",
+            err=True,
+        )
+        sys.exit(1)
+
+    records, stats = build_embedding_records(
+        paths=configured_paths,
+        source=source,
+        kind=kind,
+        max_chunk_chars=chunk_chars,
+        max_files=max_files,
+    )
+    click.echo(
+        f"Discovered {stats['files_discovered']} files, extracted {stats['files_extracted']}, "
+        f"built {stats['chunks_built']} chunks."
+    )
+    if not records:
+        click.echo("No records to embed; exiting.")
+        return
+
+    async def _run() -> None:
+        pool = await create_pool(settings.database_url)
+        svc = EmbeddingService(
+            openai_key,
+            settings.embedding_model,
+            settings.embedding_dimensions,
+        )
+        try:
+            if rebuild:
+                await pool.execute(
+                    "DELETE FROM embeddings WHERE source = $1 AND kind = $2",
+                    source,
+                    kind,
+                )
+                click.echo(f"Rebuilt source by clearing existing {source}/{kind} entries.")
+
+            total_stored = 0
+            for i in range(0, len(records), batch_size):
+                batch = records[i : i + batch_size]
+                stored = await svc.embed_and_store(pool, batch)
+                total_stored += stored
+                click.echo(f"Embedded batch {i // batch_size + 1}: {stored} records")
+            click.echo(f"Legal corpus ingest complete: {total_stored} chunks embedded.")
         finally:
             await close_pool(pool)
 

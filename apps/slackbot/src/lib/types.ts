@@ -1,4 +1,4 @@
-export type Harness = "amp" | "claude-code" | "codex" | "pi-mono" | "eng" | "engineer";
+export type Harness = "amp" | "claude-code" | "codex" | "pi-mono" | "eng" | "engineer" | "legal";
 export type ThreadState = "running" | "idle" | "stopped" | "stopping" | "working" | "error";
 
 export type Turn = {
