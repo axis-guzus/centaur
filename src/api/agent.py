@@ -755,12 +755,54 @@ def _should_treat_as_silent_death(
     if exit_code not in (0, None):
         return False
     return session_state != "stopping"
+
+
+def _count_completed_tool_calls(events: list[dict[str, Any]]) -> int:
+    completed_ids: set[str] = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type == "tool":
+            content = event.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    tool_use_id = str(block.get("tool_use_id") or "").strip()
+                    if tool_use_id:
+                        completed_ids.add(tool_use_id)
+            continue
+        if event_type != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "")
+        if item_type not in {"mcp_tool_call", "tool_call", "function_call", "custom_tool_call"}:
+            continue
+        item_id = str(
+            item.get("id")
+            or item.get("tool_call_id")
+            or item.get("tool_use_id")
+            or item.get("toolUseId")
+            or item.get("toolCallId")
+            or item.get("call_id")
+            or ""
+        ).strip()
+        if item_id:
+            completed_ids.add(item_id)
+    return len(completed_ids)
+
+
 def _post_to_slack(
     thread_key: str,
     text: str,
     *,
     event_prefix: str,
     warn_on_error: bool,
+    rich: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     token = _fetch_secret("API_SECRET_KEY").strip()
     if not token:
@@ -769,15 +811,21 @@ def _post_to_slack(
     if parts is None:
         return
     channel, thread_ts = parts
-    markdown = _dashboards_to_slack(text).strip()
+    markdown = text.strip() if rich else _dashboards_to_slack(text).strip()
     if not markdown:
         return
     logger = log.warning if warn_on_error else log.debug
+    payload: dict[str, Any] = {"channel": channel, "thread_ts": thread_ts, "markdown": markdown}
+    if rich:
+        rich_metadata = dict(metadata or {})
+        rich_metadata.setdefault("threadKey", _normalize_thread_key(thread_key))
+        payload["rich"] = True
+        payload["metadata"] = rich_metadata
     try:
         resp = httpx.post(
             f"{_SLACKBOT_URL}/api/internal/post-reply",
             headers={"Authorization": f"Bearer {token}"},
-            json={"channel": channel, "thread_ts": thread_ts, "markdown": markdown},
+            json=payload,
             timeout=_SLACK_POST_TIMEOUT_S,
         )
         if resp.status_code >= 300:
@@ -814,6 +862,32 @@ def _post_slack_thread_message(thread_key: str, text: str) -> None:
         text=text,
         event_prefix="slack_mirror",
         warn_on_error=True,
+    )
+
+
+def _post_slack_thread_result(
+    thread_key: str,
+    text: str,
+    *,
+    harness: str | None = None,
+    duration_seconds: float | None = None,
+    tool_count: int | None = None,
+    source_label: str = "Thread Viewer",
+) -> None:
+    metadata: dict[str, Any] = {"sourceLabel": source_label}
+    if harness:
+        metadata["harness"] = harness
+    if duration_seconds is not None:
+        metadata["durationSeconds"] = duration_seconds
+    if tool_count is not None:
+        metadata["toolCount"] = tool_count
+    _post_to_slack(
+        thread_key=thread_key,
+        text=text,
+        event_prefix="slack_mirror",
+        warn_on_error=True,
+        rich=True,
+        metadata=metadata,
     )
 
 
@@ -2740,9 +2814,12 @@ class AgentClient:
                 "persona": session.get("persona"),
             }
             if mirror_to_slack and result_text:
-                _post_slack_thread_message(
+                _post_slack_thread_result(
                     resolved_thread_key,
-                    "[via Thread Viewer] Agent update:\n" + result_text,
+                    result_text,
+                    harness=session["harness"],
+                    duration_seconds=live_turn["duration_s"],
+                    tool_count=_count_completed_tool_calls(live_turn["events"]),
                 )
             _emit({"type": "final", **result})
             return result
@@ -2785,6 +2862,8 @@ class AgentClient:
         display_message = _display_user_message(message) or message.strip()
         if not display_message:
             return {"error": "Message is required"}
+        source_tag = str(source or "api").strip().lower()
+        mirror_to_slack = source_tag in {"thread_ui", "thread-view", "ui"}
         requested_harness = (harness or "").strip() or (
             str(session.get("harness") or "amp") if session else "amp"
         )
@@ -2846,15 +2925,29 @@ class AgentClient:
                         resolved_thread_key,
                         display_message,
                         kickoff_error,
-                        source_tag=str(source or "api").strip().lower(),
+                        source_tag=source_tag,
                         user_id=user_id,
                     )
+                    if mirror_to_slack:
+                        _post_slack_thread_result(
+                            resolved_thread_key,
+                            f"❌ {kickoff_error}",
+                            harness=requested_harness,
+                            source_label="Thread Viewer",
+                        )
             except Exception:
                 log.exception(
                     "exec_kickoff_failed",
                     thread=resolved_thread_key,
                     request_id=request_id or "",
                 )
+                if mirror_to_slack:
+                    _post_slack_thread_result(
+                        resolved_thread_key,
+                        "❌ Agent request failed before the run could complete.",
+                        harness=requested_harness,
+                        source_label="Thread Viewer",
+                    )
 
         threading.Thread(target=run_execute, daemon=True).start()
         return {

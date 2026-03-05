@@ -5,6 +5,7 @@ import { CheckCircle, ChevronRight, CircleX, LoaderCircle } from "lucide-react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { useHaptics } from "@/components/haptics-provider";
 import { describeToolCall, type ToolCall } from "@/lib/describe";
+import { summarizeToolOutput } from "@/lib/tool-output-detect";
 import {
   Tool,
   ToolHeader,
@@ -12,7 +13,6 @@ import {
   ToolInput,
   ToolOutput,
 } from "@/components/ai-elements/tool";
-import { CodeBlock } from "@/components/ai-elements/code-block";
 import {
   Sources,
   SourcesTrigger,
@@ -49,10 +49,14 @@ const ToolCallItem = memo(function ToolCallItem({ call }: { call: ToolCall }) {
   const errorText = call.errorText ?? "";
   const sources: StepSource[] = call.sources ?? [];
   const hasInput = Object.keys(call.input || {}).length > 0;
-  const isJson = output.trimStart().startsWith("{") || output.trimStart().startsWith("[");
+  const hasOutput = call.rawOutput !== undefined || Boolean(output);
   const hasErrorStack = Boolean(errorText) && looksLikeStackTrace(errorText);
   const [isOpen, setIsOpen] = useState(false);
   const { trigger } = useHaptics();
+  const outputSummary = useMemo(
+    () => summarizeToolOutput(call.rawOutput ?? output, call.name),
+    [call.name, call.rawOutput, output],
+  );
 
   function handleToolToggle(next: boolean) {
     trigger("light");
@@ -63,6 +67,7 @@ const ToolCallItem = memo(function ToolCallItem({ call }: { call: ToolCall }) {
     <Tool open={isOpen} onOpenChange={handleToolToggle}>
       <ToolHeader
         title={describeToolCall(call.name, call.input)}
+        detail={hasOutput ? outputSummary : undefined}
         type={`tool-${call.name}` as `tool-${string}`}
         state={mapToolState(call)}
       />
@@ -104,17 +109,25 @@ const ToolCallItem = memo(function ToolCallItem({ call }: { call: ToolCall }) {
           </StackTrace>
         ) : null}
 
-        {output ? (
-          isJson ? (
-            <CodeBlock code={output} language="json" />
-          ) : (
-            <ToolOutput output={output} errorText={errorText || undefined} />
-          )
+        {hasOutput ? (
+          <ToolOutput
+            output={output}
+            rawOutput={call.rawOutput}
+            toolName={call.name}
+            hideSources={sources.length > 0}
+            errorText={errorText || undefined}
+          />
         ) : errorText && !hasErrorStack ? (
-          <ToolOutput output="" errorText={errorText} />
+          <ToolOutput
+            output=""
+            rawOutput={call.rawOutput}
+            toolName={call.name}
+            hideSources={sources.length > 0}
+            errorText={errorText}
+          />
         ) : null}
 
-        {!output && !errorText ? (
+        {!hasOutput && !errorText ? (
           <div className="text-xs text-muted-foreground italic">Awaiting output…</div>
         ) : null}
       </ToolContent>

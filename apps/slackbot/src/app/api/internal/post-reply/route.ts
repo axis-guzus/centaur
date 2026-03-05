@@ -1,4 +1,5 @@
-import { postMarkdownToSlack } from "@/lib/slack-post";
+import { postMarkdownToSlack, postRichReplyToSlack } from "@/lib/slack-post";
+import type { SlackReplyMetadata } from "@/lib/slack-blocks";
 
 export const dynamic = "force-dynamic";
 export const fetchCache = "force-no-store";
@@ -19,6 +20,8 @@ export async function POST(request: Request): Promise<Response> {
   const channel = String(body.channel ?? "").trim();
   const threadTs = String(body.thread_ts ?? "").trim();
   const markdown = String(body.markdown ?? "");
+  const rich = body.rich === true;
+  const metadata = (body.metadata ?? {}) as SlackReplyMetadata;
   if (!channel || !threadTs || !markdown.trim()) {
     return Response.json(
       { error: "Missing channel, thread_ts, or markdown" },
@@ -27,7 +30,11 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
-    await postMarkdownToSlack(channel, markdown, threadTs);
+    if (rich) {
+      await postRichReplyToSlack(channel, markdown, threadTs, metadata);
+    } else {
+      await postMarkdownToSlack(channel, markdown, threadTs);
+    }
     return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return Response.json(

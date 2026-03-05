@@ -19,6 +19,8 @@ import {
 import { isValidElement } from "react";
 
 import { CodeBlock } from "./code-block";
+import { ToolOutputRenderer } from "./tool-output-renderer";
+import { detectContentBlocks } from "@/lib/tool-output-detect";
 
 export type ToolProps = ComponentProps<typeof Collapsible>;
 
@@ -33,6 +35,7 @@ export type ToolPart = ToolUIPart | DynamicToolUIPart;
 
 export type ToolHeaderProps = {
   title?: string;
+  detail?: string;
   className?: string;
 } & (
   | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
@@ -64,6 +67,7 @@ function StatusIcon({ state }: { state: ToolPart["state"] }) {
 export const ToolHeader = ({
   className,
   title,
+  detail,
   type,
   state,
   toolName,
@@ -78,10 +82,16 @@ export const ToolHeader = ({
         "flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-xs transition-colors hover:bg-accent/40",
         className,
       )}
+      data-touch-target
       {...props}
     >
       <ChevronRightIcon className="size-3 text-muted-foreground/60 shrink-0 transition-transform duration-[var(--dur-fast)] group-data-[state=open]/tool:rotate-90" />
-      <span className="truncate text-foreground/80">{title ?? derivedName}</span>
+      <span className="min-w-0 flex-1 truncate text-left text-foreground/80">{title ?? derivedName}</span>
+      {detail ? (
+        <span className="hidden max-w-[45%] truncate text-[11px] text-muted-foreground md:block group-data-[state=open]/tool:hidden">
+          {detail}
+        </span>
+      ) : null}
       <span className="ml-auto shrink-0">
         <StatusIcon state={state} />
       </span>
@@ -113,26 +123,49 @@ export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
 export type ToolOutputProps = ComponentProps<"div"> & {
   output: ToolPart["output"];
   errorText: ToolPart["errorText"];
+  rawOutput?: unknown;
+  toolName?: string;
+  hideSources?: boolean;
 };
 
 export const ToolOutput = ({
   className,
   output,
   errorText,
+  rawOutput,
+  toolName,
+  hideSources,
   ...props
 }: ToolOutputProps) => {
-  if (!(output || errorText)) {
+  const hiddenOnlySources =
+    !errorText &&
+    hideSources &&
+    rawOutput !== undefined &&
+    detectContentBlocks(rawOutput, { toolName }).every((block) => block.type === "sources");
+
+  if (hiddenOnlySources) {
+    return null;
+  }
+
+  if (!(output || errorText || rawOutput !== undefined)) {
     return null;
   }
 
   let Output = <div>{output as ReactNode}</div>;
 
-  if (typeof output === "object" && !isValidElement(output)) {
+  if (
+    rawOutput !== undefined ||
+    (typeof output === "object" && !isValidElement(output)) ||
+    typeof output === "string"
+  ) {
     Output = (
-      <CodeBlock code={JSON.stringify(output, null, 2)} language="json" />
+      <ToolOutputRenderer
+        output={typeof output === "string" ? output : undefined}
+        rawOutput={rawOutput ?? (typeof output === "object" && !isValidElement(output) ? output : undefined)}
+        toolName={toolName}
+        hideSources={hideSources}
+      />
     );
-  } else if (typeof output === "string") {
-    Output = <CodeBlock code={output} language="json" />;
   }
 
   return (

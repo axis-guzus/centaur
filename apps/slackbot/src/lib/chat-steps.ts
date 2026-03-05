@@ -9,25 +9,7 @@ import {
 } from "@/lib/describe";
 import { asString, asRecord, asNumber, asBoolean } from "@/lib/parse-utils";
 import { dedupeSources, extractSourcesFromUnknown, type StepSource } from "@/lib/source-utils";
-
-function outputToText(output: unknown): string | undefined {
-  if (output === undefined || output === null) return undefined;
-  if (typeof output === "string") return output;
-  if (Array.isArray(output)) {
-    const textParts = output
-      .map((item) => asRecord(item))
-      .filter((item) => asString(item.type) === "text" && asString(item.text))
-      .map((item) => asString(item.text));
-    if (textParts.length > 0) {
-      return textParts.join("\n");
-    }
-  }
-  try {
-    return JSON.stringify(output, null, 2);
-  } catch {
-    return String(output);
-  }
-}
+import { stringifyToolOutput } from "@/lib/tool-output-detect";
 
 function asEventSeq(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
@@ -131,6 +113,15 @@ function legacyToolState(state: NonNullable<ToolCall["uiState"]>): ToolCall["sta
   if (state === "output-error" || state === "output-denied") return "error";
   if (state === "output-available" || state === "approval-responded") return "done";
   return "loading";
+}
+
+function shouldKeepStringOutput(output: unknown): boolean {
+  if (typeof output === "string") return true;
+  if (!Array.isArray(output)) return false;
+  return output.every((item) => {
+    const record = asRecord(item);
+    return asString(record.type) === "text" && typeof record.text === "string";
+  });
 }
 
 export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
@@ -315,7 +306,7 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
           type: "terminal",
           description: "Ran shell command",
           command: asString(data.command),
-          output: outputToText(data.output),
+          output: stringifyToolOutput(data.output),
           exitCode: typeof data.exitCode === "number" ? data.exitCode : undefined,
           eventSeq,
           turnId,
@@ -403,7 +394,7 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
         if (!toolName) continue;
         const toolInput = asRecord(part.input);
         const toolCallId = asString(part.toolCallId) || `${messageId}-${toolName}-${partIndex}`;
-        const outputText = outputToText(part.output);
+        const outputText = stringifyToolOutput(part.output);
         const errorText = asString(part.errorText);
         const partState = asString(part.state);
         const hasError = Boolean(errorText) || partState === "output-error";
@@ -419,7 +410,8 @@ export function stepsFromUiMessages(messages: UIMessage[]): Step[] {
           id: toolCallId,
           name: toolName,
           input: toolInput,
-          output: hasError ? undefined : outputText,
+          output: hasError ? undefined : shouldKeepStringOutput(part.output) ? outputText : undefined,
+          rawOutput: hasError ? undefined : part.output,
           errorText: errorText || undefined,
           uiState,
           state: legacyToolState(uiState),

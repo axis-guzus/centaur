@@ -17,6 +17,7 @@ export type ToolCall = {
   name: string;
   input: Record<string, unknown>;
   output?: string;
+  rawOutput?: unknown;
   state?: "loading" | "done" | "error";
   uiState?:
     | "approval-requested"
@@ -229,8 +230,49 @@ function normalizeToolName(name: string): string {
   return normalized;
 }
 
+const TOOL_DESCRIPTION_BUILDERS: Record<
+  string,
+  (input: Record<string, unknown>) => string | null
+> = {
+  dune_get_execution_results: (input) => {
+    const queryId = asString(input.query_id);
+    return queryId ? `Queried Dune Analytics (#${queryId})` : "Queried Dune Analytics";
+  },
+  dune_run_query: () => "Ran Dune query",
+  allium_run_sql: () => "Ran SQL query (Allium)",
+  paradigmdb_db_query: (input) => {
+    const table = firstNonEmpty(input, ["table", "query"]);
+    return table ? `Queried ParadigmDB: ${truncatePreview(table, 30)}` : "Queried ParadigmDB";
+  },
+  posthog_query: (input) => {
+    const query = firstNonEmpty(input, ["query"]);
+    return query ? `Queried PostHog: ${truncatePreview(query, 30)}` : "Queried PostHog";
+  },
+  websearch_search: (input) => {
+    const query = firstNonEmpty(input, ["query", "search_term"]);
+    return query ? `Searched web: "${truncatePreview(query, 30)}"` : "Searched web";
+  },
+  etherscan_get_transaction: (input) => {
+    const txHash = firstNonEmpty(input, ["tx_hash", "hash"]);
+    return txHash ? `Fetched transaction ${truncatePreview(txHash, 14)}` : "Fetched transaction";
+  },
+  slack_search_messages: (input) => {
+    const query = firstNonEmpty(input, ["query"]);
+    return query ? `Searched Slack: "${truncatePreview(query, 30)}"` : "Searched Slack";
+  },
+  linear_issues: () => "Fetched Linear issues",
+  polymarket_get_markets: (input) => {
+    const query = firstNonEmpty(input, ["query"]);
+    return query ? `Searched Polymarket: "${truncatePreview(query, 30)}"` : "Searched Polymarket";
+  },
+};
+
 export function describeToolCall(name: string, input: Record<string, unknown>): string {
   const normalized = normalizeToolName(name);
+  const customDescription = TOOL_DESCRIPTION_BUILDERS[normalized]?.(input);
+  if (customDescription) {
+    return customDescription;
+  }
 
   if (normalized === "read_file" || normalized === "read") {
     return describePathAction("Read", input);

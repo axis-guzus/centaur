@@ -1,8 +1,12 @@
+import {
+  resultToSlackMessages,
+  splitMarkdownChunks,
+  type SlackReplyMetadata,
+} from "@/lib/slack-blocks";
+
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "";
 const SLACK_RETRY_ATTEMPTS = 3;
 const DEFAULT_SLACK_RETRY_MS = 1_000;
-const MARKDOWN_TEXT_LIMIT = 11_800;
-
 type SlackPostResponse = { ok: boolean; ts?: string; error?: string };
 
 function sleep(ms: number): Promise<void> {
@@ -16,69 +20,6 @@ function retryAfterMs(response: Response): number {
     return DEFAULT_SLACK_RETRY_MS;
   }
   return Math.max(DEFAULT_SLACK_RETRY_MS, Math.min(parsed * 1000, 30_000));
-}
-
-function splitMarkdown(markdown: string, maxChars: number = MARKDOWN_TEXT_LIMIT): string[] {
-  const text = markdown.trim();
-  if (!text) return [];
-  if (text.length <= maxChars) return [text];
-
-  const chunks: string[] = [];
-  let current = "";
-
-  const flushCurrent = (): void => {
-    const cleaned = current.trim();
-    if (cleaned) chunks.push(cleaned);
-    current = "";
-  };
-
-  const paragraphs = text.split(/\n{2,}/);
-  for (const rawParagraph of paragraphs) {
-    const paragraph = rawParagraph.trim();
-    if (!paragraph) continue;
-
-    const candidate = current ? `${current}\n\n${paragraph}` : paragraph;
-    if (candidate.length <= maxChars) {
-      current = candidate;
-      continue;
-    }
-
-    if (current) flushCurrent();
-    if (paragraph.length <= maxChars) {
-      current = paragraph;
-      continue;
-    }
-
-    const lines = paragraph.split("\n");
-    for (const rawLine of lines) {
-      const line = rawLine.trimEnd();
-      const lineCandidate = current ? `${current}\n${line}` : line;
-      if (lineCandidate.length <= maxChars) {
-        current = lineCandidate;
-        continue;
-      }
-
-      if (current) flushCurrent();
-      if (line.length <= maxChars) {
-        current = line;
-        continue;
-      }
-
-      let remaining = line;
-      while (remaining.length > maxChars) {
-        let splitAt = remaining.lastIndexOf(" ", maxChars);
-        if (splitAt < Math.floor(maxChars * 0.6)) {
-          splitAt = maxChars;
-        }
-        chunks.push(remaining.slice(0, splitAt).trimEnd());
-        remaining = remaining.slice(splitAt).trimStart();
-      }
-      current = remaining;
-    }
-  }
-
-  if (current) flushCurrent();
-  return chunks;
 }
 
 export async function postSlackMessage(payload: Record<string, unknown>): Promise<SlackPostResponse> {
@@ -123,7 +64,7 @@ export async function postMarkdownToSlack(
   markdown: string,
   threadTs?: string
 ): Promise<SlackPostResponse | null> {
-  const chunks = splitMarkdown(markdown);
+  const chunks = splitMarkdownChunks(markdown);
   if (chunks.length === 0) return null;
 
   let rootTs = threadTs;
@@ -142,4 +83,41 @@ export async function postMarkdownToSlack(
   }
 
   return firstResponse;
+}
+
+export async function postRichReplyToSlack(
+  channel: string,
+  markdown: string,
+  threadTs?: string,
+  metadata?: SlackReplyMetadata,
+): Promise<SlackPostResponse | null> {
+  const payloads = resultToSlackMessages(markdown, metadata);
+  if (payloads.length === 0) return null;
+
+  let rootTs = threadTs;
+  let firstResponse: SlackPostResponse | null = null;
+  try {
+    for (const payload of payloads) {
+      const response = await postSlackMessage({
+        channel,
+        ...(rootTs ? { thread_ts: rootTs } : {}),
+        ...payload,
+      });
+      if (!firstResponse) firstResponse = response;
+      if (!rootTs && response.ts) {
+        rootTs = response.ts;
+      }
+    }
+    return firstResponse;
+  } catch {
+    if (!firstResponse) {
+      return postMarkdownToSlack(channel, markdown, threadTs);
+    }
+    await postMarkdownToSlack(
+      channel,
+      "_Rich formatting failed for part of this reply. Reposting below in plain markdown._\n\n" + markdown,
+      rootTs,
+    );
+    return firstResponse;
+  }
 }

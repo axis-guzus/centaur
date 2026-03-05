@@ -19,7 +19,8 @@ import {
 } from "./harness";
 import { ApiError } from "./api-client";
 import { runModeExecution } from "./modes";
-import { MAX_SLACK_TEXT_CHARS, truncateSlackText } from "./slack-text";
+import { truncateSlackText } from "./slack-text";
+import { postRichReplyToSlack } from "./slack-post";
 
 function formatErrorForSlack(error: unknown, context: string): string {
   if (error instanceof ApiError) {
@@ -236,90 +237,23 @@ function toSlackMessage(markdown: string) {
   return renderSlackMessage(truncateSlackText(markdown));
 }
 
-function splitSlackMessageChunks(markdown: string): string[] {
-  const text = markdown.trim();
-  if (!text) return [];
-  if (text.length <= MAX_SLACK_TEXT_CHARS) return [text];
-
-  const chunks: string[] = [];
-  const pushChunk = (value: string): void => {
-    const cleaned = value.trim();
-    if (cleaned) chunks.push(cleaned);
-  };
-
-  const paragraphs = text.split(/\n{2,}/);
-  let current = "";
-  for (const rawParagraph of paragraphs) {
-    const paragraph = rawParagraph.trim();
-    if (!paragraph) continue;
-
-    const paragraphCandidate = current ? `${current}\n\n${paragraph}` : paragraph;
-    if (paragraphCandidate.length <= MAX_SLACK_TEXT_CHARS) {
-      current = paragraphCandidate;
-      continue;
-    }
-
-    if (current) {
-      pushChunk(current);
-      current = "";
-    }
-
-    if (paragraph.length <= MAX_SLACK_TEXT_CHARS) {
-      current = paragraph;
-      continue;
-    }
-
-    const lines = paragraph.split("\n");
-    let lineChunk = "";
-    for (const rawLine of lines) {
-      const line = rawLine.trimEnd();
-      const lineCandidate = lineChunk ? `${lineChunk}\n${line}` : line;
-      if (lineCandidate.length <= MAX_SLACK_TEXT_CHARS) {
-        lineChunk = lineCandidate;
-        continue;
-      }
-
-      if (lineChunk) {
-        pushChunk(lineChunk);
-        lineChunk = "";
-      }
-
-      if (line.length <= MAX_SLACK_TEXT_CHARS) {
-        lineChunk = line;
-        continue;
-      }
-
-      let remainder = line;
-      while (remainder.length > MAX_SLACK_TEXT_CHARS) {
-        let cut = remainder.lastIndexOf(" ", MAX_SLACK_TEXT_CHARS);
-        if (cut < Math.floor(MAX_SLACK_TEXT_CHARS * 0.6)) {
-          cut = MAX_SLACK_TEXT_CHARS;
-        }
-        pushChunk(remainder.slice(0, cut));
-        remainder = remainder.slice(cut).trimStart();
-      }
-      lineChunk = remainder;
-    }
-    if (lineChunk) {
-      current = lineChunk;
-    }
-  }
-
-  if (current) {
-    pushChunk(current);
-  }
-  return chunks;
-}
-
-async function postThreadMarkdown(
-  thread: {
-    post: (message: ReturnType<typeof renderSlackMessage>) => Promise<unknown>;
-  },
+async function postThreadRichReply(
+  threadKey: string,
   markdown: string,
+  metadata: {
+    harness?: Harness;
+    durationSeconds?: number;
+    sourceLabel?: string;
+  },
 ): Promise<void> {
-  for (const chunk of splitSlackMessageChunks(markdown)) {
-    await thread.post(renderSlackMessage(chunk));
-  }
+  const { channel, threadTs } = splitThreadKey(threadKey);
+  await postRichReplyToSlack(channel, markdown, threadTs, {
+    threadKey,
+    viewerUrl: `${THREAD_VIEWER_URL}/${encodeURIComponent(normalizeThreadKey(threadKey))}`,
+    harness: metadata.harness,
+    durationSeconds: metadata.durationSeconds,
+    sourceLabel: metadata.sourceLabel,
+  });
 }
 
 function createBot() {
@@ -375,7 +309,7 @@ function createBot() {
     threadConfigs.set(threadKey, config);
   }
 
-  function buildSessionContext(threadId: string): string {
+  function buildSessionContext(threadId: string, requesterUserId?: string): string {
     const now = new Date().toISOString().replace("T", " ").slice(0, 19);
     return [
       "# Session Context",
@@ -386,13 +320,15 @@ function createBot() {
       "",
       "## Slack Formatting Rules",
       "",
-      "- Use standard markdown links `[Display Text](URL)` for all hyperlinks — they are auto-converted to Slack format",
-      "- Do NOT use Slack-native `<URL|text>` link syntax — it breaks the rendering pipeline",
+      "- Use standard markdown links `[Display Text](URL)` for hyperlinks",
+      "- Do NOT use Slack-native `<URL|text>` link syntax",
       "- Preserve Slack user mentions (`<@UXXXXXXX>`) exactly as-is — only use these for actual Slack users",
-      "- For Twitter/X handles, always link to the profile: `[@handle](https://x.com/handle)` — bare @handle gets auto-converted to a broken Slack mention",
-      "- Slack enforces a 4,000 character limit per message — split long responses across multiple messages or summarize",
-      "- Markdown tables are auto-converted — use standard `| col1 | col2 |` markdown tables freely",
-      "- After completing a long task, tag the requester with `@username`",
+      "- For Twitter/X handles, link to the profile: `[@handle](https://x.com/handle)`",
+      "- Prefer concise, well-structured markdown; long replies may be split across multiple Slack messages",
+      "- Markdown tables are allowed and may render as native Slack tables when the structure is clean",
+      requesterUserId
+        ? `- After completing a long task, tag the requester with their real Slack mention: <@${requesterUserId}>`
+        : "- After completing a long task, tag the requester with their real Slack mention if available",
       "",
       "---",
       "",
@@ -512,7 +448,7 @@ function createBot() {
 
       let message = instruction;
       if (isFirstMessage) {
-        const contextPrefix = buildSessionContext(threadKey);
+        const contextPrefix = buildSessionContext(threadKey, userId);
         message = contextPrefix + threadHistory + instruction;
       }
 
@@ -525,6 +461,7 @@ function createBot() {
       });
 
       let result = "";
+      const executionStartedAt = Date.now();
       try {
         result = await runModeExecution({
           harness,
@@ -540,13 +477,13 @@ function createBot() {
       } finally {
         stopProgress();
       }
-      let finalMessage = result;
-      if (isFirstMessage && isPersonaHarness(harness)) {
-        const viewerUrl = `${THREAD_VIEWER_URL}/${encodeURIComponent(normalizeThreadKey(threadKey))}`;
-        finalMessage = `[Thread Viewer](${viewerUrl})\n\n` + finalMessage;
-      }
-      if (finalMessage.trim()) {
-        await postThreadMarkdown(thread, finalMessage);
+      const finalMessage = result.trim();
+      if (finalMessage) {
+        await postThreadRichReply(threadKey, finalMessage, {
+          harness,
+          durationSeconds: Math.max(0, (Date.now() - executionStartedAt) / 1000),
+          sourceLabel: "Paradigm AI",
+        });
       }
     } catch (error) {
       await thread.post(

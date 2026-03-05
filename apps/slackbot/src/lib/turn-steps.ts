@@ -15,6 +15,7 @@ import {
 } from "@/lib/describe";
 import { asBoolean, asNumber } from "@/lib/parse-utils";
 import { dedupeSources, extractSourcesFromUnknown, type StepSource } from "@/lib/source-utils";
+import { stringifyToolOutput } from "@/lib/tool-output-detect";
 import type { Turn } from "@/lib/types";
 
 function asString(value: unknown): string {
@@ -23,25 +24,6 @@ function asString(value: unknown): string {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-}
-
-function outputToText(output: unknown): string | undefined {
-  if (output === undefined || output === null) return undefined;
-  if (typeof output === "string") return output;
-  if (Array.isArray(output)) {
-    const textParts = output
-      .map((item) => asRecord(item))
-      .filter((item) => asString(item.type) === "text" && asString(item.text))
-      .map((item) => asString(item.text));
-    if (textParts.length > 0) {
-      return textParts.join("\n");
-    }
-  }
-  try {
-    return JSON.stringify(output, null, 2);
-  } catch {
-    return String(output);
-  }
 }
 
 function stableSerialize(value: unknown): string {
@@ -78,6 +60,15 @@ function legacyToolState(state: NonNullable<ToolCall["uiState"]>): ToolCall["sta
   if (state === "output-error" || state === "output-denied") return "error";
   if (state === "output-available" || state === "approval-responded") return "done";
   return "loading";
+}
+
+function shouldKeepStringOutput(output: unknown): boolean {
+  if (typeof output === "string") return true;
+  if (!Array.isArray(output)) return false;
+  return output.every((item) => {
+    const record = asRecord(item);
+    return asString(record.type) === "text" && typeof record.text === "string";
+  });
 }
 
 /** Parse a "[phase]" label from the beginning of a user message. */
@@ -331,13 +322,18 @@ export function stepsFromTurns(turns: Turn[]): Step[] {
           if (!toolCallId) continue;
           const tracked = toolInputById.get(toolCallId);
           const isError = asBoolean(block.is_error) === true;
-          const blockOutput = outputToText(block.content);
+          const blockOutput = stringifyToolOutput(block.content);
           const extractedSources = extractSourcesFromUnknown(block.content);
           if (extractedSources.length > 0) {
             turnSources.push(...extractedSources);
           }
           if (tracked) {
-            tracked.output = isError ? undefined : blockOutput;
+            tracked.output = isError
+              ? undefined
+              : shouldKeepStringOutput(block.content)
+                ? blockOutput
+                : undefined;
+            tracked.rawOutput = isError ? undefined : block.content;
             tracked.errorText = isError ? blockOutput : undefined;
             tracked.uiState = normalizeToolUiState(isError, Boolean(blockOutput));
             tracked.state = legacyToolState(tracked.uiState);
@@ -611,7 +607,7 @@ export function stepsFromTurns(turns: Turn[]): Step[] {
             let output = item.result;
             const hasError = item.error !== undefined && item.error !== null;
             if (output === undefined && hasError) output = item.error;
-            const outputText = outputToText(output);
+            const outputText = stringifyToolOutput(output);
             const extractedSources = extractSourcesFromUnknown(output);
             if (extractedSources.length > 0) {
               turnSources.push(...extractedSources);
@@ -628,7 +624,12 @@ export function stepsFromTurns(turns: Turn[]): Step[] {
               toolInputById.set(itemId, tracked);
             }
             if (tracked) {
-              tracked.output = hasError ? undefined : outputText;
+              tracked.output = hasError
+                ? undefined
+                : shouldKeepStringOutput(output)
+                  ? outputText
+                  : undefined;
+              tracked.rawOutput = hasError ? undefined : output;
               tracked.errorText = hasError ? outputText : undefined;
               tracked.uiState = normalizeToolUiState(hasError, Boolean(outputText));
               tracked.state = legacyToolState(tracked.uiState);
