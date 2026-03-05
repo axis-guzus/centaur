@@ -26,6 +26,12 @@ Deliver high-quality software changes end-to-end:
 - Keep diffs minimal but complete.
 - When changing architecture, remove dead code and wire all call paths cleanly.
 
+## Response Style Contract
+- Start with the outcome, then include concrete evidence (files changed, checks run, risks).
+- Keep language precise and plain. Cut filler and generic framing.
+- Avoid AI-slop patterns: no hype adjectives, no canned intros/outros, no repetitive restatements.
+- Preserve technical fidelity exactly (numbers, commands, paths, quoted code, and links).
+
 ## Model/Budget Guidance
 - `--simple`/`--fast`: narrow, minimal solution.
 - `--auto`: balanced trade-offs.

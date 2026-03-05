@@ -30,6 +30,7 @@ from docker.errors import NotFound
 from toon_format import decode as toon_decode
 
 from api.harness_events import normalize_harness_event
+from api.output_quality import apply_output_quality
 from shared.tool_sdk import _sm_read
 
 log = structlog.get_logger()
@@ -2656,6 +2657,20 @@ class AgentClient:
                     tail = "\n".join(stderr_lines[-5:])
                     result_text += f"\n```\n{tail}\n```"
 
+            output_quality = apply_output_quality(result_text)
+            result_text = output_quality.text
+            live_turn["events"].append(
+                {
+                    "type": "output.quality",
+                    "status": output_quality.status,
+                    "changed": output_quality.changed,
+                    "rules": list(output_quality.rule_hits),
+                    "latency_ms": output_quality.latency_ms,
+                    "received_at": datetime.now(UTC).isoformat(),
+                    "elapsed_s": round(time.monotonic() - started, 3),
+                }
+            )
+
             if continue_session and agent_thread_id:
                 with _sessions_lock:
                     session["agent_thread_id"] = agent_thread_id
@@ -2725,6 +2740,9 @@ class AgentClient:
                 total_input_tokens=total_input_tokens,
                 total_output_tokens=total_output_tokens,
                 event_count=len(live_turn["events"]),
+                output_quality_status=output_quality.status,
+                output_quality_changed=output_quality.changed,
+                output_quality_latency_ms=output_quality.latency_ms,
             )
 
             result = {

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from starlette.responses import JSONResponse, PlainTextResponse
 
 from api.deps import get_pool, verify_operator_api_key
+from api.output_quality import get_output_quality_metrics
 
 router = APIRouter()
 
@@ -47,6 +48,7 @@ async def metrics(pool: Annotated[asyncpg.Pool, Depends(get_pool)]) -> PlainText
     """Minimal Prometheus metrics for API health alignment."""
     ready, _ = await _database_ready(pool)
     db_up = 1 if ready else 0
+    quality_metrics = get_output_quality_metrics()
     payload = "\n".join(
         [
             "# HELP ai_v2_api_up Process health indicator.",
@@ -55,6 +57,20 @@ async def metrics(pool: Annotated[asyncpg.Pool, Depends(get_pool)]) -> PlainText
             "# HELP ai_v2_api_db_up Database readiness indicator.",
             "# TYPE ai_v2_api_db_up gauge",
             f"ai_v2_api_db_up {db_up}",
+            "# HELP ai_v2_output_quality_total Total responses checked by output quality pipeline.",
+            "# TYPE ai_v2_output_quality_total counter",
+            f"ai_v2_output_quality_total {quality_metrics['total']}",
+            "# HELP ai_v2_output_quality_changed_total Responses rewritten by output quality pipeline.",
+            "# TYPE ai_v2_output_quality_changed_total counter",
+            f"ai_v2_output_quality_changed_total {quality_metrics['changed']}",
+            "# HELP ai_v2_output_quality_latency_ms_total Total latency spent in output quality pipeline.",
+            "# TYPE ai_v2_output_quality_latency_ms_total counter",
+            f"ai_v2_output_quality_latency_ms_total {quality_metrics['latency_ms_total']}",
+            "# HELP ai_v2_output_quality_status_total Responses by output quality status.",
+            "# TYPE ai_v2_output_quality_status_total counter",
+            f'ai_v2_output_quality_status_total{{status="applied"}} {quality_metrics["applied"]}',
+            f'ai_v2_output_quality_status_total{{status="skipped"}} {quality_metrics["skipped"]}',
+            f'ai_v2_output_quality_status_total{{status="error"}} {quality_metrics["error"]}',
             "",
         ]
     )
