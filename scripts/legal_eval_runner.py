@@ -16,6 +16,7 @@ import json
 import multiprocessing
 import os
 import re
+import runpy
 import sys
 import tempfile
 import time
@@ -37,14 +38,31 @@ class Expectation:
 
 
 @dataclass(frozen=True)
+class EventExpectation:
+    name: str
+    pattern: str
+    should_match: bool = True
+    min_count: int = 1
+
+
+@dataclass(frozen=True)
+class EvalTurn:
+    prompt: str
+    expectations: tuple[Expectation, ...] = ()
+    event_expectations: tuple[EventExpectation, ...] = ()
+    max_chars: int | None = None
+
+
+@dataclass(frozen=True)
 class EvalCase:
     case_id: str
     category: str
     tier: str  # critical | high | extended
     prompt: str
-    expectations: tuple[Expectation, ...]
+    expectations: tuple[Expectation, ...] = ()
     notes: str = ""
     max_chars: int | None = None
+    turns: tuple[EvalTurn, ...] = ()
 
 
 CASES: tuple[EvalCase, ...] = (
@@ -123,8 +141,8 @@ CASES: tuple[EvalCase, ...] = (
         "R-04",
         "routing",
         "high",
-        "[intake] classify workflow and extract known terms for a $5.5M/$33.5M term sheet.",
-        (Expectation("intake_sections", r"workflow|known terms|assumptions"),),
+        "Classify the workflow and extract known terms for a $5.5M investment at $33.5M post-money valuation.",
+        (Expectation("intake_sections", r"workflow|known terms|assumption|seed|series"),),
     ),
     # Core financing
     EvalCase(
@@ -699,6 +717,143 @@ CASES: tuple[EvalCase, ...] = (
             ),
         ),
     ),
+    # Novel legal reasoning — can the agent think like a Paradigm lawyer?
+    EvalCase(
+        "LR-01",
+        "legal_reasoning",
+        "critical",
+        (
+            "A Series A company (crypto, Paradigm leading with 15% ownership) sends us a Charter "
+            "draft that uses narrow-based weighted average anti-dilution instead of broad-based. "
+            "Company counsel says narrow-based is 'functionally equivalent for this cap structure.' "
+            "How do you analyze this and what is your recommendation?"
+        ),
+        (
+            Expectation("identifies_redline", r"RED_LINE|red line|non-negotiable"),
+            Expectation("bbwa_required", r"broad-?based weighted average|bbwa"),
+            Expectation("rejects_counsel_framing", r"not (equivalent|acceptable|functionally)|narrow.*(not|deviat|reject)"),
+            Expectation("explains_difference", r"dilution|formula|denominator|outstanding"),
+        ),
+        notes="Tests: Can the agent reject a sophisticated but incorrect legal argument and hold the red line?",
+    ),
+    EvalCase(
+        "LR-02",
+        "legal_reasoning",
+        "critical",
+        (
+            "We are participating in a Series D round led by a16z. The IRA gives a16z an amendment "
+            "veto on information rights but does not give Paradigm one. Paradigm owns 3% post-close. "
+            "The Voting Agreement allows a16z to designate 2 board directors and Paradigm has no "
+            "board seat. How should Paradigm think about its negotiation leverage and what should we push for?"
+        ),
+        (
+            Expectation("stage_context", r"late-?stage|minority|3%|series d|participant"),
+            Expectation("rights_parity", r"parity|a16z.*rights|same rights|observer"),
+            Expectation("realistic_leverage", r"leverage|position|minority|limited"),
+            Expectation("concrete_asks", r"observer|information|mrl|side letter|carve-?out"),
+        ),
+        notes="Tests: Can the agent calibrate expectations for a minority participant deal and give practical advice?",
+    ),
+    EvalCase(
+        "LR-03",
+        "legal_reasoning",
+        "high",
+        (
+            "A Seed-stage AI company (not crypto) wants to include a provision in the SPA that says "
+            "'Company may use investor confidential information to train machine learning models for "
+            "internal product improvement purposes.' Should we flag this? What severity? Why?"
+        ),
+        (
+            Expectation("flags_issue", r"flag|concern|risk|issue"),
+            Expectation("data_sensitivity", r"confidential|sensitive|trade secret|proprietary"),
+            Expectation("not_standard", r"not standard|unusual|non-?standard|deviat|novel"),
+            Expectation("severity_calibrated", r"STANDARD|RED_LINE"),
+        ),
+        notes="Tests: Can the agent reason about a novel provision not in the playbook?",
+    ),
+    EvalCase(
+        "LR-04",
+        "legal_reasoning",
+        "high",
+        (
+            "Paradigm is leading a $10M Seed round at $40M post for a DeFi protocol company. "
+            "The token warrant says lockup is 2 years from Token Launch with no MFN clause. "
+            "Insiders have a 1-year lockup. The company argues that Paradigm's longer lockup "
+            "reflects 'the economics of the preferred stock conversion.' Evaluate this."
+        ),
+        (
+            Expectation("lockup_mfn_redline", r"RED_LINE|MFN|most favored|more onerous"),
+            Expectation("rejects_company_argument", r"not (acceptable|justified|appropriate)|reject|deviat"),
+            Expectation("insider_comparison", r"insider|1.year|less restrictive|parity"),
+            Expectation("specific_fix", r"MFN|match|same|no more (restrictive|onerous)"),
+        ),
+        notes="Tests: Can the agent identify a subtle red line violation dressed up in reasonable-sounding justification?",
+    ),
+    EvalCase(
+        "LR-05",
+        "legal_reasoning",
+        "high",
+        (
+            "Review this protective provisions excerpt for a Series A where Paradigm is leading with 20% ownership:\n\n"
+            "Consent of holders of majority of Preferred Stock required for: "
+            "(i) liquidation or dissolution; (ii) amendment of charter adversely affecting Preferred; "
+            "(iii) authorization of senior or pari passu securities; (iv) increase in authorized shares; "
+            "(v) declaration of dividends.\n\n"
+            "What is missing from Paradigm's perspective?"
+        ),
+        (
+            Expectation("missing_debt_threshold", r"debt|indebtedness"),
+            Expectation("missing_token_consent", r"token|issuance"),
+            Expectation("missing_ip_or_equity_provisions", r"option|equity|ip|license|asset"),
+            Expectation("missing_control_provisions", r"merger|sale|change of control|board size|related party"),
+            Expectation("blocking_rights", r"paradigm.*consent|blocking|specific"),
+        ),
+        notes="Tests: Can the agent identify what's absent, not just what's present?",
+    ),
+    EvalCase(
+        "CG-01",
+        "clarification",
+        "critical",
+        (
+            "We are revising a financing package but "
+            "do not have company legal name, board seat allocation, no-shop duration, or governing law. "
+            "What should you do?"
+        ),
+        (
+            Expectation("asks_for_missing_info", r"need|missing|provide|clarif|what is"),
+            Expectation("mentions_board_gap", r"board"),
+            Expectation("mentions_no_shop_gap", r"no-?shop"),
+            Expectation("no_final_analysis", r"RED_LINE|STANDARD|NICE_TO_HAVE", should_match=False),
+        ),
+    ),
+    EvalCase(
+        "CG-02",
+        "clarification",
+        "high",
+        (
+            "Review this term sheet for Acme Robotics, a Delaware C-Corp. "
+            "Series A preferred. Investment $8M at $40M post. Board: 1 Paradigm seat + 1 observer. "
+            "No-shop 45 days. Full ratchet anti-dilution. No amendment veto for Paradigm."
+        ),
+        (
+            Expectation("produces_analysis", r"RED_LINE|STANDARD|finding|risk|severity"),
+            Expectation("flags_full_ratchet", r"full ratchet|anti-dilution"),
+            Expectation("flags_amendment_veto", r"amend|veto|paradigm.*consent"),
+        ),
+        notes="Sufficient info should produce direct analysis without asking unnecessary questions.",
+    ),
+    EvalCase(
+        "CG-03",
+        "clarification",
+        "high",
+        "Is a 1x non-participating liquidation preference generally founder-friendlier than 2x participating?",
+        (
+            Expectation("direct_answer", r"answer|generally|depends|1x|non-participating"),
+            Expectation("assumptions_or_caveats", r"assumption|caveat|depends"),
+            Expectation("legal_boundary", r"not a lawyer|not legal advice"),
+        ),
+        notes="Question workflow should answer directly without stalling.",
+    ),
 )
 
 
@@ -710,6 +865,11 @@ CASE_TIMEOUT_OVERRIDES_S: dict[str, int] = {
     "N-03": 240,
     "T-04": 210,
     "K-04": 240,
+    "CG-02": 210,
+    "LR-01": 240,
+    "LR-02": 240,
+    "LR-04": 240,
+    "LR-05": 240,
 }
 
 
@@ -769,16 +929,55 @@ def _filter_cases(
     return selected
 
 
-def _regex_match(text: str, exp: Expectation) -> bool:
-    normalized = (
+def _normalize_for_eval(text: str) -> str:
+    return (
         text.replace("\u2013", "-")
         .replace("\u2014", "-")
         .replace("\u201c", '"')
         .replace("\u201d", '"')
         .replace("\u2019", "'")
     )
+
+
+def _regex_match(text: str, exp: Expectation) -> bool:
+    normalized = _normalize_for_eval(text)
     matched = re.search(exp.pattern, normalized, re.IGNORECASE | re.MULTILINE) is not None
     return matched if exp.should_match else (not matched)
+
+
+def _event_expectation_result(
+    events_blob: str, expectation: EventExpectation
+) -> dict[str, Any]:
+    normalized = _normalize_for_eval(events_blob)
+    match_count = len(re.findall(expectation.pattern, normalized, re.IGNORECASE | re.MULTILINE))
+    if expectation.should_match:
+        passed = match_count >= max(1, expectation.min_count)
+    else:
+        passed = match_count == 0
+    threshold = (
+        f"count >= {max(1, expectation.min_count)}"
+        if expectation.should_match
+        else "count == 0"
+    )
+    return {
+        "name": expectation.name,
+        "passed": passed,
+        "pattern": expectation.pattern,
+        "match_count": match_count,
+        "threshold": threshold,
+    }
+
+
+def _case_turns(case: EvalCase) -> tuple[EvalTurn, ...]:
+    if case.turns:
+        return case.turns
+    return (
+        EvalTurn(
+            prompt=case.prompt,
+            expectations=case.expectations,
+            max_chars=case.max_chars,
+        ),
+    )
 
 
 def _setup_agent_client(env: dict[str, str]) -> Any:
@@ -1204,110 +1403,383 @@ def _run_docx_fidelity_eval() -> list[dict[str, Any]]:
 
 
 def _run_mode_guard_eval() -> list[dict[str, Any]]:
-    legal_mode_path = Path("apps/slackbot/src/lib/modes/legal.ts").resolve()
-    bot_mode_path = Path("apps/slackbot/src/lib/bot.ts").resolve()
-    if not legal_mode_path.exists():
+    prompt_path = Path("sandbox/SYSTEM_PROMPT_LEGAL.md").resolve()
+    index_path = Path("apps/slackbot/src/lib/modes/index.ts").resolve()
+    bot_path = Path("apps/slackbot/src/lib/bot.ts").resolve()
+    if not prompt_path.exists():
         return [
             {
                 "case_id": "OP-00",
                 "category": "ops",
                 "passed": False,
-                "error": f"legal mode file not found: {legal_mode_path}",
-            }
-        ]
-    if not bot_mode_path.exists():
-        return [
-            {
-                "case_id": "OP-00B",
-                "category": "ops",
-                "passed": False,
-                "error": f"bot mode file not found: {bot_mode_path}",
+                "error": f"system prompt not found: {prompt_path}",
             }
         ]
 
-    text = legal_mode_path.read_text()
-    bot_text = bot_mode_path.read_text()
-    continue_true = "continueSession: true" in text
-    continue_false = "continueSession: false" in text
-    request_id_scoped = "requestId: `${requestId}:${phaseLabel}`" in text
-    term_sheet_hinting = (
-        "call termsheet create_term_sheet" in text
-        and "call termsheet explain_clause_plan" in text
-        and "call termsheet generate_document_package" in text
+    prompt = prompt_path.read_text()
+    index_text = index_path.read_text() if index_path.exists() else ""
+    bot_text = bot_path.read_text() if bot_path.exists() else ""
+
+    identity = "not a lawyer" in prompt and "not** provide legal advice" in prompt
+    retrieval_tools = (
+        "call legal-playbook" in prompt
+        and "call search" in prompt
+        and "check_compliance" in prompt
+        and "score_quality" in prompt
     )
-    retrieval_hinting = "call search" in text
-    compliance_tool_hinting = (
-        "call legal-playbook check_compliance" in text
-        and "call legal-playbook score_quality" in text
+    self_orchestrating = (
+        "Figure out what they need" in prompt
+        and "you decide" in prompt
+        and "No external orchestrator" in prompt
     )
-    legal_kickoff_unified = (
-        "parsed.cleanedText || buildLegalKickoffInstruction()" in bot_text
-        and "if (!parsed.cleanedText && isLegalHarness(harness))" not in bot_text
-    )
-    legal_identity_phrase = (
-        "I am not a lawyer; I am a legal agent created by Paradigm." in text
-    )
-    legal_kickoff_contract = (
-        "provide exactly 4 short example prompts" in text
-        and "ask one focused follow-up question to begin work" in text
-        and "keep output <= 220 words and avoid marketing tone" in text
-    )
-    lawyer_style_contract = (
-        "Style contract for this phase:" in text
-        and "Write like a senior transactional lawyer" in text
-    )
+    no_phase_tags = "[intake]" not in prompt and "[retrieval]" not in prompt
+    no_loop_plugin = "legalLoopPlugin" not in index_text and "runLegalPromptLoop" not in index_text
+    no_legal_kickoff_special = "buildLegalKickoffInstruction" not in bot_text
+    severity_system = "RED_LINE" in prompt and "STANDARD" in prompt and "NICE_TO_HAVE" in prompt
+    output_contracts = "QUESTION" in prompt and "DRAFT" in prompt and "REVIEW" in prompt
 
     return [
         {
             "case_id": "OP-01",
             "category": "ops",
-            "passed": continue_true and not continue_false,
-            "checks": {
-                "continue_true_present": continue_true,
-                "continue_false_absent": not continue_false,
-            },
+            "passed": identity,
+            "checks": {"legal_identity_and_disclaimer": identity},
         },
         {
             "case_id": "OP-02",
             "category": "ops",
-            "passed": request_id_scoped,
-            "checks": {"phase_scoped_request_ids": request_id_scoped},
+            "passed": retrieval_tools,
+            "checks": {"retrieval_and_compliance_tools_in_prompt": retrieval_tools},
         },
         {
             "case_id": "OP-03",
             "category": "ops",
-            "passed": term_sheet_hinting,
-            "checks": {"tool_grounded_term_sheet_prompts": term_sheet_hinting},
+            "passed": self_orchestrating,
+            "checks": {"single_turn_self_orchestrating": self_orchestrating},
         },
         {
             "case_id": "OP-04",
             "category": "ops",
-            "passed": retrieval_hinting,
-            "checks": {"shared_search_retrieval_prompts": retrieval_hinting},
+            "passed": no_phase_tags,
+            "checks": {"no_phase_tag_machinery": no_phase_tags},
         },
         {
             "case_id": "OP-05",
             "category": "ops",
-            "passed": compliance_tool_hinting,
-            "checks": {"tool_backed_compliance_prompts": compliance_tool_hinting},
+            "passed": no_loop_plugin,
+            "checks": {"no_loop_plugin_in_mode_index": no_loop_plugin},
         },
         {
             "case_id": "OP-06",
             "category": "ops",
-            "passed": legal_kickoff_unified and legal_identity_phrase and legal_kickoff_contract,
-            "checks": {
-                "legal_kickoff_unified_path": legal_kickoff_unified,
-                "legal_identity_phrase_present": legal_identity_phrase,
-                "legal_kickoff_contract_present": legal_kickoff_contract,
-            },
+            "passed": no_legal_kickoff_special,
+            "checks": {"no_legal_kickoff_special_casing": no_legal_kickoff_special},
         },
         {
             "case_id": "OP-07",
             "category": "ops",
-            "passed": lawyer_style_contract,
-            "checks": {"lawyer_style_contract_present": lawyer_style_contract},
+            "passed": severity_system and output_contracts,
+            "checks": {
+                "severity_system_present": severity_system,
+                "output_contracts_present": output_contracts,
+            },
         },
     ]
+
+
+def _load_legal_playbook_client() -> Any:
+    module_path = Path("tools/legal-playbook/client.py").resolve()
+    if not module_path.exists():
+        raise FileNotFoundError(f"legal-playbook client not found: {module_path}")
+    namespace = runpy.run_path(str(module_path), run_name="legal_playbook_eval_client")
+    client_cls = namespace.get("LegalPlaybookClient")
+    if client_cls is None:
+        raise RuntimeError("LegalPlaybookClient symbol missing from legal-playbook client module")
+    return client_cls()
+
+
+def _run_knowledge_wiring_eval() -> list[dict[str, Any]]:
+    policy_path = Path("docs/legal_policy_v1.json").resolve()
+    kb_path = Path("docs/legal_knowledge_base.json").resolve()
+    if not policy_path.exists() or not kb_path.exists():
+        return [
+            {
+                "case_id": "KW-00",
+                "category": "knowledge_wiring",
+                "passed": False,
+                "error": f"required knowledge files missing: policy={policy_path.exists()} kb={kb_path.exists()}",
+            }
+        ]
+
+    policy = json.loads(policy_path.read_text())
+    kb = json.loads(kb_path.read_text())
+    results: list[dict[str, Any]] = []
+
+    def add_result(case_id: str, passed: bool, checks: dict[str, Any]) -> None:
+        results.append(
+            {
+                "case_id": case_id,
+                "category": "knowledge_wiring",
+                "passed": passed,
+                "checks": checks,
+            }
+        )
+
+    required_policy_keys = {"meta", "workflow_matrix", "compliance_rules"}
+    required_kb_keys = {"knowledge_classification", "pack_index", "knowledge_runtime"}
+    add_result(
+        "KW-01",
+        required_policy_keys.issubset(set(policy))
+        and required_kb_keys.issubset(set(kb)),
+        {
+            "policy_missing_keys": sorted(required_policy_keys - set(policy)),
+            "kb_missing_keys": sorted(required_kb_keys - set(kb)),
+        },
+    )
+
+    precedence = policy.get("meta", {}).get("source_precedence", [])
+    precedence_ranks = [int(item.get("rank", -1)) for item in precedence if isinstance(item, dict)]
+    precedence_sources = [str(item.get("source", "")) for item in precedence if isinstance(item, dict)]
+    expected_sources = [
+        "paradigm_policy_rules",
+        "canonical_internal_financing_context",
+        "executed_internal_precedents",
+        "general_market_and_law_firm_guidance",
+    ]
+    add_result(
+        "KW-02",
+        precedence_ranks == list(range(1, len(precedence_ranks) + 1))
+        and precedence_sources == expected_sources,
+        {
+            "ranks": precedence_ranks,
+            "sources": precedence_sources,
+            "expected_sources": expected_sources,
+        },
+    )
+
+    pack_index = kb.get("pack_index", {})
+    missing_pack_refs: dict[str, list[str]] = {}
+    for pack_id, meta in pack_index.items():
+        refs = [str(item) for item in (meta.get("section_refs", []) if isinstance(meta, dict) else [])]
+        missing = [ref for ref in refs if ref not in kb]
+        if missing:
+            missing_pack_refs[str(pack_id)] = missing
+    add_result(
+        "KW-03",
+        not missing_pack_refs,
+        {"missing_pack_section_refs": missing_pack_refs},
+    )
+
+    runtime = kb.get("knowledge_runtime", {})
+    runtime_pack_ids: set[str] = set(str(x) for x in runtime.get("fallback_pack_ids", []))
+    for rule in runtime.get("deterministic_pack_rules", []):
+        if isinstance(rule, dict):
+            runtime_pack_ids.update(str(x) for x in rule.get("add_pack_ids", []))
+    for call in runtime.get("system_evergreen_calls", []):
+        if not isinstance(call, dict):
+            continue
+        if str(call.get("method", "")).strip() != "get_knowledge_pack":
+            continue
+        args = call.get("args", {})
+        if isinstance(args, dict) and args.get("pack_id"):
+            runtime_pack_ids.add(str(args["pack_id"]))
+    missing_runtime_pack_ids = sorted(pack_id for pack_id in runtime_pack_ids if pack_id not in pack_index)
+    add_result(
+        "KW-04",
+        not missing_runtime_pack_ids,
+        {
+            "runtime_pack_ids": sorted(runtime_pack_ids),
+            "missing_runtime_pack_ids": missing_runtime_pack_ids,
+        },
+    )
+
+    try:
+        client = _load_legal_playbook_client()
+    except Exception as exc:
+        add_result(
+            "KW-05",
+            False,
+            {"error": f"failed to initialize legal-playbook client: {exc}"},
+        )
+        return results
+
+    plan_profile = {
+        "company_type": "ai",
+        "token_relevant": True,
+        "query_focus": "ma_exit",
+        "stage": "growth",
+    }
+    plan_one = client.get_knowledge_plan(
+        workflow="review",
+        phase="retrieval",
+        deal_profile=plan_profile,
+        max_dynamic_packs=4,
+        max_dynamic_chars=6000,
+    )
+    plan_two = client.get_knowledge_plan(
+        workflow="review",
+        phase="retrieval",
+        deal_profile=plan_profile,
+        max_dynamic_packs=4,
+        max_dynamic_chars=6000,
+    )
+    plan_deterministic = (
+        plan_one.get("plan_hash") == plan_two.get("plan_hash")
+        and plan_one.get("lookup_dynamic") == plan_two.get("lookup_dynamic")
+        and plan_one.get("search_queries") == plan_two.get("search_queries")
+    )
+    add_result(
+        "KW-05",
+        plan_deterministic,
+        {
+            "plan_hash_one": plan_one.get("plan_hash"),
+            "plan_hash_two": plan_two.get("plan_hash"),
+        },
+    )
+
+    lookup_dynamic = plan_one.get("lookup_dynamic", {})
+    primary_pack_ids = [str(x) for x in lookup_dynamic.get("primary_pack_ids", [])]
+    contingency_pack_ids = [str(x) for x in lookup_dynamic.get("contingency_pack_ids", [])]
+    selected_pack_ids = set(primary_pack_ids + contingency_pack_ids)
+    add_result(
+        "KW-06",
+        {"pk_crypto_core", "pk_ai_core", "pk_defined_terms_dgcl", "pk_ma_exit"}.issubset(selected_pack_ids),
+        {
+            "primary_pack_ids": primary_pack_ids,
+            "contingency_pack_ids": contingency_pack_ids,
+        },
+    )
+
+    evergreen_calls = plan_one.get("system_evergreen_calls", [])
+    canonical_pack_call_present = any(
+        isinstance(call, dict)
+        and str(call.get("method", "")).strip() == "get_knowledge_pack"
+        and isinstance(call.get("args", {}), dict)
+        and str(call.get("args", {}).get("pack_id", "")).strip() == "pk_internal_canonical_core"
+        for call in evergreen_calls
+    )
+    add_result(
+        "KW-07",
+        canonical_pack_call_present,
+        {"system_evergreen_calls": evergreen_calls},
+    )
+
+    canonical_pack = client.get_knowledge_pack("pk_internal_canonical_core", max_chars=12000)
+    pack_sections = canonical_pack.get("sections", {}) if isinstance(canonical_pack, dict) else {}
+    add_result(
+        "KW-08",
+        isinstance(pack_sections, dict)
+        and "internal_canonical_financing_context" in pack_sections
+        and "internal_canonical_source_index" in pack_sections,
+        {
+            "pack_error": canonical_pack.get("error") if isinstance(canonical_pack, dict) else None,
+            "pack_sections": sorted(pack_sections) if isinstance(pack_sections, dict) else [],
+            "missing_section_refs": canonical_pack.get("missing_section_refs")
+            if isinstance(canonical_pack, dict)
+            else None,
+        },
+    )
+
+    unknown_pack = client.get_knowledge_pack("pk_does_not_exist", max_chars=1000)
+    add_result(
+        "KW-09",
+        isinstance(unknown_pack, dict)
+        and unknown_pack.get("error") == "unknown_pack_id"
+        and bool(unknown_pack.get("available_packs")),
+        {"unknown_pack_response": unknown_pack},
+    )
+
+    compliance_sample = client.check_compliance(
+        document_text=(
+            "This draft includes full ratchet anti-dilution and a 2x participating liquidation preference. "
+            "No Paradigm written consent rights are included."
+        ),
+        document_type="term_sheet",
+    )
+    policy_version = client.get_policy_version()
+    checks = compliance_sample.get("checks", []) if isinstance(compliance_sample, dict) else []
+    statuses = {
+        str(item.get("status", ""))
+        for item in checks
+        if isinstance(item, dict)
+    }
+    quality = compliance_sample.get("quality", {}) if isinstance(compliance_sample, dict) else {}
+    add_result(
+        "KW-10",
+        len(checks) == int(policy_version.get("check_count", 0))
+        and statuses.issubset({"pass", "fail", "not_applicable"})
+        and isinstance(quality, dict)
+        and {"score", "threshold", "passes_threshold", "inputs"}.issubset(set(quality)),
+        {
+            "policy_check_count": policy_version.get("check_count"),
+            "actual_check_count": len(checks),
+            "statuses": sorted(statuses),
+            "quality_keys": sorted(quality) if isinstance(quality, dict) else [],
+        },
+    )
+
+    catalog = client.get_knowledge_catalog()
+    sections = catalog.get("sections", {}) if isinstance(catalog, dict) else {}
+    unknown_inject_levels = sorted(
+        key
+        for key, value in sections.items()
+        if isinstance(value, dict) and str(value.get("inject_level", "unknown")).lower() == "unknown"
+    )
+    add_result(
+        "KW-11",
+        not unknown_inject_levels,
+        {"unknown_inject_levels": unknown_inject_levels},
+    )
+
+    deal_precedents = client.get_deal_precedents()
+    precedent_companies = [
+        str(p.get("company", "")) for p in deal_precedents if isinstance(p, dict)
+    ]
+    add_result(
+        "KW-12",
+        len(deal_precedents) >= 4
+        and {"Bayesian Labs", "Kalshi", "Crown Digital", "Standard Economics"}.issubset(
+            set(precedent_companies)
+        ),
+        {
+            "precedent_count": len(deal_precedents),
+            "companies": precedent_companies,
+        },
+    )
+
+    closing = client.get_closing_checklist()
+    add_result(
+        "KW-13",
+        isinstance(closing, dict)
+        and bool(closing.get("pre_closing"))
+        and bool(closing.get("closing"))
+        and bool(closing.get("post_closing")),
+        {
+            "phases": sorted(closing.keys()) if isinstance(closing, dict) else [],
+            "pre_closing_count": len(closing.get("pre_closing", [])) if isinstance(closing, dict) else 0,
+        },
+    )
+
+    cross_checks_result = client.get_cross_document_checks()
+    add_result(
+        "KW-14",
+        len(cross_checks_result) >= 10,
+        {"cross_doc_check_count": len(cross_checks_result)},
+    )
+
+    diligence = client.get_diligence_checklist()
+    diligence_from_policy = isinstance(diligence, list) and all(
+        isinstance(item, dict) and "category" in item for item in diligence
+    )
+    add_result(
+        "KW-15",
+        diligence_from_policy and len(diligence) >= 4,
+        {
+            "reads_from_policy": diligence_from_policy,
+            "category_count": len(diligence),
+        },
+    )
+    return results
 
 
 def _render_markdown(report: dict[str, Any]) -> str:
@@ -1363,6 +1835,14 @@ def _render_markdown(report: dict[str, Any]) -> str:
                 for exp in item["expectations"]:
                     if not exp["passed"]:
                         lines.append(f"- Failed check `{exp['name']}`")
+            if item.get("event_expectations"):
+                for exp in item["event_expectations"]:
+                    if not exp.get("passed", False):
+                        count = exp.get("match_count")
+                        threshold = exp.get("threshold")
+                        lines.append(
+                            f"- Failed event check `{exp.get('name')}` (count={count}, expected {threshold})"
+                        )
             preview = str(item.get("preview", "")).strip()
             if preview:
                 lines.append(f"- Preview: `{preview[:360]}`")
@@ -1387,24 +1867,48 @@ def _execute_case_worker(
     result_path: str,
     env: dict[str, str],
     case_thread_key: str,
-    prompt: str,
+    turns_payload: list[str],
     model: str,
 ) -> None:
     client: Any | None = None
     payload: dict[str, Any]
+    turn_outputs: list[dict[str, Any]] = []
     try:
         client = _setup_agent_client(env)
-        response = client.execute(
-            case_thread_key,
-            prompt,
-            harness="legal",
-            source="api",
-            model=model,
-            continue_session=False,
-        )
-        payload = {"ok": True, "response": dict(response)}
+        for turn_index, turn_prompt in enumerate(turns_payload, start=1):
+            emitted_events: list[dict[str, Any]] = []
+
+            def _emit(event: dict[str, Any], sink: list[dict[str, Any]] = emitted_events) -> None:
+                if isinstance(event, dict):
+                    sink.append(event)
+
+            response = client.execute(
+                case_thread_key,
+                turn_prompt,
+                harness="legal",
+                source="api",
+                model=model,
+                continue_session=turn_index > 1,
+                emit=_emit,
+            )
+            turn_outputs.append(
+                {
+                    "turn_index": turn_index,
+                    "continue_session": turn_index > 1,
+                    "response": dict(response),
+                    "events": emitted_events,
+                }
+            )
+            if response.get("error"):
+                raise RuntimeError(f"agent returned error: {response['error']} (turn={turn_index})")
+        payload = {"ok": True, "turn_outputs": turn_outputs}
     except Exception as exc:
-        payload = {"ok": False, "error": str(exc), "traceback": traceback.format_exc()}
+        payload = {
+            "ok": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+            "turn_outputs": turn_outputs,
+        }
     finally:
         path = Path(result_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1447,6 +1951,11 @@ def main() -> int:
     parser.add_argument("--output-dir", default="evals/legal", help="Report output directory.")
     parser.add_argument("--skip-docx", action="store_true", help="Skip DOCX fidelity evals.")
     parser.add_argument(
+        "--skip-knowledge",
+        action="store_true",
+        help="Skip legal knowledge/policy wiring checks.",
+    )
+    parser.add_argument(
         "--capture-case-files",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1486,9 +1995,8 @@ def main() -> int:
         case_ids={c.strip() for c in args.case_id if c.strip()},
         limit=args.limit,
     )
-    if not selected and args.skip_docx:
-        print("No cases selected.")
-        return 1
+    if not selected and args.skip_docx and args.skip_knowledge:
+        print("No prompt/docx/knowledge cases selected; running mode guard checks only.")
 
     print(f"Selected prompt cases: {len(selected)}")
     if env_file:
@@ -1508,20 +2016,30 @@ def main() -> int:
         started = time.time()
         case_thread_key = f"{shared_run_key}:{case.case_id}"
         case_dir = artifacts_root / case.case_id
+        turns = _case_turns(case)
+        prompt_blob = "\n\n--- TURN ---\n\n".join(turn.prompt for turn in turns)
         prompt_path = case_dir / "prompt.txt"
         output_path = case_dir / "output.txt"
         response_path = case_dir / "response.json"
+        events_path = case_dir / "events.json"
         error_path = case_dir / "error.txt"
         if args.capture_case_files:
-            _write_text(prompt_path, case.prompt + "\n")
+            _write_text(prompt_path, prompt_blob + ("\n" if not prompt_blob.endswith("\n") else ""))
         try:
-            response: dict[str, Any]
             timeout_s = _effective_case_timeout(case.case_id, args.case_timeout_s)
+            final_response: dict[str, Any] = {}
+            final_text = ""
+            all_events: list[dict[str, Any]] = []
+            expectation_results: list[dict[str, Any]] = []
+            event_expectation_results: list[dict[str, Any]] = []
+            turn_summaries: list[dict[str, Any]] = []
+            turn_outputs: list[dict[str, Any]] = []
             if args.case_timeout_s > 0:
                 case_dir.mkdir(parents=True, exist_ok=True)
-                worker_result_path = case_dir / "worker_result.json"
+                worker_result_path = case_dir / "worker_result.case.json"
                 if worker_result_path.exists():
                     worker_result_path.unlink()
+                timeout_budget_s = timeout_s * max(1, len(turns))
                 ctx = multiprocessing.get_context("spawn")
                 process = ctx.Process(
                     target=_execute_case_worker,
@@ -1529,19 +2047,21 @@ def main() -> int:
                         str(worker_result_path),
                         env,
                         case_thread_key,
-                        case.prompt,
+                        [turn.prompt for turn in turns],
                         args.model,
                     ),
                 )
                 process.start()
-                deadline = time.monotonic() + timeout_s
+                deadline = time.monotonic() + timeout_budget_s
                 while process.is_alive():
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         process.terminate()
                         process.join()
                         _force_remove_case_container(case_thread_key)
-                        raise EvalCaseTimeoutError(f"case execution timed out (timeout_s={timeout_s})")
+                        raise EvalCaseTimeoutError(
+                            f"case execution timed out (timeout_s={timeout_s}, turns={len(turns)})"
+                        )
                     process.join(min(1.0, remaining))
                 if not worker_result_path.exists():
                     raise RuntimeError("case worker exited without writing a result")
@@ -1550,46 +2070,111 @@ def main() -> int:
                     err = worker_result.get("error", "unknown case worker failure")
                     tb = worker_result.get("traceback")
                     raise RuntimeError(f"{err}\n{tb}" if tb else err)
-                response = dict(worker_result["response"])
+                turn_outputs = [
+                    item for item in worker_result.get("turn_outputs", []) if isinstance(item, dict)
+                ]
             else:
                 if client is None:
                     raise RuntimeError("agent client is not initialized")
-                response = client.execute(
-                    case_thread_key,
-                    case.prompt,
-                    harness="legal",
-                    source="api",
-                    model=args.model,
-                    continue_session=False,
+                for turn_idx, turn in enumerate(turns, start=1):
+                    continue_session = turn_idx > 1
+                    emitted_events: list[dict[str, Any]] = []
+
+                    def _emit(event: dict[str, Any], sink: list[dict[str, Any]] = emitted_events) -> None:
+                        if isinstance(event, dict):
+                            sink.append(event)
+
+                    response = client.execute(
+                        case_thread_key,
+                        turn.prompt,
+                        harness="legal",
+                        source="api",
+                        model=args.model,
+                        continue_session=continue_session,
+                        emit=_emit,
+                    )
+                    if response.get("error"):
+                        raise RuntimeError(f"agent returned error: {response['error']} (turn={turn_idx})")
+                    turn_outputs.append(
+                        {
+                            "turn_index": turn_idx,
+                            "continue_session": continue_session,
+                            "response": dict(response),
+                            "events": emitted_events,
+                        }
+                    )
+
+            if len(turn_outputs) != len(turns):
+                raise RuntimeError(
+                    f"worker turn count mismatch: expected {len(turns)}, got {len(turn_outputs)}"
                 )
-            if response.get("error"):
-                raise RuntimeError(f"agent returned error: {response['error']}")
-            text = str(response.get("result", ""))
-            expectation_results = []
-            for exp in case.expectations:
-                passed = _regex_match(text, exp)
-                expectation_results.append(
-                    {"name": exp.name, "passed": passed, "pattern": exp.pattern}
-                )
-            expectation_results.append(
-                {
-                    "name": "non_empty_output",
-                    "passed": bool(text.strip()),
-                    "pattern": r"\S+",
-                }
-            )
-            if case.max_chars is not None:
+
+            for turn_idx, turn in enumerate(turns, start=1):
+                turn_payload = turn_outputs[turn_idx - 1]
+                response = dict(turn_payload.get("response", {}))
+                turn_events = [
+                    item
+                    for item in turn_payload.get("events", [])
+                    if isinstance(item, dict)
+                ]
+                if response.get("error"):
+                    raise RuntimeError(f"agent returned error: {response['error']} (turn={turn_idx})")
+
+                turn_text = str(response.get("result", ""))
+                final_response = response
+                final_text = turn_text
+                all_events.extend(turn_events)
+
+                for exp in turn.expectations:
+                    passed = _regex_match(turn_text, exp)
+                    expectation_results.append(
+                        {
+                            "name": f"t{turn_idx}.{exp.name}",
+                            "passed": passed,
+                            "pattern": exp.pattern,
+                        }
+                    )
                 expectation_results.append(
                     {
-                        "name": "max_chars",
-                        "passed": len(text) <= case.max_chars,
-                        "pattern": f"len(output)<= {case.max_chars}",
+                        "name": f"t{turn_idx}.non_empty_output",
+                        "passed": bool(turn_text.strip()),
+                        "pattern": r"\S+",
                     }
                 )
-            passed = all(item["passed"] for item in expectation_results)
+                if turn.max_chars is not None:
+                    expectation_results.append(
+                        {
+                            "name": f"t{turn_idx}.max_chars",
+                            "passed": len(turn_text) <= turn.max_chars,
+                            "pattern": f"len(output)<= {turn.max_chars}",
+                        }
+                    )
+
+                turn_event_blob = "\n".join(
+                    json.dumps(item, sort_keys=True, default=str) for item in turn_events
+                )
+                for event_exp in turn.event_expectations:
+                    event_result = _event_expectation_result(turn_event_blob, event_exp)
+                    event_result["name"] = f"t{turn_idx}.{event_result['name']}"
+                    event_expectation_results.append(event_result)
+
+                turn_summaries.append(
+                    {
+                        "turn_index": turn_idx,
+                        "continue_session": bool(turn_payload.get("continue_session", turn_idx > 1)),
+                        "prompt_sha256": _sha256_text(turn.prompt),
+                        "output_sha256": _sha256_text(turn_text),
+                        "chars": len(turn_text),
+                        "event_count": len(turn_events),
+                    }
+                )
+
+            all_checks = expectation_results + event_expectation_results
+            passed = all(item["passed"] for item in all_checks)
             if args.capture_case_files:
-                _write_text(output_path, text + ("\n" if not text.endswith("\n") else ""))
-                _write_text(response_path, json.dumps(response, indent=2, default=str))
+                _write_text(output_path, final_text + ("\n" if not final_text.endswith("\n") else ""))
+                _write_text(response_path, json.dumps(final_response, indent=2, default=str))
+                _write_text(events_path, json.dumps(all_events, indent=2, default=str))
             results.append(
                 {
                     "case_id": case.case_id,
@@ -1597,23 +2182,29 @@ def main() -> int:
                     "tier": case.tier,
                     "passed": passed,
                     "duration_s": round(time.time() - started, 3),
-                    "harness": response.get("harness"),
-                    "engine": response.get("engine"),
-                    "persona": response.get("persona"),
-                    "chars": len(text),
-                    "prompt_sha256": _sha256_text(case.prompt),
-                    "output_sha256": _sha256_text(text),
+                    "harness": final_response.get("harness"),
+                    "engine": final_response.get("engine"),
+                    "persona": final_response.get("persona"),
+                    "turn_count": len(turns),
+                    "event_count": len(all_events),
+                    "chars": len(final_text),
+                    "prompt_sha256": _sha256_text(prompt_blob),
+                    "output_sha256": _sha256_text(final_text),
                     "expectations": expectation_results,
-                    "preview": " ".join(text.split())[:700],
+                    "event_expectations": event_expectation_results,
+                    "turns": turn_summaries,
+                    "preview": " ".join(final_text.split())[:700],
                     "prompt_path": str(prompt_path) if args.capture_case_files else None,
                     "output_path": str(output_path) if args.capture_case_files else None,
                     "response_path": str(response_path) if args.capture_case_files else None,
+                    "events_path": str(events_path) if args.capture_case_files else None,
                 }
             )
             if args.include_full_output_json:
-                results[-1]["prompt_text"] = case.prompt
-                results[-1]["output_text"] = text
-            print(f"passed={passed} chars={len(text)}")
+                results[-1]["prompt_text"] = prompt_blob
+                results[-1]["output_text"] = final_text
+                results[-1]["events"] = all_events
+            print(f"passed={passed} chars={len(final_text)} turns={len(turns)}")
         except Exception as exc:
             if args.capture_case_files:
                 _write_text(error_path, f"{exc}\n")
@@ -1632,7 +2223,7 @@ def main() -> int:
                 }
             )
             if args.include_full_output_json:
-                results[-1]["prompt_text"] = case.prompt
+                results[-1]["prompt_text"] = prompt_blob
             print(f"failed with exception: {exc}")
         finally:
             if client is not None:
@@ -1647,6 +2238,9 @@ def main() -> int:
     if not args.skip_docx:
         print("\n=== DOCX fidelity checks ===")
         results.extend(_run_docx_fidelity_eval())
+    if not args.skip_knowledge:
+        print("\n=== Knowledge wiring checks ===")
+        results.extend(_run_knowledge_wiring_eval())
     print("\n=== Legal mode guard checks ===")
     results.extend(_run_mode_guard_eval())
 

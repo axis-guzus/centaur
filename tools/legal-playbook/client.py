@@ -136,23 +136,10 @@ class LegalPlaybookClient:
             "message": "No explicit defaults configured; use playbook red lines + NVCA baseline.",
         }
 
-    def get_diligence_checklist(self) -> list[str]:
-        """Return a V1 diligence checklist used during legal intake."""
-        return [
-            "Confirm legal entity and jurisdiction.",
-            "Confirm instrument type (priced, SAFE, note).",
-            "Confirm investment amount and valuation.",
-            "Confirm board rights and control rights.",
-            "Confirm token economics and token-rights applicability.",
-            "Tie cap table issuances to approvals and signed grant/issuance documents.",
-            "Confirm major investor threshold treatment.",
-            "Confirm IP ownership chain and assignment coverage (employees/consultants/founders).",
-            "Review open-source and material agreement IP constraints.",
-            "Check sanctions/outbound investment representations.",
-            "Run Rule 506 / Bad Actor / blue sky process checks.",
-            "Run HSR/CFIUS/OISP trigger analysis where applicable.",
-            "Check consistency with previous signed docs.",
-        ]
+    def get_diligence_checklist(self) -> list[dict[str, Any]]:
+        """Return the diligence checklist from policy data."""
+        checklist = self._policy.get("diligence_checklist", [])
+        return [dict(item) for item in checklist if isinstance(item, dict)]
 
     def get_negotiation_priorities(self) -> list[dict[str, Any]]:
         """Return Ben-priority negotiation order used by legal mode."""
@@ -185,11 +172,12 @@ class LegalPlaybookClient:
         if not kb_path.exists():
             return {"error": "knowledge base file not found", "path": str(kb_path)}
         kb = self._load_knowledge_base()
-        requested = {t.strip().lower() for t in topics.split(",") if t.strip()}
+        requested_set = {t.strip().lower() for t in topics.split(",") if t.strip()}
+        requested = sorted(requested_set)
         classification = kb.get("knowledge_classification", {})
         level_filter = inject_level.strip().lower()
 
-        if (not requested or "all" in requested) and not level_filter:
+        if (not requested_set or "all" in requested_set) and not level_filter:
             return self._truncate_payload(kb, max_chars)
 
         result: dict[str, Any] = {}
@@ -197,39 +185,28 @@ class LegalPlaybookClient:
             if not isinstance(value, dict):
                 continue
             section_topic = value.get("topic", "")
-            if requested and "all" not in requested and section_topic not in requested:
+            if requested_set and "all" not in requested_set and section_topic not in requested_set:
                 continue
             if level_filter and str(classification.get(key, "")).lower() != level_filter:
                 continue
             result[key] = value
         if not result:
+            available_topics = sorted(
+                {
+                    str(value.get("topic", "")).strip()
+                    for value in kb.values()
+                    if isinstance(value, dict) and str(value.get("topic", "")).strip()
+                }
+            )
             return {
-                "available_topics": [
-                    "nvca",
-                    "market_norms",
-                    "stage_norms",
-                    "ai_companies",
-                    "crypto",
-                    "law_firms",
-                    "defined_terms",
-                    "ma_exit",
-                    "securities_law",
-                    "delaware_dgcl",
-                    "tax",
-                    "corporate_ops",
-                    "venture_ops",
-                    "employment_ip",
-                    "crypto_split",
-                    "internal_canonical",
-                    "internal_corpus_index",
-                ],
-                "requested": list(requested),
+                "available_topics": available_topics,
+                "requested": requested,
                 "inject_level": level_filter or "all",
                 "matched": 0,
             }
         payload = {
             "version": kb.get("version", "unknown"),
-            "requested_topics": list(requested) if requested else ["all"],
+            "requested_topics": requested if requested else ["all"],
             "inject_level": level_filter or "all",
             "sections": result,
         }
@@ -264,11 +241,13 @@ class LegalPlaybookClient:
             return {"error": "unknown_pack_id", "pack_id": pack_id, "available_packs": list(packs)}
 
         refs = [str(item) for item in pack.get("section_refs", [])]
+        missing_section_refs = [ref for ref in refs if ref not in kb]
         sections = {ref: kb.get(ref) for ref in refs if ref in kb}
         payload = {
             "pack_id": pack_id,
             "metadata": pack,
             "sections": sections,
+            "missing_section_refs": missing_section_refs,
         }
         return self._truncate_payload(payload, max_chars)
 
@@ -303,7 +282,13 @@ class LegalPlaybookClient:
             if pack_id not in unique_pack_ids and pack_id in packs:
                 unique_pack_ids.append(pack_id)
 
-        ranked_pack_ids = unique_pack_ids
+        ranked_pack_ids = sorted(
+            unique_pack_ids,
+            key=lambda pack_id: (
+                int((packs.get(pack_id, {}) or {}).get("deterministic_rank", 10_000)),
+                pack_id,
+            ),
+        )
         primary_pack_ids = ranked_pack_ids[: max(1, max_dynamic_packs)]
         contingency_pack_ids = ranked_pack_ids[max(1, max_dynamic_packs) :]
 
@@ -367,8 +352,22 @@ class LegalPlaybookClient:
             },
         }
 
+    def get_closing_checklist(self) -> dict[str, Any]:
+        """Return the financing closing checklist (pre-closing, closing, post-closing)."""
+        return dict(self._policy.get("closing_checklist", {}))
+
+    def get_cross_document_checks(self) -> list[dict[str, Any]]:
+        """Return cross-document consistency check pairs."""
+        checks = self._policy.get("cross_document_consistency_checks", [])
+        return [dict(item) for item in checks if isinstance(item, dict)]
+
+    def get_deal_precedents(self) -> list[dict[str, Any]]:
+        """Return Paradigm's named deal precedents with key provisions."""
+        precedents = self._policy.get("deal_precedents", [])
+        return [dict(item) for item in precedents if isinstance(item, dict)]
+
     def get_paradigm_checks(self) -> list[dict[str, str]]:
-        """Return the 11 Paradigm-specific checks for every review."""
+        """Return the 16 Paradigm-specific compliance checks for every review."""
         return [
             {"id": rule.id, "label": rule.label, "severity": rule.severity} for rule in self._checks
         ]

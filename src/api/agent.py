@@ -1138,6 +1138,97 @@ def _delete_session(key: str) -> None:
     _pg_write("DELETE FROM agent_sessions WHERE slack_thread_key = %s", (key,))
 
 
+def _turn_rows_to_turns(turn_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    for tr in turn_rows:
+        events = tr.get("events", [])
+        if isinstance(events, str):
+            events = json.loads(events)
+        started = tr.get("started_at")
+        finished = tr.get("finished_at")
+        turns.append(
+            {
+                "turn_id": tr["turn_id"],
+                "user_message": tr["user_message"],
+                "events": events,
+                "result": tr.get("result", ""),
+                "user_id": _extract_turn_user_id(events),
+                "started_at": started.timestamp() if started else time.time(),
+                "finished_at": finished.timestamp() if finished else None,
+                "exit_code": tr.get("exit_code"),
+                "timed_out": tr.get("timed_out", False),
+                "duration_s": tr.get("duration_s", 0),
+            }
+        )
+    return turns
+
+
+def _rehydrate_session_for_thread(thread_key: str) -> tuple[str, dict[str, Any]] | None:
+    found = _find_session_for_thread(thread_key)
+    if found:
+        return found
+
+    db_rows: list[dict[str, Any]] = []
+    resolved_key = ""
+    for candidate in _thread_key_aliases(thread_key):
+        rows = _pg_read(
+            "SELECT * FROM agent_sessions WHERE slack_thread_key = %s AND state NOT IN ('stopped')",
+            (candidate,),
+        )
+        if rows:
+            db_rows = rows
+            resolved_key = candidate
+            break
+    if not db_rows:
+        return None
+
+    row = db_rows[0]
+    key = str(row.get("slack_thread_key") or resolved_key or _normalize_thread_key(thread_key))
+    container_id = str(row.get("container_id") or "").strip()
+    if not container_id:
+        return None
+
+    try:
+        client = _docker_client()
+        container = client.containers.get(container_id)
+    except (NotFound, Exception):
+        _pg_write("UPDATE agent_sessions SET state = 'stopped' WHERE slack_thread_key = %s", (key,))
+        return None
+
+    if str(getattr(container, "status", "") or "") not in {"running", "created"}:
+        _pg_write("UPDATE agent_sessions SET state = 'stopped' WHERE slack_thread_key = %s", (key,))
+        return None
+
+    turn_rows = _pg_read(
+        "SELECT * FROM agent_turns WHERE slack_thread_key = %s ORDER BY turn_id",
+        (key,),
+    )
+    turns = _turn_rows_to_turns(turn_rows)
+    recovered_harness = str(row.get("harness") or "amp")
+    recovered_engine = str(row.get("engine") or _resolve_engine(recovered_harness))
+    recovered_persona = row.get("persona") or HARNESS_CONFIG.get(recovered_harness, {}).get("persona")
+    created = row.get("created_at")
+    last_act = row.get("last_activity")
+    recovered_session = {
+        "container_id": container_id,
+        "harness": recovered_harness,
+        "engine": recovered_engine,
+        "persona": recovered_persona,
+        "mode": str(row.get("mode") or _session_mode_for(recovered_harness)),
+        "repo": row.get("repo"),
+        "agent_thread_id": row.get("agent_thread_id"),
+        "state": "idle" if str(row.get("state") or "") == "working" else str(row.get("state") or "idle"),
+        "created_at": created.timestamp() if created else time.time(),
+        "last_activity": last_act.timestamp() if last_act else time.time(),
+        "turns": turns,
+        "pending_context_messages": [],
+        "thread_name": row.get("thread_name"),
+    }
+    set_session_state(key, recovered_session)
+    log.info("session_rehydrated_on_demand", thread=key, turns=len(turns))
+    return key, recovered_session
+
+
 def _docker_client() -> docker.DockerClient:
     return docker.from_env()
 
@@ -1440,7 +1531,8 @@ def _build_command(
             "--verbose",
             *(["--system-prompt", system_prompt] if system_prompt else []),
             *(["--model", resolved_model] if resolved_model else []),
-            *(["--session-id", thread_id] if thread_id else []),
+            # Claude uses --resume to continue an existing conversation.
+            *(["--resume", thread_id] if thread_id else []),
             "-p",
             message,
         ]
@@ -1704,6 +1796,7 @@ class AgentClient:
         repo: str | None = None,
         request_id: str | None = None,
         engine: str | None = None,
+        legal_loop_enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Spawn a new sandbox container for a Slack thread.
 
@@ -1713,10 +1806,20 @@ class AgentClient:
             repo: Optional repo path to set as working directory
             request_id: Correlation ID for end-to-end latency tracing
             engine: Optional engine override (persona harnesses only)
+            legal_loop_enabled: Legal mode runtime (loop vs single) if harness is legal
         """
         rid = request_id or ""
+        resolved_thread_key = _normalize_thread_key(slack_thread_key)
+        found = _find_session_for_thread(resolved_thread_key) or _rehydrate_session_for_thread(
+            resolved_thread_key
+        )
+        session_key = resolved_thread_key
+        existing: dict[str, Any] | None = None
+        if found:
+            session_key, existing = found
+            resolved_thread_key = session_key
         requested_harness = (harness or "amp").strip() or "amp"
-        log.info("spawn_start", request_id=rid, thread=slack_thread_key, harness=requested_harness)
+        log.info("spawn_start", request_id=rid, thread=resolved_thread_key, harness=requested_harness)
         try:
             effective_engine, persona, effective_repo = _resolve_run_profile(
                 requested_harness,
@@ -1725,8 +1828,6 @@ class AgentClient:
             )
         except RuntimeError as exc:
             return {"error": str(exc)}
-
-        existing = get_session_state(slack_thread_key)
         if existing:
             existing_harness = str(existing.get("harness") or "amp")
             existing_engine = str(existing.get("engine") or _resolve_engine(existing_harness))
@@ -1741,8 +1842,8 @@ class AgentClient:
                     container = client.containers.get(existing["container_id"])
                     container.stop(timeout=5)
                     container.remove()
-                pop_session_state(slack_thread_key)
-                _delete_session(slack_thread_key)
+                pop_session_state(session_key)
+                _delete_session(session_key)
                 existing = None
 
         # Reuse existing container if alive
@@ -1754,11 +1855,11 @@ class AgentClient:
                     log.info(
                         "spawn_done",
                         request_id=rid,
-                        thread=slack_thread_key,
+                        thread=resolved_thread_key,
                         status="already_running",
                     )
                     return {
-                        "session_id": slack_thread_key,
+                        "session_id": resolved_thread_key,
                         "container_id": existing["container_id"],
                         "status": "already_running",
                         "harness": existing["harness"],
@@ -1767,9 +1868,9 @@ class AgentClient:
                     }
                 container.start()
                 existing["state"] = "running"
-                log.info("spawn_done", request_id=rid, thread=slack_thread_key, status="restarted")
+                log.info("spawn_done", request_id=rid, thread=resolved_thread_key, status="restarted")
                 return {
-                    "session_id": slack_thread_key,
+                    "session_id": resolved_thread_key,
                     "container_id": existing["container_id"],
                     "status": "restarted",
                     "harness": existing["harness"],
@@ -1777,19 +1878,19 @@ class AgentClient:
                     "persona": existing.get("persona"),
                 }
             except NotFound:
-                pop_session_state(slack_thread_key)
-                _delete_session(slack_thread_key)
+                pop_session_state(session_key)
+                _delete_session(session_key)
                 existing = None
             except Exception as exc:
                 log.warning(
                     "spawn_existing_container_unusable",
                     request_id=rid,
-                    thread=slack_thread_key,
+                    thread=resolved_thread_key,
                     container_id=str(existing.get("container_id", "")),
                     error=str(exc),
                 )
-                pop_session_state(slack_thread_key)
-                _delete_session(slack_thread_key)
+                pop_session_state(session_key)
+                _delete_session(session_key)
                 existing = None
 
         # Try to claim a pre-warmed container from the pool (skip if repo needed)
@@ -1799,20 +1900,20 @@ class AgentClient:
             container = _claim_from_pool()
             if container:
                 status = "claimed_from_pool"
-                log.info("spawn_pool_claimed", request_id=rid, thread=slack_thread_key)
+                log.info("spawn_pool_claimed", request_id=rid, thread=resolved_thread_key)
 
         # Otherwise create a new one
         if not container:
-            log.info("spawn_creating_container", request_id=rid, thread=slack_thread_key)
+            log.info("spawn_creating_container", request_id=rid, thread=resolved_thread_key)
             client = _docker_client()
-            container_name = f"agent2-{slack_thread_key.replace(':', '-').replace('.', '-')[:40]}"
+            container_name = f"agent2-{resolved_thread_key.replace(':', '-').replace('.', '-')[:40]}"
             with contextlib.suppress(Exception):
                 stale_container = client.containers.get(container_name)
                 stale_container.remove(force=True)
                 log.info(
                     "spawn_removed_stale_named_container",
                     request_id=rid,
-                    thread=slack_thread_key,
+                    thread=resolved_thread_key,
                     container_name=container_name,
                 )
             try:
@@ -1821,14 +1922,14 @@ class AgentClient:
                     name=container_name,
                     repo=effective_repo,
                     extra_labels={
-                        "ai2.thread": slack_thread_key,
+                        "ai2.thread": resolved_thread_key,
                         "ai2.harness": requested_harness,
                         "ai2.engine": effective_engine,
-                        "ai2.mode": _session_mode_for(requested_harness),
+                        "ai2.mode": _session_mode_for(requested_harness, legal_loop_enabled),
                         **({"ai2.persona": persona} if persona else {}),
                         **({"ai2.repo": effective_repo} if effective_repo else {}),
                     },
-                    slack_thread_key=slack_thread_key,
+                    slack_thread_key=resolved_thread_key,
                     persona=persona,
                 )
             except Exception as exc:
@@ -1844,7 +1945,7 @@ class AgentClient:
                 log.warning(
                     "spawn_container_create_failed",
                     request_id=rid,
-                    thread=slack_thread_key,
+                    thread=resolved_thread_key,
                     harness=requested_harness,
                     engine=effective_engine,
                     repo=effective_repo,
@@ -1858,7 +1959,7 @@ class AgentClient:
                     )
                 }
             log.info(
-                "spawn_container_created", request_id=rid, thread=slack_thread_key, **create_timings
+                "spawn_container_created", request_id=rid, thread=resolved_thread_key, **create_timings
             )
 
         # Refill pool in background after claiming
@@ -1869,7 +1970,7 @@ class AgentClient:
             "harness": requested_harness,
             "engine": effective_engine,
             "persona": persona,
-            "mode": _session_mode_for(requested_harness),
+            "mode": _session_mode_for(requested_harness, legal_loop_enabled),
             "repo": effective_repo,
             "agent_thread_id": None,
             "state": "running",
@@ -1879,12 +1980,12 @@ class AgentClient:
             "pending_context_messages": [],
             "thread_name": None,
         }
-        set_session_state(slack_thread_key, session)
-        _persist_session(session, slack_thread_key)
+        set_session_state(resolved_thread_key, session)
+        _persist_session(session, resolved_thread_key)
 
-        log.info("spawn_done", request_id=rid, thread=slack_thread_key, status=status)
+        log.info("spawn_done", request_id=rid, thread=resolved_thread_key, status=status)
         return {
-            "session_id": slack_thread_key,
+            "session_id": resolved_thread_key,
             "container_id": container.id,
             "status": status,
             "harness": requested_harness,
@@ -1923,19 +2024,29 @@ class AgentClient:
         """
         _emit = emit or (lambda _: None)
         rid = request_id or ""
+        resolved_thread_key = _normalize_thread_key(slack_thread_key)
+        pre_found = _find_session_for_thread(resolved_thread_key)
+        if pre_found:
+            resolved_thread_key = pre_found[0]
         source_tag = str(source or "api").strip().lower()
         display_message = _display_user_message(message) or message.strip()
         mirror_to_slack = source_tag in {"thread_ui", "thread-view", "ui"}
-        actor_key = _execution_actor_key(user_id, source_tag, slack_thread_key)
+        actor_key = _execution_actor_key(user_id, source_tag, resolved_thread_key)
         slot_acquired = False
-        execute_lock = get_execute_lock(slack_thread_key)
+        execute_lock = get_execute_lock(resolved_thread_key)
         if not execute_lock.acquire(blocking=False):
             return {
                 "error": "A run is already in progress for this thread. Wait for it to finish first."
             }
 
         try:
-            session = get_session_state(slack_thread_key)
+            found = _find_session_for_thread(resolved_thread_key) or _rehydrate_session_for_thread(
+                resolved_thread_key
+            )
+            session: dict[str, Any] | None = None
+            if found:
+                resolved_thread_key, session = found
+                actor_key = _execution_actor_key(user_id, source_tag, resolved_thread_key)
             if session and session.get("state") == "working":
                 return {
                     "error": "A run is already in progress for this thread. Wait for it to finish first."
@@ -1968,13 +2079,13 @@ class AgentClient:
                         container = client.containers.get(session["container_id"])
                         container.stop(timeout=5)
                         container.remove()
-                    pop_session_state(slack_thread_key)
-                    _delete_session(slack_thread_key)
+                    pop_session_state(resolved_thread_key)
+                    _delete_session(resolved_thread_key)
                     session = None
 
             slot_acquired, queue_wait_s, queue_position = _acquire_execution_slot(
                 actor_key=actor_key,
-                thread_key=slack_thread_key,
+                thread_key=resolved_thread_key,
                 timeout_s=_EXECUTION_QUEUE_WAIT_TIMEOUT_S,
             )
             if not slot_acquired:
@@ -2001,7 +2112,7 @@ class AgentClient:
                     else display_message
                 )
                 _post_slack_thread_message(
-                    slack_thread_key,
+                    resolved_thread_key,
                     "[via Thread Viewer] " + attributed_message,
                 )
 
@@ -2011,38 +2122,42 @@ class AgentClient:
                 try:
                     container = client.containers.get(session["container_id"])
                 except NotFound:
-                    pop_session_state(slack_thread_key)
+                    pop_session_state(resolved_thread_key)
                     session = None
             elif session:
                 # Placeholder session (e.g. from execute_kickoff) — clear it
                 # so spawn() creates a real one.
-                pop_session_state(slack_thread_key)
+                pop_session_state(resolved_thread_key)
                 session = None
 
             if not session:
-                log.info("exec_auto_spawn", request_id=rid, thread=slack_thread_key)
+                log.info("exec_auto_spawn", request_id=rid, thread=resolved_thread_key)
                 _emit({"type": "status", "stage": "container.creating"})
                 spawn_result = self.spawn(
-                    slack_thread_key,
+                    resolved_thread_key,
                     requested_harness,
                     repo,
                     request_id,
                     engine=engine,
+                    legal_loop_enabled=legal_loop_enabled,
                 )
                 spawn_error = str((spawn_result or {}).get("error") or "").strip()
                 if spawn_error:
                     return {"error": spawn_error}
                 _emit({"type": "status", "stage": "container.ready"})
-                session = get_session_state(slack_thread_key)
-                if session is None:
+                found = _find_session_for_thread(resolved_thread_key) or _rehydrate_session_for_thread(
+                    resolved_thread_key
+                )
+                if not found:
                     return {"error": "Failed to initialize agent session after spawn."}
+                resolved_thread_key, session = found
                 client = _docker_client()
                 container = client.containers.get(session["container_id"])
 
             if session.get("mode") != requested_mode:
                 session["mode"] = requested_mode
 
-            pending_context_items = drain_pending_context_messages(slack_thread_key)
+            pending_context_items = drain_pending_context_messages(resolved_thread_key)
             pending_context = _format_pending_context_block(pending_context_items)
             pending_context_files = _extract_pending_context_files(pending_context_items)
             files_to_download: list[dict[str, str]] = []
@@ -2108,11 +2223,11 @@ class AgentClient:
             with _sessions_lock:
                 session["state"] = "working"
                 session["last_activity"] = started_ts
-            _persist_session(session, slack_thread_key)
+            _persist_session(session, resolved_thread_key)
             log.info(
                 "exec_start",
                 request_id=rid,
-                thread=slack_thread_key,
+                thread=resolved_thread_key,
                 harness=session["harness"],
             )
 
@@ -2176,7 +2291,7 @@ class AgentClient:
 
             for stdout_chunk, stderr_chunk in output:
                 if _shutdown_event.is_set():
-                    log.warning("agent_exec_shutdown", thread=slack_thread_key)
+                    log.warning("agent_exec_shutdown", thread=resolved_thread_key)
                     # Clear thread ID so next execution starts fresh
                     # instead of trying to continue a corrupted session
                     with _sessions_lock:
@@ -2186,7 +2301,7 @@ class AgentClient:
                     timed_out = True
                     log.warning(
                         "agent_exec_idle_timeout",
-                        thread=slack_thread_key,
+                        thread=resolved_thread_key,
                         idle_timeout=EXEC_IDLE_TIMEOUT,
                         total_elapsed=round(time.monotonic() - started, 1),
                     )
@@ -2199,7 +2314,7 @@ class AgentClient:
                         log.info(
                             "exec_first_output",
                             request_id=rid,
-                            thread=slack_thread_key,
+                            thread=resolved_thread_key,
                             elapsed_s=round(time.monotonic() - started, 3),
                         )
                     buf += stdout_decoder.decode(stdout_chunk)
@@ -2326,7 +2441,7 @@ class AgentClient:
             live_turn["duration_s"] = round(time.time() - started_ts, 1)
 
             # Persist to PG in background
-            _persist_turn(slack_thread_key, live_turn)
+            _persist_turn(resolved_thread_key, live_turn)
 
             with _sessions_lock:
                 if live_turn["turn_id"] == 1 and not str(session.get("thread_name") or "").strip():
@@ -2346,7 +2461,7 @@ class AgentClient:
                 else:
                     session["state"] = "idle"
                 session["last_activity"] = time.time()
-            _persist_session(session, slack_thread_key)
+            _persist_session(session, resolved_thread_key)
             # Compute per-turn LLM stats from events
             llm_calls = 0
             total_input_tokens = 0
@@ -2372,7 +2487,7 @@ class AgentClient:
             log.info(
                 "exec_done",
                 request_id=rid,
-                thread=slack_thread_key,
+                thread=resolved_thread_key,
                 harness=session["harness"],
                 engine=str(session.get("engine") or _resolve_engine(session["harness"])),
                 exit_code=exit_code,
@@ -2386,7 +2501,7 @@ class AgentClient:
             )
 
             result = {
-                "session_id": slack_thread_key,
+                "session_id": resolved_thread_key,
                 "result": result_text,
                 "agent_thread_id": session["agent_thread_id"],
                 "harness": session["harness"],
@@ -2395,7 +2510,7 @@ class AgentClient:
             }
             if mirror_to_slack and result_text:
                 _post_slack_thread_message(
-                    slack_thread_key,
+                    resolved_thread_key,
                     "[via Thread Viewer] Agent update:\n" + result_text,
                 )
             _emit({"type": "final", **result})
@@ -2420,11 +2535,16 @@ class AgentClient:
         legal_loop_enabled: bool | None = None,
     ) -> dict[str, Any]:
         resolved_thread_key = _resolve_existing_thread_key(slack_thread_key)
+        found = _find_session_for_thread(resolved_thread_key) or _rehydrate_session_for_thread(
+            resolved_thread_key
+        )
+        if found:
+            resolved_thread_key, session = found
+        else:
+            session = None
         display_message = _display_user_message(message) or message.strip()
         if not display_message:
             return {"error": "Message is required"}
-
-        session = get_session_state(resolved_thread_key)
         requested_harness = (harness or "").strip() or (
             str(session.get("harness") or "amp") if session else "amp"
         )
@@ -2506,11 +2626,15 @@ class AgentClient:
     def status(self, slack_thread_key: str | None = None) -> dict[str, Any]:
         """Get session status. If no key given, list all sessions."""
         if slack_thread_key:
-            session = get_session_state(slack_thread_key)
-            if not session:
-                return {"error": f"No session for '{slack_thread_key}'"}
+            resolved_thread_key = _normalize_thread_key(slack_thread_key)
+            found = _find_session_for_thread(resolved_thread_key) or _rehydrate_session_for_thread(
+                resolved_thread_key
+            )
+            if not found:
+                return {"error": f"No session for '{resolved_thread_key}'"}
+            canonical_key, session = found
             return {
-                "session_id": slack_thread_key,
+                "session_id": canonical_key,
                 **session,
             }
 
@@ -2522,9 +2646,13 @@ class AgentClient:
 
     def stop(self, slack_thread_key: str) -> dict[str, Any]:
         """Stop and remove a sandbox container."""
-        session = get_session_state(slack_thread_key)
-        if not session:
-            return {"error": f"No session for '{slack_thread_key}'"}
+        resolved_thread_key = _normalize_thread_key(slack_thread_key)
+        found = _find_session_for_thread(resolved_thread_key) or _rehydrate_session_for_thread(
+            resolved_thread_key
+        )
+        if not found:
+            return {"error": f"No session for '{resolved_thread_key}'"}
+        canonical_key, session = found
 
         client = _docker_client()
         try:
@@ -2534,9 +2662,9 @@ class AgentClient:
         except Exception:
             pass
 
-        pop_session_state(slack_thread_key)
-        _delete_session(slack_thread_key)
-        return {"session_id": slack_thread_key, "status": "stopped"}
+        pop_session_state(canonical_key)
+        _delete_session(canonical_key)
+        return {"session_id": canonical_key, "status": "stopped"}
 
     def threads(self) -> dict[str, Any]:
         """List all agent threads with summary info for the thread viewer."""
@@ -2562,11 +2690,15 @@ class AgentClient:
 
     def thread_detail(self, slack_thread_key: str) -> dict[str, Any]:
         """Get full event stream for a specific thread including all turns and tool calls."""
-        session = get_session_state(slack_thread_key)
-        if not session:
-            return {"error": f"No session for '{slack_thread_key}'"}
+        resolved_thread_key = _normalize_thread_key(slack_thread_key)
+        found = _find_session_for_thread(resolved_thread_key) or _rehydrate_session_for_thread(
+            resolved_thread_key
+        )
+        if not found:
+            return {"error": f"No session for '{resolved_thread_key}'"}
+        canonical_key, session = found
         return {
-            "slack_thread_key": slack_thread_key,
+            "slack_thread_key": canonical_key,
             "container_id": session["container_id"][:12],
             "harness": session["harness"],
             "engine": str(session.get("engine") or _resolve_engine(session["harness"])),
@@ -2619,27 +2751,7 @@ class AgentClient:
                 "SELECT * FROM agent_turns WHERE slack_thread_key = %s ORDER BY turn_id",
                 (key,),
             )
-            turns = []
-            for tr in turn_rows:
-                events = tr.get("events", [])
-                if isinstance(events, str):
-                    events = json.loads(events)
-                started = tr.get("started_at")
-                finished = tr.get("finished_at")
-                turns.append(
-                    {
-                        "turn_id": tr["turn_id"],
-                        "user_message": tr["user_message"],
-                        "events": events,
-                        "result": tr.get("result", ""),
-                        "user_id": _extract_turn_user_id(events),
-                        "started_at": started.timestamp() if started else time.time(),
-                        "finished_at": finished.timestamp() if finished else None,
-                        "exit_code": tr.get("exit_code"),
-                        "timed_out": tr.get("timed_out", False),
-                        "duration_s": tr.get("duration_s", 0),
-                    }
-                )
+            turns = _turn_rows_to_turns(turn_rows)
 
             created = row.get("created_at")
             last_act = row.get("last_activity")
@@ -2772,9 +2884,13 @@ class AgentClient:
 
     def interrupt(self, slack_thread_key: str) -> dict[str, Any]:
         """Interrupt the currently running command in a sandbox."""
-        session = get_session_state(slack_thread_key)
-        if not session:
-            return {"error": f"No session for '{slack_thread_key}'"}
+        resolved_thread_key = _normalize_thread_key(slack_thread_key)
+        found = _find_session_for_thread(resolved_thread_key) or _rehydrate_session_for_thread(
+            resolved_thread_key
+        )
+        if not found:
+            return {"error": f"No session for '{resolved_thread_key}'"}
+        canonical_key, session = found
 
         previous_state = str(session.get("state") or "")
         if previous_state not in {"running", "working", "stopping"}:
@@ -2799,9 +2915,9 @@ class AgentClient:
                             }
                         )
                         turn_to_persist = dict(last_turn)
-        _persist_session(session, slack_thread_key)
+        _persist_session(session, canonical_key)
         if turn_to_persist is not None:
-            _persist_turn(slack_thread_key, turn_to_persist)
+            _persist_turn(canonical_key, turn_to_persist)
 
         client = _docker_client()
         try:
@@ -2820,24 +2936,24 @@ class AgentClient:
                     if session.get("state") == "stopping":
                         session["state"] = previous_state
                         session["last_activity"] = time.time()
-                _persist_session(session, slack_thread_key)
+                _persist_session(session, canonical_key)
                 return {"error": f"No active {target} process to interrupt."}
         except NotFound:
             with _sessions_lock:
                 if session.get("state") == "stopping":
                     session["state"] = previous_state
                     session["last_activity"] = time.time()
-            _persist_session(session, slack_thread_key)
-            return {"error": f"No active container for '{slack_thread_key}'"}
+            _persist_session(session, canonical_key)
+            return {"error": f"No active container for '{canonical_key}'"}
         except Exception as exc:
             with _sessions_lock:
                 if session.get("state") == "stopping":
                     session["state"] = previous_state
                     session["last_activity"] = time.time()
-            _persist_session(session, slack_thread_key)
+            _persist_session(session, canonical_key)
             return {"error": f"Failed to interrupt run: {exc}"}
 
-        return {"session_id": slack_thread_key, "status": "interrupted"}
+        return {"session_id": canonical_key, "status": "interrupted"}
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,6 @@ import {
 } from "./harness";
 import { ApiError } from "./api-client";
 import { runModeExecution } from "./modes";
-import { buildLegalKickoffInstruction, buildLegalSessionContext } from "./modes/legal";
 import { MAX_SLACK_TEXT_CHARS, truncateSlackText } from "./slack-text";
 
 function formatErrorForSlack(error: unknown, context: string): string {
@@ -406,9 +405,15 @@ function createBot() {
     const engine = parsed.engine ?? activeEngine ?? null;
     const model = parsed.model ?? previous?.model ?? null;
     const budgetMode = parsed.budgetMode ?? previous?.budgetMode ?? null;
-    const legalLoopEnabled = parsed.legalLoopExplicit
-      ? parsed.legalLoopEnabled
-      : (previous?.legalLoopEnabled ?? recovered?.legalLoopEnabled ?? true);
+
+    if (!isFirstMessage && !activeHarness && !parsed.harnessExplicit) {
+      await thread.post(
+        toSlackMessage(
+          "I could not recover the active harness for this thread. Please retry with an explicit harness flag (for example `--legal`)."
+        )
+      );
+      return;
+    }
 
     if (
       !isFirstMessage &&
@@ -439,21 +444,18 @@ function createBot() {
     }
 
     if (!parsed.cleanedText) {
-      if (!isLegalHarness(harness)) {
-        await thread.post(
-          toSlackMessage(
-            "Please provide a prompt after flags. Example: `--eng implement retry logic` (after mentioning the bot)."
-          )
-        );
-        return;
-      }
+      await thread.post(
+        toSlackMessage(
+          "Please provide a prompt after flags. Example: `--legal review this term sheet` or `--eng implement retry logic`."
+        )
+      );
+      return;
     }
 
-    setThreadConfig(threadKey, { harness, engine, model, budgetMode, legalLoopEnabled });
+    setThreadConfig(threadKey, { harness, engine, model, budgetMode, legalLoopEnabled: false });
 
     try {
-      const isLegalKickoff = isLegalHarness(harness) && !parsed.cleanedText;
-      const instruction = parsed.cleanedText || buildLegalKickoffInstruction();
+      const instruction = parsed.cleanedText;
       if (!isFirstMessage) {
         try {
           await interrupt(threadKey, requestId);
@@ -465,12 +467,13 @@ function createBot() {
         }
       }
 
-      await thread.startTyping("Spawning agent...");
-      await spawn(threadKey, harness, engine, undefined, requestId);
+      if (isFirstMessage) {
+        await thread.startTyping("Spawning agent...");
+        await spawn(threadKey, harness, engine, undefined, requestId);
+      }
 
       await thread.startTyping("Running...");
       let threadHistory = "";
-      let sessionEnvelope = "";
       if (isFirstMessage) {
         const { channel, threadTs } = splitThreadKey(threadKey);
         threadHistory = await fetchThreadHistory(channel, threadTs);
@@ -478,11 +481,8 @@ function createBot() {
 
       let message = instruction;
       if (isFirstMessage) {
-        const contextPrefix = isLegalHarness(harness)
-          ? buildLegalSessionContext(threadKey, instruction, files)
-          : buildSessionContext(threadKey);
-        sessionEnvelope = contextPrefix + threadHistory;
-        message = sessionEnvelope + instruction;
+        const contextPrefix = buildSessionContext(threadKey);
+        message = contextPrefix + threadHistory + instruction;
       }
 
       if (budgetMode) {
@@ -494,54 +494,17 @@ function createBot() {
       });
 
       let result = "";
-      const legalMilestones = new Set([
-        "retrieval",
-        "analysis",
-        "critic",
-        "compliance",
-        "finalize",
-      ]);
-      const legalStartedAt = Date.now();
-      const postedPhaseUpdates = new Set<string>();
-      let lastMilestonePostAt = 0;
       try {
         result = await runModeExecution({
           harness,
-          legalLoopEnabled,
           instruction,
           message,
-          sessionEnvelope,
-          isLegalKickoff,
           threadKey,
           requestId,
           files,
           userId,
           model,
           engine,
-          onPhaseStatus: (phase) => {
-            thread.startTyping(`Legal phase: ${phase}...`).catch(() => {});
-            if (!isLegalHarness(harness)) return;
-            const basePhase = phase.replace(/-\d+$/, "");
-            if (!legalMilestones.has(basePhase)) return;
-            if (Date.now() - legalStartedAt < 45_000) return;
-            if (postedPhaseUpdates.has(basePhase)) return;
-            if (Date.now() - lastMilestonePostAt < 20_000) return;
-            postedPhaseUpdates.add(basePhase);
-            lastMilestonePostAt = Date.now();
-            const label =
-              basePhase === "critic"
-                ? "legal critique pass"
-                : basePhase === "compliance"
-                  ? "tool-backed compliance verification"
-                  : basePhase === "analysis"
-                    ? "deep analysis"
-                    : basePhase === "retrieval"
-                      ? "evidence retrieval across legal corpus"
-                    : "final response assembly";
-            thread
-              .post(toSlackMessage(`Legal update: ${label} in progress.`))
-              .catch(() => {});
-          },
         });
       } finally {
         stopProgress();

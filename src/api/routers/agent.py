@@ -27,6 +27,7 @@ class SpawnRequest(BaseModel):
     harness: str | None = None
     repo: str | None = None
     engine: str | None = None
+    legal_loop_enabled: bool | None = None
     request_id: str | None = None
 
 
@@ -62,7 +63,14 @@ class InterruptRequest(BaseModel):
 async def spawn(req: SpawnRequest) -> dict[str, Any]:
     """Spawn a sandbox container for a Slack thread."""
     agent = get_agent()
-    return agent.spawn(req.slack_thread_key, req.harness, req.repo, req.request_id, req.engine)
+    return agent.spawn(
+        req.slack_thread_key,
+        req.harness,
+        req.repo,
+        req.request_id,
+        req.engine,
+        req.legal_loop_enabled,
+    )
 
 
 @router.post("/execute")

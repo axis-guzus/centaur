@@ -1,3 +1,5 @@
+import { decode as decodeToon } from "@toon-format/toon";
+import { apiPost } from "../api-client";
 import type {
   Engine,
   FileAttachment,
@@ -8,6 +10,7 @@ import { executeWithBusyRetries } from "./common";
 export type LegalWorkflow = "question" | "draft" | "review" | "revision" | "unknown";
 type LegalPhase =
   | "intake"
+  | "clarify"
   | "retrieval"
   | "authority"
   | "analysis"
@@ -145,6 +148,193 @@ export function buildLegalSessionContext(
     "",
   ].join("\n");
 }
+
+const SECTION_HEADER_RE = /^#{1,6}\s+/;
+const BULLET_PREFIX_RE = /^[-*•]\s+/;
+const NUMBERED_PREFIX_RE = /^\d+\.\s+/;
+const NONE_LIKE_RE = /^(none|none identified|n\/a|na|not applicable|not needed|no blocking fields?)$/i;
+type LegalReadiness = "ready" | "needs_input" | "unknown";
+
+const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const isKnowledgePlanShape = (value: unknown): value is KnowledgeRoutingPlan => {
+  if (!value || typeof value !== "object") return false;
+  const obj = value as Record<string, unknown>;
+  const lookupDynamic = obj.lookup_dynamic;
+  const evergreenCalls = obj.system_evergreen_calls;
+  const planHash = obj.plan_hash;
+  if (!lookupDynamic || typeof lookupDynamic !== "object") return false;
+  const primaryPackIds = (lookupDynamic as Record<string, unknown>).primary_pack_ids;
+  return (
+    Array.isArray(primaryPackIds)
+    && Array.isArray(evergreenCalls)
+    && typeof planHash === "string"
+    && planHash.trim().length > 0
+  );
+};
+
+const parseKnowledgeRoutingPlanResponse = (
+  response: Record<string, unknown>,
+): KnowledgeRoutingPlan | null => {
+  const parseCandidate = (value: unknown): KnowledgeRoutingPlan | null => {
+    if (isKnowledgePlanShape(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return null;
+    try {
+      const parsed = JSON.parse(value);
+      if (isKnowledgePlanShape(parsed)) return parsed;
+    } catch {}
+    try {
+      const parsed = decodeToon(value, { strict: false });
+      if (isKnowledgePlanShape(parsed)) return parsed;
+    } catch {
+      return null;
+    }
+    return null;
+  };
+  return parseCandidate(response.result) ?? parseCandidate(response);
+};
+
+const fetchKnowledgeRoutingPlan = async (params: {
+  threadKey: string;
+  requestId: string;
+  workflow: LegalWorkflow;
+  dealProfile: Record<string, unknown>;
+}): Promise<KnowledgeRoutingPlan | null> => {
+  try {
+    const response = await apiPost(
+      "/tools/legal-playbook/get_knowledge_plan",
+      {
+        workflow: params.workflow,
+        phase: "retrieval",
+        deal_profile: params.dealProfile,
+        max_dynamic_packs: 2,
+        max_dynamic_chars: 5000,
+      },
+      { timeoutMs: 3_500, maxAttempts: 1 },
+    );
+    const plan = parseKnowledgeRoutingPlanResponse(response);
+    if (!plan) {
+      console.warn("legal_knowledge_plan_parse_failed", {
+        thread: params.threadKey,
+        requestId: params.requestId,
+        workflow: params.workflow,
+      });
+    }
+    return plan;
+  } catch (error) {
+    console.warn("legal_knowledge_plan_fallback", {
+      thread: params.threadKey,
+      requestId: params.requestId,
+      workflow: params.workflow,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+};
+
+const normalizeSectionLabel = (line: string): string =>
+  line
+    .replace(/^#{1,6}\s*/, "")
+    .replace(/[`*_]/g, "")
+    .replace(/:\s*$/, "")
+    .trim()
+    .toLowerCase();
+
+const isSectionBoundary = (line: string): boolean =>
+  SECTION_HEADER_RE.test(line) || /^[`*_]*[A-Za-z][A-Za-z0-9 /()_-]{2,60}[`*_]*:\s*$/.test(line.trim());
+
+const extractSectionLines = (text: string, sectionLabel: string): string[] => {
+  const lines = text.split(/\r?\n/);
+  const target = sectionLabel.trim().toLowerCase();
+  let inSection = false;
+  const out: string[] = [];
+  const inlineRe = new RegExp(
+    `^\\s*(?:#{1,6}\\s*)?[\\\`*_]*${escapeRegex(sectionLabel)}[\\\`*_]*\\s*:\\s*(.+)\\s*$`,
+    "i",
+  );
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!inSection) {
+      const inlineMatch = rawLine.match(inlineRe);
+      if (inlineMatch) {
+        const inlineValue = inlineMatch[1]?.trim();
+        if (inlineValue) out.push(inlineValue);
+        inSection = true;
+        continue;
+      }
+      const normalized = normalizeSectionLabel(rawLine);
+      if (normalized === target) {
+        inSection = true;
+      }
+      continue;
+    }
+    if (!trimmed) continue;
+    if (isSectionBoundary(rawLine) && !BULLET_PREFIX_RE.test(trimmed) && !NUMBERED_PREFIX_RE.test(trimmed)) {
+      break;
+    }
+    out.push(rawLine);
+  }
+  return out;
+};
+
+const parseSectionItems = (lines: string[]): string[] => {
+  const items: string[] = [];
+  let pending = "";
+  const flush = () => {
+    const normalized = pending.replace(/\s+/g, " ").trim();
+    if (normalized) items.push(normalized);
+    pending = "";
+  };
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (BULLET_PREFIX_RE.test(line) || NUMBERED_PREFIX_RE.test(line)) {
+      flush();
+      pending = line.replace(BULLET_PREFIX_RE, "").replace(NUMBERED_PREFIX_RE, "").trim();
+      continue;
+    }
+    if (pending) {
+      pending = `${pending} ${line}`;
+      continue;
+    }
+    items.push(line);
+  }
+  flush();
+  return uniqueBullets(items.map((item) => item.replace(/\.$/, "").trim()).filter(Boolean));
+};
+
+const parseReadiness = (intakeText: string): LegalReadiness => {
+  const match = intakeText.match(
+    /^\s*(?:#{1,6}\s*)?[`*_]*Readiness[`*_]*\s*:?[\s-]*(READY|NEEDS[_\s-]?INPUT|UNKNOWN)\b/im,
+  );
+  if (!match) return "unknown";
+  const normalized = match[1].toLowerCase().replace(/[_-]/g, " ").trim();
+  if (normalized.startsWith("ready")) return "ready";
+  if (normalized.startsWith("needs input")) return "needs_input";
+  return "unknown";
+};
+
+const extractBlockingFieldsFromIntake = (intakeText: string): string[] =>
+  parseSectionItems(extractSectionLines(intakeText, "Blocking Missing Fields")).filter(
+    (item) => !NONE_LIKE_RE.test(item.toLowerCase()),
+  );
+
+const extractFollowUpsFromIntake = (intakeText: string): string[] =>
+  parseSectionItems(extractSectionLines(intakeText, "DRI Follow-Ups")).filter(
+    (item) => !NONE_LIKE_RE.test(item.toLowerCase()),
+  );
+
+const shouldPauseForClarification = (
+  workflow: LegalWorkflow,
+  intakeText: string,
+  blockingFields: string[],
+): boolean => {
+  if (workflow === "question") return false;
+  const readiness = parseReadiness(intakeText);
+  if (readiness === "ready") return false;
+  if (readiness === "needs_input") return true;
+  return blockingFields.length > 0;
+};
 
 const clipForPrompt = (value: string, maxChars = 4500): string =>
   value.length > maxChars ? value.slice(0, maxChars) + "\n...[truncated]..." : value;
@@ -327,7 +517,6 @@ export async function runLegalPromptLoop(params: {
   userId?: string;
   model?: string | null;
   engine?: Engine | null;
-  knowledgeRoutingPlan?: KnowledgeRoutingPlan | null;
   sessionEnvelope?: string;
   kickoff?: boolean;
   onPhaseStatus?: (phase: string) => Promise<void> | void;
@@ -347,11 +536,9 @@ export async function runLegalPromptLoop(params: {
   const outputs: Partial<Record<LegalPhase, string>> = {};
   let pendingFiles: FileAttachment[] | undefined = params.files.length > 0 ? params.files : undefined;
   const termSheetLikely = TERM_SHEET_HINT_RE.test(originalRequest);
-  const lightweightReview =
-    workflow === "review" && params.files.length === 0 && originalRequest.length <= 220;
+  const dealProfile = inferLegalDealProfile(originalRequest, workflow, params.files);
   const inferredDocType = (() => {
-    const profile = inferLegalDealProfile(originalRequest, workflow, params.files);
-    const candidate = profile.document_type;
+    const candidate = dealProfile.document_type;
     return typeof candidate === "string" && candidate ? candidate : "unknown";
   })();
 
@@ -435,32 +622,17 @@ export async function runLegalPromptLoop(params: {
     );
   }
 
-  if (lightweightReview) {
-    return runPhase(
-      "finalize",
-      [
-        "You are executing LEGAL PHASE: FINALIZE (LIGHTWEIGHT REVIEW workflow).",
-        "This is a fast review path from the request text only.",
-        "Requirements:",
-        "- explicitly call out RED_LINE / STANDARD / NICE_TO_HAVE where relevant",
-        "- include missing-information caveats because no source documents were provided",
-        "- do not run any tool calls (`call ...`) in this phase",
-        "- one-line legal boundary reminder",
-        "",
-        "Original request:",
-        clipForPrompt(originalRequest),
-      ].join("\n"),
-      "finalize",
-      "no_tools",
-    );
-  }
-
   await runPhase(
     "intake",
     [
       "You are executing LEGAL PHASE: INTAKE.",
       "Classify workflow, extract known terms, list assumptions, and list only blocking missing fields.",
-      "Return sections: `Workflow`, `Known Terms`, `Assumptions`, `Blocking Missing Fields`, `DRI Follow-Ups`.",
+      "Return sections: `Readiness` (READY or NEEDS_INPUT), `Workflow`, `Known Terms`, `Assumptions`, `Blocking Missing Fields`, `DRI Follow-Ups`.",
+      "`Readiness` must be exactly `READY` or `NEEDS_INPUT`.",
+      "Deterministic rule:",
+      "- If `Blocking Missing Fields` has any concrete item, set `Readiness: NEEDS_INPUT`.",
+      "- If no blocking items, set `Readiness: READY` and write `none` under `Blocking Missing Fields`.",
+      "- Do not ask user questions in INTAKE.",
       sessionEnvelope
         ? [
             "",
@@ -476,41 +648,96 @@ export async function runLegalPromptLoop(params: {
     "no_tools",
   );
 
+  const intakeOutput = outputs.intake || "";
+  const blockingFields = extractBlockingFieldsFromIntake(intakeOutput);
+  const followUps = extractFollowUpsFromIntake(intakeOutput);
+  if (shouldPauseForClarification(workflow, intakeOutput, blockingFields)) {
+    const questionPool = uniqueBullets([
+      ...followUps,
+      ...blockingFields.map((item) => `Please provide: ${item}`),
+    ]).slice(0, 4);
+    return runPhase(
+      "clarify",
+      [
+        "You are executing LEGAL PHASE: CLARIFY.",
+        "Do not produce the final legal analysis/draft yet.",
+        "Ask only for the minimum inputs needed to proceed with high confidence.",
+        "Return sections: `What I Need From You`, `Reply Template`, `What Happens Next`.",
+        "Requirements:",
+        "- ask at most 4 concise, high-signal questions",
+        "- if a source document is required, explicitly ask the user to attach or paste it in this Slack thread",
+        "- provide one optional defaults path so the user can reply quickly",
+        "- do not run any tool calls in this phase",
+        "- keep total output under 180 words",
+        "- include one-line legal boundary reminder",
+        "",
+        `Workflow: ${workflow}`,
+        "",
+        "Original request:",
+        clipForPrompt(originalRequest),
+        "",
+        "Blocking missing fields from intake:",
+        ...(blockingFields.length > 0 ? blockingFields.map((item) => `- ${item}`) : ["- Not explicitly listed"]),
+        "",
+        "Suggested follow-ups from intake:",
+        ...(questionPool.length > 0 ? questionPool.map((item) => `- ${item}`) : ["- Ask for the minimum required deal terms and source document."]),
+      ].join("\n"),
+      "clarify",
+      "no_tools",
+    );
+  }
+
+  const knowledgeRoutingPlan =
+    workflow === "question"
+      ? null
+      : await fetchKnowledgeRoutingPlan({
+          threadKey,
+          requestId,
+          workflow,
+          dealProfile,
+        });
+
   await runPhase(
     "retrieval",
     [
       "You are executing LEGAL PHASE: RETRIEVAL.",
       "Two tasks: (A) deterministic knowledge planning, (B) shared-search evidence retrieval.",
       "",
-      params.knowledgeRoutingPlan
+      knowledgeRoutingPlan
         ? "A) Controller-provided routing plan (use this first):"
         : "A) Knowledge planning and loading:",
-      params.knowledgeRoutingPlan
+      knowledgeRoutingPlan
         ? "Use the precomputed routing plan below. Execute `system_evergreen_calls` first, then load `lookup_dynamic.primary_pack_ids`."
         : '- Build plan first: `call legal-playbook get_knowledge_plan \'{"workflow":"<workflow>","phase":"retrieval","deal_profile":{"company_type":"<ai|other>","token_relevant":<true|false>},"max_dynamic_packs":2,"max_dynamic_chars":5000}\'`',
-      params.knowledgeRoutingPlan
+      knowledgeRoutingPlan
         ? "If the plan is malformed or missing, regenerate via `get_knowledge_plan` once."
         : "- Execute all `system_evergreen_calls` from the returned plan.",
       "- Load only `lookup_dynamic.primary_pack_ids` via `get_knowledge_pack`.",
       "- If evidence is still insufficient, load at most one contingency pack.",
       "- Hard conflict rule: policy rules are controlling; canonical internal financing context overrides precedent outliers and generalized market guidance.",
       "",
-      "B) Shared search — run at least three focused searches using `call search \"<query>\" 8`:",
-      "- one company/deal specific query",
-      "- one clause/legal-standard query (NVCA + playbook-relevant terms)",
-      "- one precedent/style query aligned to drafting tone and negotiation posture",
+      workflow === "question"
+        ? "B) Shared search — run at most two focused searches only if needed to verify material claims."
+        : "B) Shared search — run at least three focused searches using `call search \"<query>\" 8`:",
+      workflow === "question" ? "- one clause/legal-standard verification query" : "- one company/deal specific query",
+      workflow === "question"
+        ? "- one precedent/authority verification query when confidence is otherwise low"
+        : "- one clause/legal-standard query (NVCA + playbook-relevant terms)",
+      workflow === "question"
+        ? ""
+        : "- one precedent/style query aligned to drafting tone and negotiation posture",
       "",
       "Return sections: `Knowledge Plan`, `Knowledge Loaded`, `Search Queries`, `Evidence Table`, `Evidence Gaps`.",
-      "In `Evidence Table`, include for each item: source tier (policy/canonical/precedent/general), source, why it matters, and direct quoted snippet.",
+      "In `Evidence Table`, number rows as `E1`, `E2`, ... and include: source tier (policy/canonical/precedent/general), source, why it matters, and direct quoted snippet.",
       "If conflicting sources appear, add `Conflict Resolution` with higher-priority source and rationale.",
       "",
       "Original request:",
       clipForPrompt(originalRequest),
-      params.knowledgeRoutingPlan
+      knowledgeRoutingPlan
         ? [
             "",
             "Precomputed routing plan:",
-            clipForPrompt(JSON.stringify(params.knowledgeRoutingPlan, null, 2), 8000),
+            clipForPrompt(JSON.stringify(knowledgeRoutingPlan, null, 2), 8000),
           ].join("\n")
         : "",
       "",
@@ -711,12 +938,13 @@ export async function runLegalPromptLoop(params: {
       "- include a `Tool Evidence` section summarizing concrete legal-playbook/termsheet retrieval used in this turn",
       "- include `NVCA Baseline Checks` section",
       "- include confidence score + unresolved uncertainty",
+      "- cite each substantive finding to one or more evidence rows from `Evidence Table` (for example `[E2]`); if uncited, mark `[ASSUMPTION]`",
       "- strictly honor any explicit user length cap in the request",
       "- communicate like a senior transactional lawyer: crisp, practical, and commercially grounded",
       "- default to back-and-forth cadence: this should be a first-pass brief, not a full appendix dump",
       "- keep output compact (target <= 450 words; prioritize bullets/table over paragraphs)",
       "- include at most: 4 RED_LINE, 4 STANDARD, 3 NICE_TO_HAVE items in this first response",
-      "- end with 1-2 focused follow-up questions to drive the next turn",
+      "- ask follow-up questions only if unresolved blocking inputs remain; otherwise end with one concrete next action",
       "- hard limit for this response: 3200 characters",
       "- if tools are unavailable, add one-line limitation and still provide complete requested analysis",
       "- include one-line reminder containing: `not a lawyer` or `not legal advice`",

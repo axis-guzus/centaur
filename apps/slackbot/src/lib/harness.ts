@@ -233,13 +233,15 @@ export async function spawn(
   harness: Harness = "amp",
   engine?: Engine | null,
   repo?: string,
-  requestId?: string
+  requestId?: string,
+  legalLoopEnabled?: boolean | null,
 ): Promise<{ sessionId: string; status: string }> {
   const result = await apiPost("/agent/spawn", {
     slack_thread_key: threadKey,
     harness,
     ...(engine ? { engine } : {}),
     ...(repo ? { repo } : {}),
+    ...(typeof legalLoopEnabled === "boolean" ? { legal_loop_enabled: legalLoopEnabled } : {}),
     ...(requestId ? { request_id: requestId } : {}),
   }, { timeoutMs: 30_000 });
   return {

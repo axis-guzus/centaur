@@ -127,10 +127,11 @@
       { "step": 6, "document": "token_warrant", "focus": "net exercise, lockup MFN, smart-contract restrictions" },
       { "step": 7, "document": "mrl_and_side_letters", "focus": "entity naming, rights parity, enforceability, closing completeness" }
     ],
-    "phase_requirements": {
-      "intake": { "required_sections": ["Workflow", "Known Terms", "Assumptions", "Blocking Missing Fields", "DRI Follow-Ups"], "max_clarifying_questions": 5 },
-      "retrieval": { "required_sections": ["Knowledge Loaded", "Search Queries", "Evidence Table", "Evidence Gaps"], "minimum_searches": 3 },
-      "compliance": { "required_sections": ["Red Line Status", "Paradigm Check Matrix", "Leverage Calibration", "NVCA Baseline Checks", "Confidence"] }
+    "workflow_steps": {
+      "question": ["answer_with_assumptions"],
+      "draft": ["assess_readiness", "retrieve", "analyze", "validate", "deliver"],
+      "review": ["assess_readiness", "retrieve", "analyze", "validate", "deliver"],
+      "revision": ["assess_readiness", "retrieve", "analyze", "validate", "deliver"]
     },
     "conflict_resolution": {
       "rule": "When higher-priority sources conflict with lower-priority sources, follow the higher-priority source and explicitly note the conflict.",
@@ -165,10 +166,15 @@
       "no_shop_days": { "min": 21, "max": 60 }
     },
     "empirical_ranges_from_corpus": {
-      "option_pool_percent": { "min": 5.0, "max": 17.0, "median": 10.0, "mode": 10.0 },
-      "debt_threshold_usd": { "min": 500000, "max": 25000000, "median": 1000000, "mode": 1000000 },
+      "source": "53 executed Paradigm term sheets (2022-2025)",
+      "option_pool_percent": { "min": 3.0, "max": 17.0, "median": 10.0, "mode": 10.0 },
+      "debt_threshold_usd": { "min": 1000000, "max": 25000000, "median": 1000000, "mode": 1000000 },
       "no_shop_days": { "min": 30, "max": 45, "mode": 45 },
-      "legal_fee_cap_usd": { "min": 25000, "max": 75000, "median": 50000, "frequent_values": [50000, 45000, 75000, 40000, 30000] }
+      "legal_fee_cap_usd": { "min": 40000, "max": 75000, "median": 75000, "frequent_values": [75000, 50000, 40000] },
+      "ipo_threshold_usd": { "values": [30000000, 50000000, 100000000], "mode": 100000000 },
+      "founder_carveout_percent": { "values": [2.0, 3.0, 5.0], "mode": 2.0 },
+      "token_prevalence": "83% of deals (44/53) include token rights",
+      "board_structure": { "director_seat": 18, "observer_only": 9, "no_board_rights": 26 }
     }
   },
   "diligence_checklist": [
@@ -240,6 +246,122 @@
         "token_rights_text": "For any Tokens (other than non-fungible or similar ordinary-course assets), Paradigm receives its pro rata share (fully diluted) of launch supply and any insider-linked inflationary issuances, subject to net exercise defaults, lockup MFN parity, and Paradigm written-consent controls for material smart-contract restriction changes."
       }
     }
+  },
+  "deal_precedents": [
+    {
+      "company": "Bayesian Labs",
+      "round": "Series Seed",
+      "year": 2025,
+      "role": "Lead",
+      "key_provisions": {
+        "major_investor_threshold": "15M shares",
+        "materiality_threshold": "$25K individual",
+        "board": "2 of 3 seats",
+        "board_burn_off": "40% (12M of 30M shares)",
+        "generative_ai_rep": true,
+        "protocol_veto": true,
+        "token_warrant": true
+      },
+      "notes": "First deal with generative AI rep. Burn-off at 40% was higher than preferred 10-20% range."
+    },
+    {
+      "company": "Kalshi",
+      "round": "Series D",
+      "year": 2025,
+      "role": "Participant",
+      "key_provisions": {
+        "outbound_investment_rep": true,
+        "direct_listing_provisions": true,
+        "amendment_veto": "a16z held amendment veto as lead",
+        "token_warrant": false
+      },
+      "notes": "Participant deal alongside a16z. Paradigm did not have lead controls."
+    },
+    {
+      "company": "Crown Digital",
+      "round": "Series A",
+      "year": 2025,
+      "role": "Lead",
+      "key_provisions": {
+        "token_warrant_lockup": "1yr minimum, 4yr maximum",
+        "net_exercise": true,
+        "staking_during_lockup": true,
+        "international_structure": true
+      },
+      "notes": "International entity structure. Token warrant included staking rights during lockup period."
+    },
+    {
+      "company": "Standard Economics",
+      "round": "Series Seed",
+      "year": 2025,
+      "role": "Lead",
+      "key_provisions": {
+        "token_warrant": true,
+        "indemnification_agreements": true
+      },
+      "notes": "Clean seed deal with standard Paradigm terms."
+    }
+  ],
+  "cross_document_consistency_checks": [
+    { "check": "Major Investor threshold identical", "documents": ["IRA", "ROFR", "Voting Agreement"] },
+    { "check": "Protective provisions in Charter align with IRA covenants", "documents": ["Charter", "IRA"] },
+    { "check": "Board composition matches", "documents": ["Charter", "Voting Agreement"] },
+    { "check": "Anti-dilution formula consistent", "documents": ["Charter", "Term Sheet"] },
+    { "check": "Liquidation preference amount and type match", "documents": ["Charter", "Term Sheet", "SPA"] },
+    { "check": "Option pool size matches", "documents": ["Charter", "Term Sheet", "SPA cap table"] },
+    { "check": "ROFR transfer restrictions align with Voting Agreement obligations", "documents": ["ROFR", "Voting Agreement"] },
+    { "check": "Drag-along thresholds match", "documents": ["Voting Agreement", "Charter"] },
+    { "check": "MRL names correct fund entities", "documents": ["MRL", "SPA closing conditions"] },
+    { "check": "Indemnification agreements cover all directors", "documents": ["Indemnification Agreement", "SPA closing conditions"] },
+    { "check": "Token provisions consistent across documents", "documents": ["Charter PP", "IRA covenants", "Token Warrant"] },
+    { "check": "Competitor definition identical across all agreements", "documents": ["IRA", "ROFR"] },
+    { "check": "Defined terms (Company, Investor, Key Holder) consistent", "documents": ["All documents"] },
+    { "check": "Paradigm entity naming consistent (Fund LP, Two LP)", "documents": ["All documents"] }
+  ],
+  "closing_checklist": {
+    "pre_closing": [
+      "Financing overview and working group list",
+      "Conflict waiver letter",
+      "Federal securities / blue sky compliance (Rule 506 Bad Actor screening)",
+      "HSR threshold analysis",
+      "CFIUS analysis for foreign investors",
+      "OISP analysis (31 C.F.R. Part 850)",
+      "Amended and Restated Certificate of Incorporation",
+      "Stock Purchase Agreement with Schedule of Exceptions",
+      "Investors' Rights Agreement",
+      "ROFR and Co-Sale Agreement",
+      "Voting Agreement",
+      "Token Warrant (if applicable)",
+      "Board Consent (conditioned upon closing)",
+      "Stockholder Consent",
+      "Management Rights Letters (Paradigm Fund LP + Paradigm Two LP)",
+      "Side Letters (if applicable)",
+      "Legal Opinion (start early — requires partner review)",
+      "Back-Up Certificate for Legal Opinion (Bad Actor rep)",
+      "Rule 506 Backup Certificates from officers/directors/20% holders",
+      "Indemnification Agreements",
+      "Section 1202 (QSBS) Analysis"
+    ],
+    "closing": [
+      "Wire transfer instructions to Company",
+      "Collect original promissory notes if converting",
+      "Good standing certificates (DE + state of business)",
+      "Verbal or written bring-downs",
+      "Officer's Compliance Certificate",
+      "Secretary's Certificate",
+      "File Restated Certificate of Incorporation"
+    ],
+    "post_closing": [
+      "Issue Preferred Stock certificates",
+      "Form D filing (SEC, within 15 days of first closing)",
+      "State blue sky filings",
+      "DE Section 228(e) notice to non-consenting stockholders",
+      "Receipts for Preferred Stock certificates",
+      "Certificate acknowledging receipt of funds",
+      "Closing book index",
+      "Summary of new requirements placed on the company",
+      "Update cap table to reflect financing"
+    ]
   },
   "provenance_examples": {
     "template_docx": ["Template includes 1x non-participating liquidation preference and 45-day no-shop baseline.", "Template includes legal fee cap convention and standard NVCA framing."],
