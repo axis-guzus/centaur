@@ -708,8 +708,7 @@ export function stepsFromTurns(turns: Turn[]): Step[] {
       } else if (
         eventType === "system" ||
         eventType === "status" ||
-        eventType === "raw" ||
-        eventType === "turn.completed"
+        eventType === "raw"
       ) {
         const detail =
           asString(event.message) ||

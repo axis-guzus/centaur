@@ -89,17 +89,12 @@ export default function ThreadDetailPage() {
   const elapsedAnchor = isRunning ? activeTurnStartedAt : thread?.last_activity;
   const liveElapsed = useElapsed(elapsedAnchor, Boolean(isRunning));
   const stableStatus = useStableStatus(agentStatus);
-  const tokenTicker = tokenUsage
-    ? `${tokenUsage.total_tokens.toLocaleString()} tok / ${
-        tokenUsage.cost_usd === null ? "--" : `$${tokenUsage.cost_usd.toFixed(4)}`
-      }${tokenUsage.estimated ? "~" : ""}`
-    : "-- tok / --";
   const phases = liveSteps.flatMap((step) => (step.type === "phase" ? [step.phase] : []));
   const activePhase = phases.length > 0 ? phases[phases.length - 1] : null;
   const turnDurationsById = useMemo(() => {
     if (!thread) return {};
     return Object.fromEntries(thread.turns.map((turn) => [turn.turn_id, turn.duration_s]));
-  }, [thread]);
+  }, [thread?.turns]);
   const latestUserMessage = thread?.turns[thread.turns.length - 1]?.user_message?.trim() ?? "";
   const retryMessage = latestUserMessage || "Please retry the previous request.";
   const slackDeepLink = useMemo(() => {
@@ -219,13 +214,11 @@ export default function ThreadDetailPage() {
         thread={thread}
         humanName={humanName}
         tokenUsage={tokenUsage}
-        tokenTicker={tokenTicker}
         liveElapsed={liveElapsed}
         stableStatus={stableStatus}
         isRunning={isRunning}
         isEngineer={isEngineer}
         phases={phases}
-        isReconnecting={isReconnecting}
         error={error}
         interruptError={interruptError}
         canInterrupt={canInterrupt}

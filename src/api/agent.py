@@ -32,6 +32,7 @@ from toon_format import decode as toon_decode
 
 from api.harness_events import normalize_harness_event
 from api.output_quality import apply_output_quality
+from api.thread_usage import count_usage_events, summarize_turn_token_usage
 from shared.tool_sdk import _sm_read
 
 log = structlog.get_logger()
@@ -2859,6 +2860,8 @@ class AgentClient:
                     session["state"] = "idle"
                 session["last_activity"] = time.time()
             _persist_session(session, resolved_thread_key)
+            turn_usage = summarize_turn_token_usage(live_turn["events"])
+            usage_event_count = count_usage_events(live_turn["events"])
             if (
                 live_turn["turn_id"] == 1
                 and not timed_out
@@ -2870,28 +2873,6 @@ class AgentClient:
                     str(live_turn.get("user_message") or ""),
                     result_text,
                 )
-            # Compute per-turn LLM stats from events
-            llm_calls = 0
-            total_input_tokens = 0
-            total_output_tokens = 0
-            for evt in live_turn["events"]:
-                usage = None
-                if isinstance(evt, dict):
-                    message = evt.get("message")
-                    if isinstance(message, dict):
-                        usage = message.get("usage")
-                    if usage is None:
-                        usage = evt.get("usage")
-                if usage:
-                    usage_dict = usage if isinstance(usage, dict) else {}
-                    llm_calls += 1
-                    total_input_tokens += (
-                        int(usage_dict.get("input_tokens", 0))
-                        + int(usage_dict.get("cached_input_tokens", 0))
-                        + int(usage_dict.get("cache_read_input_tokens", 0))
-                        + int(usage_dict.get("cache_creation_input_tokens", 0))
-                    )
-                    total_output_tokens += int(usage_dict.get("output_tokens", 0))
             log.info(
                 "exec_done",
                 request_id=rid,
@@ -2902,9 +2883,13 @@ class AgentClient:
                 timed_out=timed_out,
                 duration_s=live_turn["duration_s"],
                 result_len=len(result_text),
-                llm_calls=llm_calls,
-                total_input_tokens=total_input_tokens,
-                total_output_tokens=total_output_tokens,
+                usage_event_count=usage_event_count,
+                total_tokens=turn_usage["total_tokens"] if turn_usage else 0,
+                total_input_tokens=turn_usage["input_tokens"] if turn_usage else None,
+                total_output_tokens=turn_usage["output_tokens"] if turn_usage else None,
+                token_usage_quality=turn_usage["quality"] if turn_usage else None,
+                token_usage_breakdown=turn_usage["breakdown"] if turn_usage else None,
+                token_usage_models=turn_usage["models"] if turn_usage else [],
                 event_count=len(live_turn["events"]),
                 output_quality_status=output_quality.status,
                 output_quality_changed=output_quality.changed,

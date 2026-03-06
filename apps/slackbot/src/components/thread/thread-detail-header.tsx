@@ -18,7 +18,15 @@ import {
   SquareTerminal,
   Timer,
 } from "lucide-react";
-import type { ThreadDetail } from "@/lib/types";
+import type { ThreadDetail, ThreadTokenUsage } from "@/lib/types";
+import {
+  tokenUsageBreakdownLabel,
+  formatTokenUsageCount,
+  formatTokenUsageTicker,
+  tokenUsageModelsList,
+  tokenUsageConfidenceLabel,
+  tokenUsageModelLabel,
+} from "@/lib/token-usage";
 import { useHaptics } from "@/components/haptics-provider";
 import { HarnessBadge } from "@/components/ui/harness-badge";
 import { StateDot } from "@/components/ui/state-dot";
@@ -27,27 +35,15 @@ import { PhaseProgress } from "@/components/thread/phase-progress";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
-type TokenUsage = {
-  input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
-  cost_usd: number | null;
-  estimated: boolean;
-  authoritative?: boolean;
-  model: string | null;
-};
-
 type ThreadDetailHeaderProps = {
   thread: ThreadDetail;
   humanName: string;
-  tokenUsage: TokenUsage | null;
-  tokenTicker: string;
+  tokenUsage: ThreadTokenUsage | null;
   liveElapsed: string;
   stableStatus: string | null;
   isRunning: boolean;
   isEngineer: boolean;
   phases: string[];
-  isReconnecting: boolean;
   error: string | null;
   interruptError: string | null;
   canInterrupt: boolean;
@@ -85,13 +81,11 @@ export function ThreadDetailHeader({
   thread,
   humanName,
   tokenUsage,
-  tokenTicker,
   liveElapsed,
   stableStatus,
   isRunning,
   isEngineer,
   phases,
-  isReconnecting,
   error,
   interruptError,
   canInterrupt,
@@ -105,11 +99,11 @@ export function ThreadDetailHeader({
   upHref,
 }: ThreadDetailHeaderProps) {
   const { trigger } = useHaptics();
-  const usageConfidenceLabel = tokenUsage
-    ? (tokenUsage.authoritative ?? !tokenUsage.estimated)
-      ? "authoritative"
-      : "estimated"
-    : "--";
+  const usageConfidence = tokenUsageConfidenceLabel(tokenUsage);
+  const tokenTicker = formatTokenUsageTicker(tokenUsage);
+  const modelLabel = tokenUsageModelLabel(tokenUsage);
+  const modelList = tokenUsageModelsList(tokenUsage);
+  const breakdownLabel = tokenUsageBreakdownLabel(tokenUsage);
   const showError = !!error && !(thread.state === "error" && error.startsWith("Stream disconnected."));
   const statusSummary = useMemo(() => {
     if (thread.state === "error") return { icon: Bot, text: error || "Agent encountered an error" };
@@ -166,21 +160,25 @@ export function ThreadDetailHeader({
         <span className="hidden text-xs text-muted-foreground lg:inline">
           {thread.turns.length} turn{thread.turns.length === 1 ? "" : "s"}
         </span>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="hidden rounded-md border border-border/60 bg-background/60 px-1.5 py-0.5 text-xs font-mono tabular-nums text-muted-foreground xl:inline">
-              {tokenTicker}
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>
-            <div className="space-y-0.5 text-xs">
-              <div>Input: {tokenUsage?.input_tokens?.toLocaleString() ?? "--"}</div>
-              <div>Output: {tokenUsage?.output_tokens?.toLocaleString() ?? "--"}</div>
-              <div>Model: {tokenUsage?.model ?? "--"}</div>
-              <div>Usage: {usageConfidenceLabel}</div>
-            </div>
-          </TooltipContent>
-        </Tooltip>
+        {tokenTicker ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="hidden rounded-md border border-border/60 bg-background/60 px-1.5 py-0.5 text-xs font-mono tabular-nums text-muted-foreground md:inline-flex">
+                {tokenTicker}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              <div className="space-y-0.5 text-xs">
+                <div>Total: {formatTokenUsageCount(tokenUsage?.total_tokens ?? null)}</div>
+                <div>Input: {formatTokenUsageCount(tokenUsage?.input_tokens ?? null)}</div>
+                <div>Output: {formatTokenUsageCount(tokenUsage?.output_tokens ?? null)}</div>
+                <div>Split: {breakdownLabel}</div>
+                <div>Model: {modelList}</div>
+                <div>Usage: {usageConfidence}</div>
+              </div>
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
         <span className="hidden items-center gap-1 rounded-md border border-border/60 bg-background/60 px-1.5 py-0.5 text-xs font-mono tabular-nums text-muted-foreground lg:inline-flex">
           <Timer className="size-3.5" />
           {liveElapsed}
@@ -259,9 +257,9 @@ export function ThreadDetailHeader({
         <span className={thread.state === "error" ? "text-destructive truncate" : "text-muted-foreground truncate"}>
           {statusSummary.text}
         </span>
-        {isRunning && tokenUsage?.model ? (
+        {!tokenTicker && modelLabel ? (
           <span className="ml-auto hidden rounded-md border border-border/60 bg-background/60 px-1.5 py-0.5 font-mono text-xs text-muted-foreground md:inline">
-            {tokenUsage.model}
+            {modelLabel}
           </span>
         ) : null}
       </div>

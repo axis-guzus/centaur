@@ -28,6 +28,7 @@ from api.agent import (
     session_items_snapshot,
 )
 from api.deps import get_pool, verify_ui_or_api_key
+from api.thread_usage import ThreadTokenUsage, estimate_usage_cost_usd, summarize_thread_token_usage
 
 log = structlog.get_logger()
 
@@ -406,6 +407,7 @@ def _build_live_detail(key: str, session: dict[str, Any]) -> dict[str, Any]:
         "last_activity": session["last_activity"],
         "turns": turns,
         "thread_name": _resolved_thread_name(session.get("thread_name"), turns=turns),
+        "token_usage": summarize_thread_token_usage(turns),
         "participants": participants,
     }
 
@@ -747,6 +749,7 @@ async def _fetch_pg_detail(pool: asyncpg.Pool, key: str) -> dict[str, Any]:
         "created_at": float(row["created_at"]),
         "last_activity": float(row["last_activity"]),
         "turns": turns,
+        "token_usage": summarize_thread_token_usage(turns),
         "participants": _build_participants_from_turns(turns),
     }
 
@@ -831,54 +834,6 @@ async def post_context_message(payload: ContextMessageRequest) -> dict[str, Any]
     )
 
 
-def _resolve_model_costs_per_m(model_lower: str) -> tuple[float, float] | None:
-    """Return (input_cost_per_million, output_cost_per_million).
-
-    Keep this family-based so new snapshot suffixes inherit correct pricing
-    without requiring constant table maintenance.
-    """
-    # OpenAI Codex (official model page)
-    if "gpt-5.3-codex" in model_lower:
-        return (1.75, 14.0)
-
-    # Anthropic Opus tiers
-    if "claude-3-opus" in model_lower:
-        return (15.0, 75.0)
-    if "opus-4-6" in model_lower or "opus-4-5" in model_lower:
-        return (5.0, 25.0)
-    if "opus-4-1" in model_lower or "opus-4-0" in model_lower or "opus-4" in model_lower:
-        return (15.0, 75.0)
-    if "opus" in model_lower:
-        # Prefer current Opus pricing for ambiguous aliases like "claude-opus-4-6".
-        return (5.0, 25.0)
-
-    # Anthropic Sonnet pricing
-    if "sonnet" in model_lower:
-        return (3.0, 15.0)
-
-    # Anthropic Haiku tiers
-    if "haiku-3-5" in model_lower or "3-5-haiku" in model_lower:
-        return (0.80, 4.0)
-    if "haiku-3" in model_lower or "3-haiku" in model_lower:
-        return (0.25, 1.25)
-    if "haiku" in model_lower:
-        return (1.0, 5.0)
-
-    return None
-
-
-def _estimate_cost_usd(model: str | None, input_tokens: int, output_tokens: int) -> float | None:
-    if not model or (input_tokens == 0 and output_tokens == 0):
-        return None
-    model_lower = model.lower()
-    costs = _resolve_model_costs_per_m(model_lower)
-    if not costs:
-        return None
-    input_cost = (input_tokens / 1_000_000) * costs[0]
-    output_cost = (output_tokens / 1_000_000) * costs[1]
-    return round(input_cost + output_cost, 6)
-
-
 # SSE comment keepalive sent when no data for this many seconds (prevents proxy timeouts)
 _SSE_KEEPALIVE_INTERVAL_S = 15
 
@@ -893,65 +848,11 @@ def _parse_phase_label(user_message: str) -> str | None:
 
 
 def _coerce_non_negative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
     if isinstance(value, (int, float)) and value >= 0:
         return int(value)
     return 0
-
-
-def _has_usage(usage: dict[str, int]) -> bool:
-    return usage["input_tokens"] > 0 or usage["output_tokens"] > 0
-
-
-def _extract_usage_from_payload(usage_payload: dict[str, Any]) -> dict[str, int]:
-    input_tokens = (
-        _coerce_non_negative_int(usage_payload.get("input_tokens"))
-        + _coerce_non_negative_int(usage_payload.get("prompt_tokens"))
-        + _coerce_non_negative_int(usage_payload.get("cached_input_tokens"))
-        + _coerce_non_negative_int(usage_payload.get("cache_read_input_tokens"))
-        + _coerce_non_negative_int(usage_payload.get("cache_creation_input_tokens"))
-    )
-    output_tokens = _coerce_non_negative_int(
-        usage_payload.get("output_tokens")
-    ) + _coerce_non_negative_int(usage_payload.get("completion_tokens"))
-    if input_tokens == 0 and output_tokens == 0:
-        total = _coerce_non_negative_int(usage_payload.get("total_tokens"))
-        if total > 0:
-            input_tokens = total // 2
-            output_tokens = total - input_tokens
-    return {"input_tokens": input_tokens, "output_tokens": output_tokens}
-
-
-def _extract_usage_from_event(event: dict[str, Any]) -> tuple[dict[str, int], bool]:
-    event_type = str(event.get("type") or "")
-    if event_type == "subagent":
-        return {"input_tokens": 0, "output_tokens": 0}, False
-
-    usage_payload: dict[str, Any] | None = None
-    message = event.get("message")
-    if isinstance(message, dict) and isinstance(message.get("usage"), dict):
-        usage_payload = message.get("usage")
-    elif isinstance(event.get("usage"), dict):
-        usage_payload = event.get("usage")
-
-    if not isinstance(usage_payload, dict):
-        return {"input_tokens": 0, "output_tokens": 0}, False
-
-    usage = _extract_usage_from_payload(usage_payload)
-    is_authoritative = event_type == "turn.completed"
-    return usage, is_authoritative
-
-
-def _extract_usage_model(event: dict[str, Any]) -> str | None:
-    event_type = str(event.get("type") or "")
-    if event_type == "subagent":
-        return None
-    message = event.get("message")
-    if isinstance(message, dict):
-        message_model = str(message.get("model") or "").strip()
-        if message_model:
-            return message_model
-    model = str(event.get("model") or "").strip()
-    return model or None
 
 
 def _ui_stream_chunks_for_event(
@@ -1090,7 +991,7 @@ def _ui_stream_chunks_for_event(
             total_tokens = None
         model_name = str(event.get("model") or "").strip() or None
         cost_usd = (
-            _estimate_cost_usd(model_name, input_tokens or 0, output_tokens or 0)
+            estimate_usage_cost_usd(model_name, input_tokens or 0, output_tokens or 0)
             if input_tokens is not None and output_tokens is not None
             else None
         )
@@ -1225,12 +1126,8 @@ async def stream_thread_ui(
         emitted_finish_for_snapshot = False
         ticks_since_data = 0
         last_state = ""
-        usage_by_turn: dict[int, dict[str, int]] = {}
-        usage_authoritative_turns: set[int] = set()
-        last_usage_total = -1
+        last_token_usage: ThreadTokenUsage | None = None
         last_phase_by_turn: dict[int, str] = {}
-        usage_seen = False
-        usage_model: str | None = None
         initialized_live_cursor = False
         turns_with_stream_chunks: set[int] = set()
         turns_with_text_chunks: set[int] = set()
@@ -1370,26 +1267,6 @@ async def stream_thread_ui(
                         event = events[index]
                         if not isinstance(event, dict):
                             continue
-                        message_model = _extract_usage_model(event)
-                        if message_model:
-                            usage_model = message_model
-                        explicit_usage, is_authoritative = _extract_usage_from_event(event)
-                        if _has_usage(explicit_usage):
-                            usage_seen = True
-                            if is_authoritative:
-                                usage_by_turn[turn_id] = explicit_usage
-                                usage_authoritative_turns.add(turn_id)
-                            elif turn_id not in usage_authoritative_turns:
-                                previous = usage_by_turn.get(
-                                    turn_id,
-                                    {"input_tokens": 0, "output_tokens": 0},
-                                )
-                                usage_by_turn[turn_id] = {
-                                    "input_tokens": previous["input_tokens"]
-                                    + explicit_usage["input_tokens"],
-                                    "output_tokens": previous["output_tokens"]
-                                    + explicit_usage["output_tokens"],
-                                }
                         chunks = _ui_stream_chunks_for_event(
                             turn_id,
                             index,
@@ -1456,16 +1333,11 @@ async def stream_thread_ui(
                         turns_with_stream_chunks.add(turn_id)
                         last_event_indices[-turn_id] = 1
 
-            total_input_tokens = sum(item["input_tokens"] for item in usage_by_turn.values())
-            total_output_tokens = sum(item["output_tokens"] for item in usage_by_turn.values())
-            usage_total = total_input_tokens + total_output_tokens
-            if usage_seen and usage_total != last_usage_total:
-                last_usage_total = usage_total
+            token_usage = detail.get("token_usage")
+            if token_usage is not None and token_usage != last_token_usage:
+                last_token_usage = token_usage
                 any_new_data = True
-                authoritative_usage = bool(usage_by_turn) and all(
-                    turn_id in usage_authoritative_turns for turn_id in usage_by_turn
-                )
-                yield f"data: {json.dumps({'type': 'data-token-usage', 'id': 'thread-token-usage', 'data': {'input_tokens': total_input_tokens, 'output_tokens': total_output_tokens, 'total_tokens': usage_total, 'cost_usd': _estimate_cost_usd(usage_model, total_input_tokens, total_output_tokens), 'estimated': not authoritative_usage, 'authoritative': authoritative_usage, 'model': usage_model}})}\n\n"
+                yield f"data: {json.dumps({'type': 'data-token-usage', 'id': 'thread-token-usage', 'data': token_usage})}\n\n"
 
             if any_new_data:
                 ticks_since_data = 0

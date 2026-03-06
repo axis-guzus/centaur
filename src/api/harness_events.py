@@ -103,6 +103,49 @@ def _subagent_event(
     return payload
 
 
+def _usage_payload_from_source(source: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    message = _as_dict(source.get("message"))
+    usage = _as_dict(message.get("usage")) or _as_dict(source.get("usage"))
+    if not usage:
+        return None, None
+    model = _as_text(message.get("model")) or _as_text(source.get("model")) or None
+    return usage, model
+
+
+def _attach_usage_metadata(
+    events: list[dict[str, Any]],
+    source: dict[str, Any],
+    *,
+    authoritative: bool = False,
+) -> list[dict[str, Any]]:
+    usage, model = _usage_payload_from_source(source)
+    if not usage:
+        return events
+    if not events:
+        passthrough: dict[str, Any] = {"type": "usage", "usage": usage}
+        if model:
+            passthrough["model"] = model
+        if authoritative:
+            passthrough["authoritative"] = True
+        return [passthrough]
+
+    first = dict(events[0])
+    message = _as_dict(first.get("message"))
+    if message:
+        updated_message = dict(message)
+        updated_message["usage"] = usage
+        if model:
+            updated_message["model"] = model
+        first["message"] = updated_message
+    else:
+        first["usage"] = usage
+        if model:
+            first["model"] = model
+    if authoritative:
+        first["authoritative"] = True
+    return [first, *events[1:]]
+
+
 def _normalize_amp_like_event(event: dict[str, Any]) -> list[dict[str, Any]]:
     event_type = _as_text(event.get("type"))
 
@@ -308,9 +351,7 @@ def _normalize_codex_event(event: dict[str, Any]) -> list[dict[str, Any]]:
         return [{"type": "error", "error": message}]
 
     if event_type == "turn.completed":
-        # Keep raw turn.completed for usage accounting; detailed item.completed
-        # events are normalized separately to avoid duplicate rendering.
-        return [event]
+        return _attach_usage_metadata([], event, authoritative=True)
 
     if event_type == "item.started":
         return _normalize_codex_item(_as_dict(event.get("item")), "started")
@@ -414,7 +455,7 @@ def _normalize_pi_event(event: dict[str, Any]) -> list[dict[str, Any]]:
         role = _as_text(message.get("role"))
         if role != "assistant":
             return []
-        normalized = _normalize_pi_message_content(message)
+        normalized = _attach_usage_metadata(_normalize_pi_message_content(message), message)
         stop_reason = _as_text(message.get("stopReason"))
         if stop_reason in {"error", "aborted"}:
             error_text = _as_text(message.get("errorMessage")) or "Assistant run failed"
@@ -469,5 +510,5 @@ def normalize_harness_event(harness: str, event: dict[str, Any]) -> list[dict[st
         return _normalize_codex_event(event)
     if normalized_harness == "pi-mono":
         return _normalize_pi_event(event)
-    # eng uses claude-code under the hood, same event format as amp/claude-code
+    # eng/legal use claude-code under the hood, same event format as amp/claude-code
     return _normalize_amp_like_event(event)

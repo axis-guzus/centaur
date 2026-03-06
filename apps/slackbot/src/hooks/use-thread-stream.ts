@@ -1,23 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { z } from "zod";
-import type { ThreadDetail } from "@/lib/types";
+import type { ThreadDetail, ThreadTokenUsage } from "@/lib/types";
 import { BASE } from "@/lib/constants";
 import { AgentThreadTransport } from "@/lib/agent-transport";
 import { stepsFromUiMessages } from "@/lib/chat-steps";
 import { stepsFromTurns } from "@/lib/turn-steps";
 import { isActiveState } from "@/lib/thread-ordering";
 import type { Step } from "@/lib/describe";
-
-export type TokenUsage = {
-  input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
-  cost_usd: number | null;
-  estimated: boolean;
-  authoritative: boolean;
-  model: string | null;
-};
 
 type SendRoute = "execute";
 
@@ -28,87 +18,71 @@ function coerceNonNegativeInt(value: unknown): number {
   return 0;
 }
 
-function extractUsageFromPayload(payload: Record<string, unknown>): { input: number; output: number } {
-  let input =
-    coerceNonNegativeInt(payload.input_tokens) +
-    coerceNonNegativeInt(payload.prompt_tokens) +
-    coerceNonNegativeInt(payload.cached_input_tokens) +
-    coerceNonNegativeInt(payload.cache_read_input_tokens) +
-    coerceNonNegativeInt(payload.cache_creation_input_tokens);
-  let output =
-    coerceNonNegativeInt(payload.output_tokens) +
-    coerceNonNegativeInt(payload.completion_tokens);
+function parseTokenUsage(value: unknown): ThreadTokenUsage | null {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  const inputTokens =
+    typeof payload.input_tokens === "number" && Number.isFinite(payload.input_tokens)
+      ? coerceNonNegativeInt(payload.input_tokens)
+      : null;
+  const outputTokens =
+    typeof payload.output_tokens === "number" && Number.isFinite(payload.output_tokens)
+      ? coerceNonNegativeInt(payload.output_tokens)
+      : null;
+  const totalTokens =
+    coerceNonNegativeInt(payload.total_tokens) ||
+    coerceNonNegativeInt(inputTokens) + coerceNonNegativeInt(outputTokens);
+  if (totalTokens <= 0) return null;
+  const quality = payload.quality === "authoritative" ? "authoritative" : "estimated";
+  const breakdown = payload.breakdown === "known" ? "known" : "unknown";
+  const models = Array.isArray(payload.models)
+    ? payload.models.filter((model): model is string => typeof model === "string" && model.trim().length > 0)
+    : [];
 
-  if (input === 0 && output === 0) {
-    const total = coerceNonNegativeInt(payload.total_tokens);
-    if (total > 0) {
-      input = Math.floor(total / 2);
-      output = total - input;
-    }
-  }
-  return { input, output };
+  return {
+    input_tokens: breakdown === "known" ? inputTokens : null,
+    output_tokens: breakdown === "known" ? outputTokens : null,
+    total_tokens: totalTokens,
+    cost_usd:
+      typeof payload.cost_usd === "number" && Number.isFinite(payload.cost_usd)
+        ? payload.cost_usd
+        : null,
+    quality,
+    breakdown,
+    models,
+  };
 }
 
-function deriveUsageFromTurns(turns: ThreadDetail["turns"] | undefined): TokenUsage | null {
-  if (!turns || turns.length === 0) return null;
-  const usageByTurn = new Map<number, { input: number; output: number; authoritative: boolean }>();
-  let model: string | null = null;
+function mergeTokenUsageSnapshots(
+  previous: ThreadTokenUsage | null,
+  incoming: ThreadTokenUsage | null,
+): ThreadTokenUsage | null {
+  if (!previous) return incoming;
+  if (!incoming) return previous;
+  if (incoming.total_tokens > previous.total_tokens) return incoming;
+  if (incoming.total_tokens < previous.total_tokens) return previous;
 
-  for (const turn of turns) {
-    const turnId = Number(turn.turn_id || 0);
-    if (!Number.isFinite(turnId) || turnId <= 0) continue;
-    for (const rawEvent of turn.events || []) {
-      const event = (rawEvent ?? {}) as Record<string, unknown>;
-      const eventType = String(event.type ?? "");
-      const messageUsage = (event.message as Record<string, unknown> | undefined)?.usage;
-      const usagePayload =
-        (typeof messageUsage === "object" && messageUsage
-          ? (messageUsage as Record<string, unknown>)
-          : typeof event.usage === "object" && event.usage
-            ? (event.usage as Record<string, unknown>)
-            : null);
-      if (!usagePayload) continue;
+  const quality =
+    previous.quality === "authoritative" || incoming.quality === "authoritative"
+      ? "authoritative"
+      : "estimated";
+  const breakdown =
+    previous.breakdown === "known" || incoming.breakdown === "known" ? "known" : "unknown";
+  const inputTokens =
+    breakdown === "known" ? incoming.input_tokens ?? previous.input_tokens ?? null : null;
+  const outputTokens =
+    breakdown === "known" ? incoming.output_tokens ?? previous.output_tokens ?? null : null;
+  const costUsd = incoming.cost_usd ?? previous.cost_usd ?? null;
+  const models = Array.from(new Set([...previous.models, ...incoming.models])).sort();
 
-      const usage = extractUsageFromPayload(usagePayload);
-      if (usage.input === 0 && usage.output === 0) continue;
-      const previous = usageByTurn.get(turnId) ?? { input: 0, output: 0, authoritative: false };
-      if (eventType === "turn.completed") {
-        usageByTurn.set(turnId, { input: usage.input, output: usage.output, authoritative: true });
-      } else if (!previous.authoritative) {
-        usageByTurn.set(turnId, {
-          input: previous.input + usage.input,
-          output: previous.output + usage.output,
-          authoritative: false,
-        });
-      }
-
-      const messageModel = String(
-        (event.message as Record<string, unknown> | undefined)?.model ?? event.model ?? "",
-      ).trim();
-      if (messageModel) {
-        model = messageModel;
-      }
-    }
-  }
-
-  let input = 0;
-  let output = 0;
-  let authoritative = usageByTurn.size > 0;
-  for (const usage of usageByTurn.values()) {
-    input += usage.input;
-    output += usage.output;
-    authoritative = authoritative && usage.authoritative;
-  }
-  const total = input + output;
-  if (total === 0) return null;
   return {
-    input_tokens: input,
-    output_tokens: output,
-    total_tokens: total,
-    cost_usd: null,
-    estimated: !authoritative,
-    authoritative,
-    model,
+    total_tokens: previous.total_tokens,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cost_usd: costUsd,
+    quality,
+    breakdown,
+    models,
   };
 }
 
@@ -212,12 +186,12 @@ export function useThreadStream(threadKey: string, initialThread?: Partial<Threa
     return {
       turns: [],
       participants: [],
+      token_usage: null,
       ...initialThread,
     } as ThreadDetail;
   });
   const [error, setError] = useState<string | null>(null);
   const [agentStatus, setAgentStatus] = useState<string | null>(null);
-  const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null);
   const [isFetchingThread, setIsFetchingThread] = useState(false);
   const stopStreamRef = useRef<(() => void) | null>(null);
   const streamAttachedRef = useRef(false);
@@ -304,57 +278,28 @@ export function useThreadStream(threadKey: string, initialThread?: Partial<Threa
         event_seq: z.number().nullable().optional(),
       }),
       "token-usage": z.object({
-        input_tokens: z.number(),
-        output_tokens: z.number(),
+        input_tokens: z.number().nullable().optional(),
+        output_tokens: z.number().nullable().optional(),
         total_tokens: z.number(),
         cost_usd: z.number().nullable().optional(),
-        estimated: z.boolean().optional(),
-        authoritative: z.boolean().optional(),
-        model: z.string().nullable().optional(),
+        quality: z.enum(["authoritative", "estimated"]).optional(),
+        breakdown: z.enum(["known", "unknown"]).optional(),
+        models: z.array(z.string()).optional(),
       }),
-      "thread-detail": z.record(z.string(), z.unknown()),
     },
     onData: (part) => {
       if (part.type === "data-agent-status") {
         const data = part.data as { text?: string };
         const text = String(data.text ?? "").trim();
         setAgentStatus(text || null);
-      } else if (part.type === "data-thread-detail") {
-        const data = part.data as Record<string, unknown>;
-        setThread(prev => {
-          if (Array.isArray(data.turns)) {
-            const participants = Array.isArray(data.participants)
-              ? data.participants
-              : prev?.participants ?? [];
-            return { participants, ...data } as unknown as ThreadDetail;
-          }
-          if (prev) {
-            return { ...prev, ...data } as ThreadDetail;
-          }
-          return { turns: [], participants: [], ...data } as unknown as ThreadDetail;
-        });
-        setError(null);
       } else if (part.type === "data-token-usage") {
-        const payload = part.data as {
-          input_tokens?: number;
-          output_tokens?: number;
-          total_tokens?: number;
-          cost_usd?: number | null;
-          estimated?: boolean;
-          authoritative?: boolean;
-          model?: string | null;
-        };
-        setTokenUsage({
-          input_tokens: Number(payload.input_tokens ?? 0),
-          output_tokens: Number(payload.output_tokens ?? 0),
-          total_tokens: Number(payload.total_tokens ?? 0),
-          cost_usd:
-            payload.cost_usd === null || payload.cost_usd === undefined
-              ? null
-              : Number(payload.cost_usd),
-          estimated: Boolean(payload.estimated),
-          authoritative: Boolean(payload.authoritative),
-          model: payload.model ? String(payload.model) : null,
+        const nextTokenUsage = parseTokenUsage(part.data);
+        setThread((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            token_usage: mergeTokenUsageSnapshots(prev.token_usage, nextTokenUsage),
+          };
         });
       }
     },
@@ -414,7 +359,13 @@ export function useThreadStream(threadKey: string, initialThread?: Partial<Threa
         setError(message);
         return false;
       }
-      setThread(data as ThreadDetail);
+      setThread((prev) => ({
+        ...(data as ThreadDetail),
+        token_usage: mergeTokenUsageSnapshots(
+          prev?.token_usage ?? null,
+          parseTokenUsage((data as { token_usage?: unknown }).token_usage),
+        ),
+      }));
       setError(null);
       return true;
     } catch (error) {
@@ -457,14 +408,15 @@ export function useThreadStream(threadKey: string, initialThread?: Partial<Threa
 
   // Reset state when threadKey changes; fetch full detail, then connect SSE only if running
   useEffect(() => {
+    let cancelled = false;
+
     setThread(
       initialThread
-        ? ({ turns: [], participants: [], ...initialThread } as ThreadDetail)
+        ? ({ turns: [], participants: [], token_usage: null, ...initialThread } as ThreadDetail)
         : null,
     );
     setError(null);
     setAgentStatus(null);
-    setTokenUsage(null);
     streamAttachedRef.current = false;
     setReconnectExhausted(false);
 
@@ -472,13 +424,19 @@ export function useThreadStream(threadKey: string, initialThread?: Partial<Threa
     // For freshly created ui: threads the session may not exist yet — retry briefly.
     void (async () => {
       const ok = await fetchThread();
-      if (!ok && threadKey.startsWith("ui:")) {
+      if (!ok && threadKey.startsWith("ui:") && !cancelled) {
         for (let i = 0; i < 4; i++) {
+          if (cancelled) return;
           await new Promise((r) => setTimeout(r, 1500));
+          if (cancelled) return;
           if (await fetchThread()) break;
         }
       }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [threadKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Attach stream only when thread is active; re-attach on every active run.
@@ -591,18 +549,13 @@ export function useThreadStream(threadKey: string, initialThread?: Partial<Threa
     return historicalSteps;
   }, [historicalSteps, liveStreamSteps, shouldPreferLiveSteps]);
 
-  const derivedTokenUsage = useMemo(() => {
-    if (tokenUsage) return tokenUsage;
-    return deriveUsageFromTurns(thread?.turns);
-  }, [thread?.turns, tokenUsage]);
-
   return {
     thread,
     error,
     fetchThread,
     isReconnecting: chat.status === "error" && isActiveState(thread?.state),
     agentStatus,
-    tokenUsage: derivedTokenUsage,
+    tokenUsage: thread?.token_usage ?? null,
     isFetchingThread,
     chatStatus: chat.status,
     sendThreadMessage,

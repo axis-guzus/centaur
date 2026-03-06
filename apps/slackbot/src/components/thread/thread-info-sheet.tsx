@@ -12,23 +12,20 @@ import { HarnessBadge } from "@/components/ui/harness-badge";
 import { StateDot } from "@/components/ui/state-dot";
 import { ParticipantAvatars } from "@/components/thread/participant-avatars";
 import { cn } from "@/lib/utils";
-import type { ThreadDetail } from "@/lib/types";
-
-type TokenUsage = {
-  input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
-  cost_usd: number | null;
-  estimated: boolean;
-  authoritative: boolean;
-  model: string | null;
-};
+import {
+  tokenUsageBreakdownLabel,
+  formatTokenUsageCost,
+  formatTokenUsageCount,
+  tokenUsageConfidenceLabel,
+  tokenUsageModelsList,
+} from "@/lib/token-usage";
+import type { ThreadDetail, ThreadTokenUsage } from "@/lib/types";
 
 type ThreadInfoSheetProps = {
   open: boolean;
   onClose: () => void;
   thread: ThreadDetail;
-  tokenUsage: TokenUsage | null;
+  tokenUsage: ThreadTokenUsage | null;
   elapsed: string;
   onRefresh: () => void;
   onStop?: () => void;
@@ -47,15 +44,6 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
     <div>
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="text-sm font-mono tabular-nums text-foreground mt-0.5">{children}</dd>
-    </div>
-  );
-}
-
-function ContextBar({ percent }: { percent: number }) {
-  const color = percent > 80 ? "bg-destructive" : percent > 50 ? "bg-primary/70" : "bg-primary";
-  return (
-    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-secondary">
-      <div className={cn("h-full rounded-full transition-[width] duration-[var(--dur-base)] ease-out", color)} style={{ width: `${percent}%` }} />
     </div>
   );
 }
@@ -173,10 +161,9 @@ export function ThreadInfoSheet({
       previousFocused?.focus();
     };
   }, [open, onClose]);
-
-  const contextPercent = tokenUsage
-    ? Math.max(0, Math.min(100, Math.round((tokenUsage.total_tokens / 200_000) * 100)))
-    : 0;
+  const modelList = tokenUsageModelsList(tokenUsage);
+  const breakdownLabel = tokenUsageBreakdownLabel(tokenUsage);
+  const usageConfidence = tokenUsageConfidenceLabel(tokenUsage);
 
   const keyParts = thread.slack_thread_key.startsWith("slack:")
     ? thread.slack_thread_key.replace(/^slack:/, "").split(":")
@@ -245,20 +232,16 @@ export function ThreadInfoSheet({
           </div>
 
           <dl className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-x-4 sm:gap-y-4">
-            <Stat label="Tokens in">{tokenUsage?.input_tokens.toLocaleString() ?? "--"}</Stat>
-            <Stat label="Tokens out">{tokenUsage?.output_tokens.toLocaleString() ?? "--"}</Stat>
+            <Stat label="Total tokens">{formatTokenUsageCount(tokenUsage?.total_tokens ?? null)}</Stat>
+            <Stat label="Tokens in">{formatTokenUsageCount(tokenUsage?.input_tokens ?? null)}</Stat>
+            <Stat label="Tokens out">{formatTokenUsageCount(tokenUsage?.output_tokens ?? null)}</Stat>
             <Stat label="Cost">
-              {tokenUsage?.cost_usd !== null && tokenUsage?.cost_usd !== undefined
-                ? `$${tokenUsage.cost_usd.toFixed(4)}${tokenUsage.estimated ? "~" : ""}`
-                : "--"}
+              {formatTokenUsageCost(tokenUsage) ?? "--"}
             </Stat>
-            <Stat label="Model">{tokenUsage?.model ?? "--"}</Stat>
+            <Stat label="Model">{modelList}</Stat>
+            <Stat label="Usage">{usageConfidence}</Stat>
+            <Stat label="Split">{breakdownLabel}</Stat>
             <Stat label="Turns">{thread.turns.length}</Stat>
-            <div>
-              <dt className="text-xs text-muted-foreground">Context</dt>
-              <dd className="text-sm font-mono tabular-nums text-foreground mt-0.5">{contextPercent}%</dd>
-              <ContextBar percent={contextPercent} />
-            </div>
           </dl>
 
           {thread.participants && thread.participants.length > 0 && (
