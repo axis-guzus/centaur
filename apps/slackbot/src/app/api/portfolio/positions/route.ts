@@ -1,4 +1,4 @@
-/** GET /api/portfolio/positions -> POST /tools/paradigmdb/db_positions */
+/** GET /api/portfolio/positions -> POST /tools/paradigmdb/db_query */
 
 import { resilientFetch, API_URL, ApiError } from "@/lib/api-client";
 import { decode } from "@toon-format/toon";
@@ -9,7 +9,6 @@ export const fetchCache = "force-no-store";
 /** Parse a tool result string that may be JSON or TOON-encoded. */
 function parseResult(raw: unknown): unknown {
   if (typeof raw !== "string") return raw;
-  // Try JSON first
   try {
     return JSON.parse(raw);
   } catch {
@@ -24,18 +23,26 @@ function parseResult(raw: unknown): unknown {
   return raw;
 }
 
+function buildQuery(fund: string | undefined, limit: number): string {
+  let sql = `SELECT p."marketValue", p."grossInvestedCapital", p."moic", p."holding", p."liquidity", p."grossRealizedValue", p."netRealizedValue", p."liquidMarketValue", p."realizedGainLoss", a.name as "assetName", a.ticker, f.name as "fundName" FROM "PerformanceLatest" p LEFT JOIN "Asset" a ON p."assetId" = a.id LEFT JOIN "Fund" f ON p."fundId" = f.id WHERE p."marketValue" > 0`;
+  if (fund) {
+    sql += ` AND f.name ILIKE '%${fund.replace(/'/g, "''")}%'`;
+  }
+  sql += ` ORDER BY p."marketValue" DESC NULLS LAST LIMIT ${limit}`;
+  return sql;
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const fund = searchParams.get("fund") || undefined;
   const limit = parseInt(searchParams.get("limit") || "200", 10);
 
   try {
-    const body: Record<string, unknown> = { limit };
-    if (fund) body.fund = fund;
+    const query = buildQuery(fund, limit);
 
-    const res = await resilientFetch(`${API_URL}/tools/paradigmdb/db_positions`, {
+    const res = await resilientFetch(`${API_URL}/tools/paradigmdb/db_query`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({ query }),
       signal: request.signal,
       timeoutMs: 15_000,
     });
@@ -46,7 +53,6 @@ export async function GET(request: Request) {
     }
 
     const data = await res.json();
-    // The result field may be TOON-encoded; decode it to plain JSON
     if (typeof data.result === "string") {
       data.result = parseResult(data.result);
     }
