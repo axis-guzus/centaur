@@ -10,7 +10,7 @@ import {
   interrupt,
   normalizeThreadKey,
   postThreadContextMessage,
-  spawn,
+  
   splitThreadKey,
   watchProgress,
   type BudgetMode,
@@ -433,11 +433,6 @@ function createBot() {
             error: error instanceof Error ? error.message : String(error),
           });
         }
-      }
-
-      if (isFirstMessage) {
-        await thread.startTyping("Spawning agent...");
-        await spawn(threadKey, harness, engine, undefined, requestId);
       }
 
       await thread.startTyping("Running...");
