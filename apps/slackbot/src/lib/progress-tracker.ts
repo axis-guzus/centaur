@@ -127,8 +127,7 @@ export class ProgressTracker {
     }
 
     for (const [, cmd] of this.activeCommands) {
-      const truncated = cmd.command.length > 60 ? cmd.command.slice(0, 57) + "..." : cmd.command;
-      lines.push(`• 💻 \`${truncated}\``);
+      lines.push(`• 💻 \`${cmd.command}\``);
     }
 
     for (const tool of this.completedTools) {
@@ -156,16 +155,14 @@ function summarizeInput(input: Record<string, unknown>): string {
   // Common patterns: show the most useful parameter
   for (const key of ["query", "pattern", "command", "cmd", "prompt", "path", "url", "message"]) {
     if (typeof input[key] === "string") {
-      const val = input[key] as string;
-      return val.length > 50 ? `${key}: "${val.slice(0, 47)}..."` : `${key}: "${val}"`;
+      return `${key}: "${input[key]}"`;
     }
   }
 
   // Fallback: show first string param
   for (const key of keys) {
     if (typeof input[key] === "string" && (input[key] as string).length > 0) {
-      const val = input[key] as string;
-      return val.length > 50 ? `${key}: "${val.slice(0, 47)}..."` : `${key}: "${val}"`;
+      return `${key}: "${input[key]}"`;
     }
   }
 
