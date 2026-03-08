@@ -12,7 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { ChevronLeft, ChevronRight, Plus, Search, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Palette, Plus, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -280,6 +280,22 @@ export const ThreadSidebar = forwardRef<ThreadSidebarHandle, ThreadSidebarProps>
               </Button>
             </TooltipTrigger>
             <TooltipContent>New Session</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                asChild
+                variant="ghost"
+                size="icon-sm"
+                className="size-7"
+                data-touch-target
+              >
+                <Link href="/uikit">
+                  <Palette className="size-4" />
+                </Link>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>UI Kit</TooltipContent>
           </Tooltip>
           {canToggle ? (
             <Button
