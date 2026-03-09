@@ -4,7 +4,7 @@ import type { SlackReplyMetadata } from "@/lib/bot/slack-blocks";
 export const dynamic = "force-dynamic";
 export const fetchCache = "force-no-store";
 
-const API_KEY = process.env.AI_V2_API_KEY || process.env.API_SECRET_KEY || "";
+const API_KEY = process.env.SLACKBOT_API_KEY || "";
 
 function unauthorized(): Response {
   return Response.json({ error: "Unauthorized" }, { status: 401 });

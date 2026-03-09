@@ -1,4 +1,5 @@
 FROM python:3.11-alpine
+RUN apk add --no-cache curl jq bash
 RUN pip install --no-cache-dir starlette uvicorn[standard] python-multipart
 COPY main.py /app/main.py
 COPY --chmod=755 entrypoint.sh /entrypoint.sh

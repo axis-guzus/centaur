@@ -1,31 +1,64 @@
-#!/usr/bin/env sh
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Fetch bootstrap secrets from the firewall's scoped secret proxy
-if [ -n "$SECRET_MANAGER_URL" ]; then
-  MAX_RETRIES=30
-  for key in AUTH_COOKIE_KEY UI_PASSWORD; do
-    eval current=\$$key
-    if [ -n "$current" ]; then continue; fi
+# ---------------------------------------------------------------------------
+# Auth entrypoint — bootstrap secrets from the firewall secret proxy.
+# ---------------------------------------------------------------------------
 
-    RETRY=0
-    while [ $RETRY -lt $MAX_RETRIES ]; do
-      val=$(wget -qO- --timeout=5 "${SECRET_MANAGER_URL}/secrets/${key}" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || true)
-      if [ -n "$val" ]; then
-        export "$key=$val"
-        break
+MAX_RETRIES=30
+RETRY_DELAY=2
+
+fetch_secret() {
+  local key="$1"
+  curl -fsS --max-time 5 "${SECRET_MANAGER_URL}/secrets/${key}" \
+    | jq -er '.value | select(type == "string" and length > 0)'
+}
+
+bootstrap_required_secrets() {
+  local missing=()
+  local key val attempt
+
+  for key in "$@"; do
+    [[ -n "${!key:-}" ]] || missing+=("$key")
+  done
+
+  (( ${#missing[@]} == 0 )) && return 0
+
+  if [[ -z "${SECRET_MANAGER_URL:-}" ]]; then
+    echo "FATAL: missing required secrets and SECRET_MANAGER_URL is not set: ${missing[*]}" >&2
+    return 1
+  fi
+
+  for attempt in $(seq 1 "$MAX_RETRIES"); do
+    local next_missing=()
+
+    for key in "${missing[@]}"; do
+      [[ -n "${!key:-}" ]] && continue
+
+      if val="$(fetch_secret "$key")"; then
+        printf -v "$key" '%s' "$val"
+        export "$key"
+      else
+        next_missing+=("$key")
       fi
-      RETRY=$((RETRY + 1))
-      echo "Waiting for ${key}... (attempt $RETRY/$MAX_RETRIES)"
-      sleep 2
     done
 
-    eval current=\$$key
-    if [ -z "$current" ]; then
-      echo "FATAL: Could not resolve ${key} from secret proxy" >&2
-      exit 1
+    if (( ${#next_missing[@]} == 0 )); then
+      return 0
     fi
+
+    echo "Waiting for secrets (${attempt}/${MAX_RETRIES}): ${next_missing[*]}" >&2
+    sleep "$RETRY_DELAY"
+    missing=("${next_missing[@]}")
   done
-fi
+
+  echo "FATAL: missing required secrets after bootstrap: ${missing[*]}" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
+bootstrap_required_secrets AUTH_COOKIE_KEY UI_PASSWORD
 
 exec "$@"

@@ -1,48 +1,64 @@
-#!/usr/bin/env sh
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Fetch secrets from the secret manager if URL is provided
-if [ -n "$SECRET_MANAGER_URL" ]; then
-  MAX_RETRIES=30
-  RETRY=0
-  while [ $RETRY -lt $MAX_RETRIES ]; do
-    ALL_OK=true
-    for key in SLACK_BOT_TOKEN SLACK_SIGNING_SECRET SLACKBOT_API_KEY DATABASE_URL; do
-      # Skip if already set
-      eval current=\$$key
-      if [ -n "$current" ]; then continue; fi
+# ---------------------------------------------------------------------------
+# Slackbot entrypoint — bootstrap secrets from the firewall secret proxy.
+# ---------------------------------------------------------------------------
 
-      val=$(curl -sf --max-time 5 "${SECRET_MANAGER_URL}/secrets/${key}" | node -e "
-        let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
-          try{process.stdout.write(JSON.parse(d).value||'')}catch{}
-        })" 2>/dev/null || true)
-      if [ -n "$val" ]; then
-        export "$key=$val"
+MAX_RETRIES=30
+RETRY_DELAY=2
+
+fetch_secret() {
+  local key="$1"
+  curl -fsS --max-time 5 "${SECRET_MANAGER_URL}/secrets/${key}" \
+    | jq -er '.value | select(type == "string" and length > 0)'
+}
+
+bootstrap_required_secrets() {
+  local missing=()
+  local key val attempt
+
+  for key in "$@"; do
+    [[ -n "${!key:-}" ]] || missing+=("$key")
+  done
+
+  (( ${#missing[@]} == 0 )) && return 0
+
+  if [[ -z "${SECRET_MANAGER_URL:-}" ]]; then
+    echo "FATAL: missing required secrets and SECRET_MANAGER_URL is not set: ${missing[*]}" >&2
+    return 1
+  fi
+
+  for attempt in $(seq 1 "$MAX_RETRIES"); do
+    local next_missing=()
+
+    for key in "${missing[@]}"; do
+      [[ -n "${!key:-}" ]] && continue
+
+      if val="$(fetch_secret "$key")"; then
+        printf -v "$key" '%s' "$val"
+        export "$key"
       else
-        ALL_OK=false
+        next_missing+=("$key")
       fi
     done
-    if [ "$ALL_OK" = true ]; then break; fi
-    RETRY=$((RETRY + 1))
-    echo "Waiting for secrets... (attempt $RETRY/$MAX_RETRIES)"
-    sleep 2
-  done
-  # Slackbot code expects AI_V2_API_KEY — use scoped service key
-  if [ -n "$SLACKBOT_API_KEY" ] && [ -z "$AI_V2_API_KEY" ]; then
-    export AI_V2_API_KEY="$SLACKBOT_API_KEY"
-  fi
 
-  MISSING_KEYS=""
-  for required in SLACK_BOT_TOKEN SLACK_SIGNING_SECRET SLACKBOT_API_KEY; do
-    eval current=\$$required
-    if [ -z "$current" ]; then
-      MISSING_KEYS="${MISSING_KEYS} ${required}"
+    if (( ${#next_missing[@]} == 0 )); then
+      return 0
     fi
+
+    echo "Waiting for secrets (${attempt}/${MAX_RETRIES}): ${next_missing[*]}" >&2
+    sleep "$RETRY_DELAY"
+    missing=("${next_missing[@]}")
   done
-  if [ -n "$MISSING_KEYS" ]; then
-    echo "Missing required secrets after bootstrap retries:${MISSING_KEYS}" >&2
-    exit 1
-  fi
-fi
+
+  echo "FATAL: missing required secrets after bootstrap: ${missing[*]}" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
+bootstrap_required_secrets SLACK_BOT_TOKEN SLACK_SIGNING_SECRET SLACKBOT_API_KEY DATABASE_URL
 
 exec node server.js
