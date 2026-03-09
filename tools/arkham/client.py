@@ -51,15 +51,12 @@ class ArkhamClient:
 
     def health(self) -> dict:
         """Check API health."""
-        api_key = self._get_api_key()
-        if not api_key:
-            raise RuntimeError("ARKHAM_API_KEY not set.")
         url = f"{self.base_url}/health"
-        headers = {"API-Key": api_key}
-        resp = self.client.get(url, headers=headers)
+        resp = self.client.get(url)
         resp.raise_for_status()
-        if not resp.text.strip():
-            return {"status": "ok", "code": resp.status_code}
+        body = resp.text.strip()
+        if not body or resp.headers.get("content-type", "").startswith("text/"):
+            return {"status": body or "ok", "code": resp.status_code}
         return resp.json()
 
     def chains(self) -> list:
