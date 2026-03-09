@@ -71,6 +71,7 @@ log.setLevel(logging.INFO)
 log.propagate = False
 
 SECRET_MANAGER_URL = os.environ.get("SECRET_MANAGER_URL", "http://secrets:8100")
+SECRET_MANAGER_TOKEN = os.environ.get("SECRET_MANAGER_TOKEN", "")
 CACHE_TTL = int(os.environ.get("FIREWALL_CACHE_TTL", "30"))
 HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8081"))
 KEYS_REFRESH_INTERVAL = int(os.environ.get("KEYS_REFRESH_INTERVAL", "60"))
@@ -260,6 +261,7 @@ class CredentialInjector:
         # Rate limiting: source_ip → list of timestamps
         self._rate_tracker: dict[str, list[float]] = {}
         self._rate_lock = threading.Lock()
+        self._rate_last_prune = time.monotonic()
         # Reverse secret map for response scanning: secret_value → key_name
         self._reverse_secrets: dict[str, str] = {}
         self._reverse_lock = threading.Lock()
@@ -320,11 +322,18 @@ class CredentialInjector:
 
         threading.Thread(target=loop, daemon=True).start()
 
+    def _sm_request(self, path: str, timeout: int = 5) -> bytes:
+        """Make an authenticated request to the secret manager."""
+        url = f"{SECRET_MANAGER_URL}{path}"
+        req = urllib.request.Request(url)
+        if SECRET_MANAGER_TOKEN:
+            req.add_header("Authorization", f"Bearer {SECRET_MANAGER_TOKEN}")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+
     def _refresh_keys(self) -> None:
         try:
-            url = f"{SECRET_MANAGER_URL}/keys"
-            with urllib.request.urlopen(url, timeout=5) as resp:
-                data = json.loads(resp.read().decode())
+            data = json.loads(self._sm_request("/keys").decode())
             keys = set(data.get("keys", []))
             canonicalize_google_key = False
             if {"GOOGLE_API_KEY", "GEMINI_API_KEY"}.issubset(keys):
@@ -363,9 +372,8 @@ class CredentialInjector:
                 return cached[0]
 
         try:
-            url = f"{SECRET_MANAGER_URL}/secrets/{urllib.parse.quote(key, safe='')}"
-            with urllib.request.urlopen(url, timeout=3) as resp:
-                val = json.loads(resp.read().decode()).get("value")
+            raw = self._sm_request(f"/secrets/{urllib.parse.quote(key, safe='')}", timeout=3)
+            val = json.loads(raw.decode()).get("value")
         except Exception:
             val = None
 
@@ -556,11 +564,24 @@ class CredentialInjector:
     # Rate limiting (sliding window per source IP)
     # ------------------------------------------------------------------
 
+    _RATE_PRUNE_INTERVAL = 300  # prune stale IPs every 5 min
+
     def _check_rate_limit(self, flow: http.HTTPFlow) -> bool:
         """Return True and set 429 response if source exceeds rate limit."""
         source_ip = flow.client_conn.peername[0] if flow.client_conn.peername else "unknown"
         now = time.monotonic()
         with self._rate_lock:
+            # Periodically prune IPs with no recent activity
+            if now - self._rate_last_prune > self._RATE_PRUNE_INTERVAL:
+                cutoff_prune = now - RATE_WINDOW
+                stale = [
+                    ip for ip, ts in self._rate_tracker.items()
+                    if not ts or ts[-1] < cutoff_prune
+                ]
+                for ip in stale:
+                    del self._rate_tracker[ip]
+                self._rate_last_prune = now
+
             timestamps = self._rate_tracker.get(source_ip, [])
             cutoff = now - RATE_WINDOW
             timestamps = [t for t in timestamps if t > cutoff]

@@ -13,6 +13,7 @@ import docker
 import structlog
 from docker.errors import NotFound
 
+from api.deps import mint_sandbox_token
 from api.sandbox.base import SandboxBackend, SandboxSession
 from shared.tool_sdk import _sm_read
 
@@ -58,12 +59,21 @@ def _sm_list_keys() -> list[str]:
     return []
 
 
-def _container_env() -> list[str]:
+def _container_env(thread_key: str, container_name: str) -> list[str]:
     """Build env vars for sandbox containers."""
     local_dev = os.getenv("AGENT_LOCAL_DEV", "").lower() in ("1", "true")
+
+    # Mint a scoped, time-limited sandbox token instead of the root API key.
+    try:
+        api_key = mint_sandbox_token(thread_key, container_name)
+    except Exception:
+        # Fallback to root key if minting fails (e.g. API_SECRET_KEY not configured)
+        log.warning("sandbox_token_mint_failed, falling back to root key", thread_key=thread_key)
+        api_key = _fetch_secret("API_SECRET_KEY")
+
     env = [
         f"AI_V2_API_URL={os.getenv('AGENT_API_URL', 'http://api:8000')}",
-        f"AI_V2_API_KEY={_fetch_secret('API_SECRET_KEY')}",
+        f"AI_V2_API_KEY={api_key}",
     ]
 
     if local_dev:
@@ -153,10 +163,10 @@ class DockerSandboxBackend(SandboxBackend):
         warm: bool = False,
     ) -> SandboxSession:
         client = _docker_client()
-        env = _container_env()
         repos_dir = os.path.abspath(_repos_host_dir())
 
         container_name = f"pipe-{thread_key.replace(':', '-').replace('.', '-')[:40]}"
+        env = _container_env(thread_key, container_name)
 
         # Remove stale container with same name
         with contextlib.suppress(Exception):
