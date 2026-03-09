@@ -14,8 +14,10 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tempo -d ai_v2"]
       interval: 5s
-      timeout: 5s
+      timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
 
   redis:
     image: redis:7-alpine
@@ -26,8 +28,10 @@ services:
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
-      timeout: 5s
+      timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
 
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
@@ -43,6 +47,13 @@ services:
       - default
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:2375/version"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+      start_interval: 1s
     restart: unless-stopped
 
   # ⚠️  NEVER manually recreate this container — it requires OP_SERVICE_ACCOUNT_TOKEN
@@ -62,9 +73,10 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8100/health"]
       interval: 5s
-      timeout: 5s
+      timeout: 3s
       retries: 10
-      start_period: 30s
+      start_period: 15s
+      start_interval: 2s
     restart: unless-stopped
 
   firewall:
@@ -85,7 +97,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-      start_period: 10s
+      start_period: 5s
+      start_interval: 1s
     depends_on:
       secrets:
         condition: service_healthy
@@ -112,6 +125,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 5s
+      start_interval: 1s
     restart: unless-stopped
 
   api:
@@ -153,15 +168,16 @@ services:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health/ready"]
       interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 30s
+      retries: 5
+      start_period: 15s
+      start_interval: 2s
     depends_on:
       pgbouncer:
         condition: service_healthy
       firewall:
         condition: service_healthy
       docker-socket-proxy:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   slackbot:
@@ -249,8 +265,10 @@ services:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
     depends_on:
-      - prometheus
-      - victorialogs
+      prometheus:
+        condition: service_healthy
+      victorialogs:
+        condition: service_healthy
     networks:
       - default
       - obs_net
@@ -264,6 +282,13 @@ services:
     networks:
       - default
       - obs_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
     restart: unless-stopped
 
   victorialogs:
@@ -276,6 +301,13 @@ services:
     networks:
       - default
       - obs_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9428/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
     restart: unless-stopped
 
   promtail:
@@ -284,7 +316,8 @@ services:
       - ./monitoring/promtail.yml:/etc/promtail/config.yml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
-      - victorialogs
+      victorialogs:
+        condition: service_healthy
     networks:
       - default
       - obs_net
