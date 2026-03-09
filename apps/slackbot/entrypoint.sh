@@ -7,7 +7,7 @@ if [ -n "$SECRET_MANAGER_URL" ]; then
   RETRY=0
   while [ $RETRY -lt $MAX_RETRIES ]; do
     ALL_OK=true
-    for key in SLACK_BOT_TOKEN SLACK_SIGNING_SECRET API_SECRET_KEY; do
+    for key in SLACK_BOT_TOKEN SLACK_SIGNING_SECRET SLACKBOT_API_KEY DATABASE_URL; do
       # Skip if already set
       eval current=\$$key
       if [ -n "$current" ]; then continue; fi
@@ -27,13 +27,13 @@ if [ -n "$SECRET_MANAGER_URL" ]; then
     echo "Waiting for secrets... (attempt $RETRY/$MAX_RETRIES)"
     sleep 2
   done
-  # Slackbot code expects AI_V2_API_KEY
-  if [ -n "$API_SECRET_KEY" ] && [ -z "$AI_V2_API_KEY" ]; then
-    export AI_V2_API_KEY="$API_SECRET_KEY"
+  # Slackbot code expects AI_V2_API_KEY — use scoped service key
+  if [ -n "$SLACKBOT_API_KEY" ] && [ -z "$AI_V2_API_KEY" ]; then
+    export AI_V2_API_KEY="$SLACKBOT_API_KEY"
   fi
 
   MISSING_KEYS=""
-  for required in SLACK_BOT_TOKEN SLACK_SIGNING_SECRET API_SECRET_KEY; do
+  for required in SLACK_BOT_TOKEN SLACK_SIGNING_SECRET SLACKBOT_API_KEY; do
     eval current=\$$required
     if [ -z "$current" ]; then
       MISSING_KEYS="${MISSING_KEYS} ${required}"

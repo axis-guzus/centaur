@@ -172,6 +172,67 @@ async def list_keys(pool: asyncpg.Pool) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Per-service bootstrap keys
+# ---------------------------------------------------------------------------
+
+SERVICE_KEYS: dict[str, dict] = {
+    "slackbot": {
+        "secret_name": "SLACKBOT_API_KEY",
+        "scopes": ["agent:execute", "agent:status", "agent:stop", "threads:read", "tools:*"],
+    },
+    "web": {
+        "secret_name": "WEB_API_KEY",
+        "scopes": ["threads:read", "agent:status"],
+    },
+}
+
+
+async def ensure_service_keys(pool: asyncpg.Pool) -> dict[str, str]:
+    """Ensure per-service API keys exist in the database.
+
+    Returns a dict of {service_name: "created" | "exists"} for logging.
+    Newly created keys are logged once for the operator to store in 1Password.
+    """
+    result: dict[str, str] = {}
+    for service_name, config in SERVICE_KEYS.items():
+        existing = await pool.fetchrow(
+            "SELECT id FROM api_keys WHERE name = $1 AND revoked_at IS NULL",
+            service_name,
+        )
+        if existing:
+            result[service_name] = "exists"
+            continue
+
+        raw_key = f"aiv2_{service_name}_{secrets.token_urlsafe(_KEY_BYTES)}"
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        key_prefix = raw_key[:_KEY_PREFIX_LEN]
+
+        await pool.execute(
+            "INSERT INTO api_keys (name, key_prefix, key_hash, scopes, created_by) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            service_name,
+            key_prefix,
+            key_hash,
+            config["scopes"],
+            "system:bootstrap",
+        )
+        # Invalidate cache so the new key is immediately usable
+        with _cache.lock:
+            _cache.expires_at = 0.0
+
+        result[service_name] = "created"
+        log.warning(
+            "service_key_created",
+            service=service_name,
+            secret_name=config["secret_name"],
+            key_prefix=key_prefix,
+            instruction=f"Store this key in 1Password as '{config['secret_name']}': {raw_key}",
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Scope checking
 # ---------------------------------------------------------------------------
 

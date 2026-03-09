@@ -54,20 +54,20 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 _PASSWORD = os.environ.get("UI_PASSWORD", "")
-_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
+_COOKIE_KEY = os.environ.get("AUTH_COOKIE_KEY", "")
 _COOKIE_NAME = "paradigm_ui_session"
 _COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 _COOKIE_SECURE = os.environ.get("AUTH_COOKIE_INSECURE", "") != "1"
 
-if not _SECRET_KEY and _PASSWORD:
-    log.critical("API_SECRET_KEY is required when UI_PASSWORD is set", extra={"event": "startup_misconfig"})
+if not _COOKIE_KEY and _PASSWORD:
+    log.critical("AUTH_COOKIE_KEY is required when UI_PASSWORD is set", extra={"event": "startup_misconfig"})
     sys.exit(1)
 
 
 def _make_token() -> str:
     if not _PASSWORD:
         return ""
-    return hmac.new(_SECRET_KEY.encode(), _PASSWORD.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(_COOKIE_KEY.encode(), _PASSWORD.encode(), hashlib.sha256).hexdigest()
 
 
 def _check_auth(request: Request) -> bool:
@@ -76,14 +76,8 @@ def _check_auth(request: Request) -> bool:
         # Never allow unauthenticated access.
         return False
 
-    # Check Bearer token first (API_SECRET_KEY)
-    auth_header = request.headers.get("authorization", "")
-    if auth_header.startswith("Bearer ") and _SECRET_KEY:
-        bearer = auth_header[7:]
-        if secrets.compare_digest(bearer, _SECRET_KEY):
-            return True
-
-    # Fall back to session cookie
+    # Session cookie validation only — no Bearer token check.
+    # Bearer auth is handled by the API's own verify_api_key dependency.
     token = request.cookies.get(_COOKIE_NAME, "")
     if not token:
         return False

@@ -10,6 +10,33 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# Resolve bootstrap secrets from the firewall's scoped secret proxy
+# ---------------------------------------------------------------------------
+if [[ -n "${SECRET_MANAGER_URL:-}" ]]; then
+    for key in DATABASE_URL API_SECRET_KEY SLACK_SIGNING_SECRET; do
+        # Skip if already set
+        eval "current=\${${key}:-}"
+        if [[ -n "$current" ]]; then continue; fi
+
+        for i in $(seq 1 30); do
+            val=$(curl -sf --max-time 5 "${SECRET_MANAGER_URL}/secrets/${key}" | jq -r '.value // empty' 2>/dev/null || true)
+            if [[ -n "$val" ]]; then
+                export "$key=$val"
+                break
+            fi
+            echo "Waiting for ${key}... (attempt $i/30)"
+            sleep 2
+        done
+
+        eval "current=\${${key}:-}"
+        if [[ -z "$current" ]]; then
+            echo "FATAL: Could not resolve ${key} from secret proxy" >&2
+            exit 1
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
 # Canonical env aliases
 # Keep app code stable on canonical names while allowing legacy/box-specific
 # variable names from .env or 1Password item titles.

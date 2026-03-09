@@ -24,11 +24,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       SECRET_MANAGER_TOKEN: ${{ secrets.SECRET_MANAGER_TOKEN }}
-      API_SECRET_KEY: ${{ secrets.API_SECRET_KEY }}
-      SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
-      UI_PASSWORD: ${{ secrets.UI_PASSWORD }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
     defaults:
       run:
         working-directory: /home/ubuntu/github/paradigmxyz/ai_v2
@@ -84,13 +80,8 @@ jobs:
       - name: Verify tools loaded
         continue-on-error: true
         run: |
-          if [ -z "${API_SECRET_KEY:-}" ]; then
-            echo "::warning::Skipping tool health verification: API_SECRET_KEY not configured"
-            exit 0
-          fi
-
-          TOOLS_HEALTH_JSON=$(curl -sf http://localhost:8000/health/tools \
-            -H "Authorization: Bearer $API_SECRET_KEY")
+          # /health/tools is accessible from localhost without auth
+          TOOLS_HEALTH_JSON=$(curl -sf http://localhost:8000/health/tools || echo '{}')
           export TOOLS_HEALTH_JSON
 
           FAILED_COUNT=$(python3 -c 'import json, os; print(json.loads(os.environ["TOOLS_HEALTH_JSON"]).get("summary", {}).get("failed_count", 0))')

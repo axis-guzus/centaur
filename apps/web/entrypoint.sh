@@ -7,7 +7,7 @@ if [ -n "$SECRET_MANAGER_URL" ]; then
   RETRY=0
   while [ $RETRY -lt $MAX_RETRIES ]; do
     ALL_OK=true
-    for key in API_SECRET_KEY; do
+    for key in WEB_API_KEY DATABASE_URL; do
       eval current=\$$key
       if [ -n "$current" ]; then continue; fi
 
@@ -26,8 +26,9 @@ if [ -n "$SECRET_MANAGER_URL" ]; then
     echo "Waiting for secrets... (attempt $RETRY/$MAX_RETRIES)"
     sleep 2
   done
-  if [ -n "$API_SECRET_KEY" ] && [ -z "$AI_V2_API_KEY" ]; then
-    export AI_V2_API_KEY="$API_SECRET_KEY"
+  # Web code expects AI_V2_API_KEY — use scoped service key
+  if [ -n "$WEB_API_KEY" ] && [ -z "$AI_V2_API_KEY" ]; then
+    export AI_V2_API_KEY="$WEB_API_KEY"
   fi
 fi
 

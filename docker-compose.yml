@@ -92,17 +92,20 @@ services:
     restart: unless-stopped
 
   pgbouncer:
-    image: edoburu/pgbouncer:latest
+    build: services/pgbouncer
     environment:
-      DATABASE_URL: postgresql://tempo:tempo_dev@postgres:5432/ai_v2
+      SECRET_MANAGER_URL: http://firewall:8081
       AUTH_TYPE: scram-sha-256
       POOL_MODE: transaction
       MAX_CLIENT_CONN: 200
       DEFAULT_POOL_SIZE: 25
     networks:
+      - control_net
       - data_net
     depends_on:
       postgres:
+        condition: service_healthy
+      firewall:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "pg_isready", "-h", "localhost", "-p", "5432"]
@@ -117,7 +120,7 @@ services:
       - path: .env
         required: false
     environment:
-      DATABASE_URL: postgresql://tempo:tempo_dev@pgbouncer:5432/ai_v2
+      SECRET_MANAGER_URL: http://firewall:8081
       SLACKBOT_URL: http://slackbot:3001
       AI_V2_LOG_LEVEL: info
       REPOS_HOST_DIR: ${HOME}/github
@@ -129,8 +132,6 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: /gcloud/adc.json
       NGINX_TRUSTED_CIDRS: "172.16.0.0/12"
       DOCKER_HOST: tcp://docker-socket-proxy:2375
-      API_SECRET_KEY: ${API_SECRET_KEY:-}
-      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
       HTTPS_PROXY: http://firewall:8080
       REQUESTS_CA_BUNDLE: /firewall-certs/ca-cert.pem
       SSL_CERT_FILE: /firewall-certs/ca-cert.pem
@@ -169,11 +170,10 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       AI_V2_API_URL: http://api:8000
-      DATABASE_URL: postgresql://tempo:tempo_dev@pgbouncer:5432/ai_v2
-      SLACK_BOT_TOKEN: SLACK_BOT_TOKEN
+      SECRET_MANAGER_URL: http://firewall:8081
       HTTPS_PROXY: http://firewall:8080
       NODE_EXTRA_CA_CERTS: /firewall-certs/ca-cert.pem
-      NO_PROXY: localhost,127.0.0.1,postgres,pgbouncer,redis,api,auth,nginx
+      NO_PROXY: localhost,127.0.0.1,postgres,pgbouncer,redis,api,auth,nginx,firewall
     volumes:
       - firewall-certs:/firewall-certs:ro
     networks:
@@ -193,7 +193,7 @@ services:
       context: apps/web
     environment:
       AI_V2_API_URL: http://api:8000
-      DATABASE_URL: postgresql://tempo:tempo_dev@pgbouncer:5432/ai_v2
+      SECRET_MANAGER_URL: http://firewall:8081
     ports:
       - "127.0.0.1:3001:3001"
     networks:
@@ -208,10 +208,12 @@ services:
   auth:
     build: services/auth
     environment:
-      API_SECRET_KEY: ${API_SECRET_KEY:-}
-      UI_PASSWORD: ${UI_PASSWORD:-}
+      SECRET_MANAGER_URL: http://firewall:8081
     networks:
       - default
+    depends_on:
+      firewall:
+        condition: service_healthy
     restart: unless-stopped
 
   nginx:

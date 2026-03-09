@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from api.api_keys import ensure_service_keys
 from api.pipe_agent import recover_sessions
 from api.routers import admin, health, internal
 from api.routers import pipe_agent as pipe_router_mod
@@ -112,6 +113,8 @@ async def _watch_tools(pm: ToolManager) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.db_pool = await create_pool(settings.database_url)
+    svc_keys_result = await ensure_service_keys(app.state.db_pool)
+    log.info("service_keys_ensured", **svc_keys_result)
     _warm_tool_caches()
     result = await recover_sessions()
     log.info("pipe_sessions_recovered", **result)
