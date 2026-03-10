@@ -31,9 +31,9 @@ export async function GET() {
     const pool = getPool();
     const { rows } = await pool.query(`
       SELECT
-        thread_key,
-        MIN(created_at) AS created_at,
-        MAX(created_at) AS message_last_activity,
+        cm.thread_key,
+        MIN(cm.created_at) AS created_at,
+        MAX(cm.created_at) AS message_last_activity,
         COUNT(*)::int AS message_count,
         (SELECT parts FROM chat_messages cm2
          WHERE cm2.thread_key = cm.thread_key AND cm2.role = 'user'
@@ -60,8 +60,11 @@ export async function GET() {
         MAX(s.last_activity) AS session_last_activity
       FROM chat_messages cm
       LEFT JOIN agent_sessions s ON s.slack_thread_key = cm.thread_key
-      GROUP BY thread_key
-      ORDER BY GREATEST(MAX(created_at), COALESCE(MAX(s.last_activity), MAX(created_at))) DESC
+      GROUP BY cm.thread_key
+      ORDER BY GREATEST(
+        MAX(cm.created_at),
+        COALESCE(MAX(s.last_activity), MAX(cm.created_at))
+      ) DESC
       LIMIT 200
     `);
 

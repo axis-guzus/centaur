@@ -46,8 +46,8 @@ export async function GET(request: Request) {
     const pool = getPool();
     const { rows } = await pool.query(
         `SELECT
-          MIN(created_at) AS created_at,
-          MAX(created_at) AS message_last_activity,
+          MIN(cm.created_at) AS created_at,
+          MAX(cm.created_at) AS message_last_activity,
           COUNT(*)::int AS message_count,
           (SELECT parts FROM chat_messages cm2
            WHERE cm2.thread_key = $1 AND cm2.role = 'user'
@@ -74,9 +74,9 @@ export async function GET(request: Request) {
           MAX(s.state) AS session_state,
           MAX(s.thread_name) AS session_thread_name,
           MAX(s.last_activity) AS session_last_activity
-        FROM chat_messages
-        LEFT JOIN agent_sessions s ON s.slack_thread_key = thread_key
-        WHERE thread_key = $1`,
+        FROM chat_messages cm
+        LEFT JOIN agent_sessions s ON s.slack_thread_key = cm.thread_key
+        WHERE cm.thread_key = $1`,
         [key],
       );
 
