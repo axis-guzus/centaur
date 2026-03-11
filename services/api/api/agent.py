@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import queue
 import threading
 import time
@@ -25,31 +24,6 @@ from api.sandbox.registry import get_backend
 log = structlog.get_logger()
 
 _ENGINE_HARNESSES = {"amp", "claude-code", "codex", "pi-mono"}
-_PERSONA_PROFILES: dict[str, dict[str, str]] = {
-    "eng": {
-        "engine": "amp",
-        "persona": "eng",
-        "repo": os.getenv("ENGINEER_DEFAULT_REPO", "paradigmxyz/ai_v2"),
-    },
-    "engineer": {
-        "engine": "amp",
-        "persona": "eng",
-        "repo": os.getenv("ENGINEER_DEFAULT_REPO", "paradigmxyz/ai_v2"),
-    },
-    "legal": {
-        "engine": "amp",
-        "persona": "legal",
-    },
-    "invest": {
-        "engine": "amp",
-        "persona": "invest",
-        "repo": os.getenv("INVEST_DEFAULT_REPO", "paradigmxyz/ai_v2"),
-    },
-    "events": {
-        "engine": "amp",
-        "persona": "events",
-    },
-}
 
 # ── Process-local runtime state (ephemeral: queues, locks, sockets) ──────────
 
@@ -158,18 +132,20 @@ def _resolve_harness_profile(
     harness: str,
     engine_override: str | None = None,
 ) -> tuple[str, str | None, str | None]:
+    from api.app import get_tool_manager
+
     normalized = (harness or "").strip() or "amp"
     normalized_engine_override = (engine_override or "").strip() or None
     if normalized_engine_override and normalized_engine_override not in _ENGINE_HARNESSES:
         raise ValueError(f"Unknown engine override: {normalized_engine_override}")
     if normalized in _ENGINE_HARNESSES:
         return normalized_engine_override or normalized, None, None
-    profile = _PERSONA_PROFILES.get(normalized)
-    if profile:
+    persona_info = get_tool_manager().get_persona(normalized)
+    if persona_info:
         return (
-            normalized_engine_override or profile["engine"],
-            profile.get("persona"),
-            profile.get("repo"),
+            normalized_engine_override or persona_info.engine,
+            persona_info.name,
+            persona_info.default_repo,
         )
     return normalized_engine_override or "amp", None, None
 
