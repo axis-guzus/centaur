@@ -44,8 +44,6 @@ SECRET_MANAGER_TOKEN = os.environ.get("SECRET_MANAGER_TOKEN", "")
 CACHE_TTL = int(os.environ.get("FIREWALL_CACHE_TTL", "30"))
 HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8081"))
 KEYS_REFRESH_INTERVAL = int(os.environ.get("KEYS_REFRESH_INTERVAL", "60"))
-FIREWALL_API_URL = os.environ.get("FIREWALL_API_URL", "http://api:8000")
-
 _DEFAULT_INJECTION_HOSTS = (
     "api.openai.com,"
     "api.anthropic.com,"
@@ -393,39 +391,6 @@ class CredentialInjector:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
 
-    def _refresh_injection_map(self) -> None:
-        """Fetch the injection map from the API over control_net."""
-        try:
-            url = f"{FIREWALL_API_URL}/internal/injection-map"
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode())
-            new_map: dict[str, set[str]] = {}
-            host_count = 0
-            key_count = 0
-            for host_pattern, key_list in data.items():
-                new_map[host_pattern] = set(key_list)
-                host_count += 1
-                key_count += len(key_list)
-            with self._injection_map_lock:
-                self._injection_map = new_map
-            log.info(
-                "injection_map_refreshed",
-                extra={
-                    "event": "injection_map_refreshed",
-                    "host_count": host_count,
-                    "key_count": key_count,
-                },
-            )
-        except Exception as e:
-            log.warning(
-                "injection_map_refresh_failed",
-                extra={
-                    "event": "injection_map_refresh_failed",
-                    "error": str(e),
-                },
-            )
-
     def _host_matches_pattern(self, host: str, pattern: str) -> bool:
         """Check if a host matches a pattern (supports *.domain.com wildcards)."""
         if pattern == host:
@@ -455,9 +420,6 @@ class CredentialInjector:
         return allowed if matched else None
 
     def _refresh_keys(self) -> None:
-        # Also refresh the injection map from the API
-        self._refresh_injection_map()
-
         try:
             data = json.loads(self._sm_request("/keys").decode())
             keys = set(data.get("keys", []))

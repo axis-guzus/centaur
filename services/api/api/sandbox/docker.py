@@ -37,20 +37,9 @@ def _repos_host_dir() -> str:
     return os.getenv("REPOS_HOST_DIR", os.path.expanduser("~/github"))
 
 
-def _get_injection_key_names() -> list[str]:
-    """Get all secret key names from the tool manager's injection map."""
-    try:
-        from api.app import get_tool_manager
-
-        tm = get_tool_manager()
-        injection_map = tm.build_injection_map()
-        keys: set[str] = set()
-        for key_list in injection_map.values():
-            keys.update(key_list)
-        return sorted(keys)
-    except Exception:
-        log.warning("failed to get injection key names from tool manager")
-        return []
+# Harness CLIs require non-empty API key env vars to initialize.
+# The firewall replaces these stubs with real credentials in-flight.
+_HARNESS_STUB_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AMP_API_KEY")
 
 
 def _container_env(
@@ -76,14 +65,13 @@ def _container_env(
     ]
 
     if local_dev:
-        # In local dev mode, real secrets come from environment
-        for key in _get_injection_key_names():
+        for key in _HARNESS_STUB_KEYS:
             real = os.getenv(key, "").strip()
             if real:
                 env.append(f"{key}={real}")
     else:
         firewall_host = os.getenv("FIREWALL_HOST", "firewall")
-        for key in _get_injection_key_names():
+        for key in _HARNESS_STUB_KEYS:
             env.append(f"{key}={key}")
         env.extend(
             [

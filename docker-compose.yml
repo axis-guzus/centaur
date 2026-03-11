@@ -74,7 +74,7 @@ services:
     environment:
       SECRET_MANAGER_URL: http://secrets:8100
       SECRET_MANAGER_TOKEN: ${SECRET_MANAGER_TOKEN:-}
-      FIREWALL_API_URL: http://api:8000
+
     networks:
       - default
       - secrets_net
