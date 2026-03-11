@@ -18,6 +18,7 @@ import {
 import { buildThreadActionItems } from "@/lib/thread-actions";
 import { threadStateLabel } from "@/lib/status-semantics";
 import type { ThreadDetail, ThreadTokenUsage } from "@/lib/types";
+import { splitThreadKey } from "@centaur/harness-events";
 
 type ThreadInfoSheetProps = {
   open: boolean;
@@ -203,17 +204,15 @@ export function ThreadInfoSheet({
   mobileOnly = true,
 }: ThreadInfoSheetProps) {
   const isDesktop = useMediaQuery("(min-width: 768px)");
-  const keyParts = thread.slack_thread_key.startsWith("slack:")
-    ? thread.slack_thread_key.replace(/^slack:/, "").split(":")
-    : [];
-  const channelId = keyParts[0] ?? "";
-  const threadTs = keyParts[1] ?? "";
-  const slackUrl =
-    channelId && threadTs
-      ? `slack://app_redirect?channel=${encodeURIComponent(
-          channelId,
-        )}&thread_ts=${encodeURIComponent(threadTs)}`
-      : "";
+  let slackUrl = "";
+  if (thread.slack_thread_key.startsWith("slack:")) {
+    try {
+      const { channel, threadTs } = splitThreadKey(thread.slack_thread_key);
+      slackUrl = `slack://app_redirect?channel=${encodeURIComponent(channel)}&thread_ts=${encodeURIComponent(threadTs)}`;
+    } catch {
+      // invalid key format — leave slackUrl empty
+    }
+  }
 
   function copyLink() {
     if (typeof window === "undefined") return;

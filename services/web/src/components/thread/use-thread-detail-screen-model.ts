@@ -15,7 +15,7 @@ import { useElapsed } from "@/hooks/use-elapsed";
 import { useFaviconStatus } from "@/hooks/use-favicon-status";
 import { useStableStatus } from "@/hooks/use-stable-status";
 import { isActiveState, isRunningState } from "@/lib/viewer/thread-ordering";
-import { asList, asRecord, asString } from "@centaur/harness-events";
+import { asList, asRecord, asString, splitThreadKey } from "@centaur/harness-events";
 import { useThreadList } from "@/hooks/use-thread-list";
 import { mergeSubagentStep, subagentSelectionKey } from "@/lib/viewer/subagent-steps";
 import {
@@ -281,9 +281,12 @@ export function useThreadDetailScreenModel(threadKey: string) {
   const retryMessage = latestUserMessage || "Please retry the previous request.";
   const slackDeepLink = useMemo(() => {
     if (!thread?.slack_thread_key?.startsWith("slack:")) return null;
-    const [channel, ts] = thread.slack_thread_key.replace(/^slack:/, "").split(":");
-    if (!channel || !ts) return null;
-    return `slack://app_redirect?channel=${encodeURIComponent(channel)}&thread_ts=${encodeURIComponent(ts)}`;
+    try {
+      const { channel, threadTs } = splitThreadKey(thread.slack_thread_key);
+      return `slack://app_redirect?channel=${encodeURIComponent(channel)}&thread_ts=${encodeURIComponent(threadTs)}`;
+    } catch {
+      return null;
+    }
   }, [thread?.slack_thread_key]);
 
   const {

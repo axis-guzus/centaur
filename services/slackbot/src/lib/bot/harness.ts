@@ -1,7 +1,7 @@
 import { log } from "@/lib/logger";
 import { apiPost, resilientFetch, ApiError, API_URL } from "./api-client";
 import { getPool } from "@/lib/db";
-import { normalizeHarnessEvent, type CanonicalEvent } from "@centaur/harness-events";
+import { normalizeHarnessEvent, normalizeThreadKey, type CanonicalEvent } from "@centaur/harness-events";
 
 export type Engine = "amp" | "claude-code" | "codex" | "pi-mono";
 export type Harness = Engine | "eng" | "legal" | "invest" | "events";
@@ -750,21 +750,7 @@ export async function extractArchiverSlackFiles(
   );
 }
 
-export function splitThreadKey(threadKey: string): { channel: string; threadTs: string } {
-  const parts = threadKey.trim().split(":");
-  if (parts.length === 2 && parts[0] && parts[1]) {
-    return { channel: parts[0], threadTs: parts[1] };
-  }
-  if (parts.length === 3 && parts[1] && parts[2]) {
-    return { channel: parts[1], threadTs: parts[2] };
-  }
-  throw new Error(`Invalid thread key format (expected <channel>:<thread_ts>): ${threadKey}`);
-}
-
-export function normalizeThreadKey(threadKey: string): string {
-  const { channel, threadTs } = splitThreadKey(threadKey);
-  return `${channel}:${threadTs}`;
-}
+export { normalizeThreadKey, splitThreadKey };
 
 export function watchProgress(
   threadKey: string,

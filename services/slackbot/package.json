@@ -10,6 +10,7 @@
     "lint": "eslint src/"
   },
   "dependencies": {
+    "@centaur/api-client": "workspace:*",
     "@centaur/harness-events": "workspace:*",
     "@chat-adapter/slack": "4.19.0",
     "@chat-adapter/state-pg": "4.20.0",
