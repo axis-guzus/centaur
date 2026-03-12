@@ -19,6 +19,7 @@ from typing import Any
 
 import structlog
 
+from api.metrics import record_agent_execution
 from api.sandbox.base import RuntimeState, SandboxSession
 from api.sandbox.registry import get_backend
 
@@ -641,6 +642,7 @@ async def stream_exec(
 ) -> AsyncIterator[str]:
     """Run a command in the sandbox and yield raw stdout lines."""
     await _db_update_state(session.thread_key, "running")
+    started_at = time.monotonic()
     try:
         if attachments:
             await _download_attachments_into_sandbox(session, attachments)
@@ -676,8 +678,18 @@ async def stream_exec(
         # Persist after stream completes (async context — safe to use asyncpg)
         await _persist_turn_messages(session.thread_key, message, result_text, session.harness)
         await _db_update_state(session.thread_key, "error" if stream_failed else "idle")
+        record_agent_execution(
+            harness=session.harness,
+            status="error" if stream_failed else "completed",
+            duration_s=time.monotonic() - started_at,
+        )
     except Exception:
         await _db_update_state(session.thread_key, "error")
+        record_agent_execution(
+            harness=session.harness,
+            status="error",
+            duration_s=time.monotonic() - started_at,
+        )
         raise
 
 
@@ -717,8 +729,13 @@ async def _persist_turn_messages(
                     assistant_text[:60],
                     thread_key,
                 )
-    except Exception:
-        pass  # Best-effort — don't break the stream
+    except Exception as exc:
+        log.warning(
+            "chat_messages_persist_failed",
+            thread_key=thread_key,
+            harness=harness,
+            error=str(exc),
+        )
 
 
 async def stop_session(thread_key: str) -> bool:

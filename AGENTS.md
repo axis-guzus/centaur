@@ -109,7 +109,7 @@ curl -s -X POST http://localhost:8000/agent/execute \
                     ▼
                ┌──────────┐
                │ Postgres  │    pgvector, raw_records JSONB
-               │ + Redis   │    agent_sessions, agent_turns
+               │ + Redis   │    sandbox_sessions, chat_messages
                └──────────┘
 ```
 
@@ -305,10 +305,10 @@ Sandbox containers never see real API keys. The firewall (`services/firewall/add
 
 ### Session Persistence
 
-- **`agent_sessions`** table: tracks container ID, harness, state, thread key
-- **`agent_turns`** table: tracks per-turn user message, events JSONB, result, timing
-- On API restart: `recover_sessions()` reconciles Postgres state with live Docker containers
-- Containers discoverable via Docker labels even if DB is out of sync
+- **`sandbox_sessions`** table: tracks sandbox ID, harness, engine, state, thread key, and thread title
+- **`chat_messages`** table: stores persisted user/assistant messages for the thread viewer and Slackbot surfaces
+- On API restart, sandbox ownership is re-read from `sandbox_sessions`; process-local queues and sockets are rebuilt lazily per sandbox
+- Containers are still discoverable via Docker labels even if DB state needs reconciliation
 
 ## Security Model
 

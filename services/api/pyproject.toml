@@ -20,6 +20,7 @@ dependencies = [
     "docker>=7.0.0",
     "psycopg2-binary>=2.9.11",
     "centaur-sdk",
+    "prometheus-client>=0.24.1",
 ]
 
 [tool.uv]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -15,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.config import settings
 from api.db import close_pool, create_pool
 from api.logging_config import configure_structlog
+from api.metrics import HTTP_REQUESTS_IN_PROGRESS, observe_http_request
 from api.routers import admin, deprecated, health, internal
 from api.routers import agent as agent_router_mod
 from api.tool_manager import ToolManager, load_plugins_config
@@ -102,6 +104,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def instrument_requests(request, call_next):
+    if request.url.path == "/metrics":
+        return await call_next(request)
+
+    start = time.perf_counter()
+    status_code = 500
+    HTTP_REQUESTS_IN_PROGRESS.inc()
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        HTTP_REQUESTS_IN_PROGRESS.dec()
+        route = request.scope.get("route")
+        path = getattr(route, "path", None) or request.url.path
+        observe_http_request(
+            method=request.method,
+            path=path,
+            status=status_code,
+            duration_s=time.perf_counter() - start,
+        )
 
 app.include_router(health.router)
 app.include_router(agent_router_mod.router)

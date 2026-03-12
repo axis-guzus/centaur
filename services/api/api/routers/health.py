@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import Response
 
 from api.deps import verify_operator_api_key
+from api.metrics import CONTENT_TYPE_LATEST, render_metrics
 
 router = APIRouter()
 
@@ -13,6 +15,14 @@ router = APIRouter()
 @router.get("/health/ready")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@router.get("/metrics")
+async def metrics() -> Response:
+    from api.app import app
+
+    payload = await render_metrics(app.state.db_pool)
+    return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
 
 
 @router.get("/health/tools", dependencies=[Depends(verify_operator_api_key)])
