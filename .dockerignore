@@ -38,6 +38,8 @@ services/nginx
 # Docs / non-runtime
 *.md
 !centaur_sdk/README.md
+!services/sandbox/SYSTEM_PROMPT.md
+!.agents/skills/**/*.md
 
 # Environment (secrets)
 .env

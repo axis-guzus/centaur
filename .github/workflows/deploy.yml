@@ -28,7 +28,7 @@ jobs:
           git reset --hard origin/main
 
       - name: Build sandbox image
-        run: docker build -t centaur-agent:latest services/sandbox/
+        run: docker build -t centaur-agent:latest -f services/sandbox/Dockerfile .
 
       - name: Deploy
         run: |

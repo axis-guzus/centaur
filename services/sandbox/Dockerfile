@@ -52,8 +52,15 @@ ENV PATH="/home/agent/.foundry/bin:${PATH}"
 # ── Harness CLIs (amp, claude-code, codex, pi-mono) ──────────────────────────
 RUN curl -fsSL https://ampcode.com/install.sh | bash
 USER root
-RUN npm install -g @anthropic-ai/claude-code @openai/codex @mariozechner/pi-coding-agent
+RUN npm install -g @anthropic-ai/claude-code @openai/codex @mariozechner/pi-coding-agent agent-browser
 USER agent
+
+# ── agent-browser (Chromium + system deps for headless browser) ──────────────
+RUN agent-browser install --with-deps
+
+# ── Agent skills (agent-browser + dogfood) ───────────────────────────────────
+RUN npx -y skills add vercel-labs/agent-browser
+COPY --chown=agent:agent .agents/skills/dogfood /home/agent/.agents/skills/dogfood
 
 # ── Agent workspace setup (rarely changes) ──────────────────────────────────
 RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/.pi/agent ~/github ~/workspace \
@@ -64,16 +71,16 @@ RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/.pi/agent ~/github ~/workspace 
     && git config --global user.email "ai@paradigm.xyz"
 
 # ── Stable helpers (change rarely → cached) ──────────────────────────────────
-COPY --chmod=755 call.sh /usr/local/bin/call
-COPY --chmod=755 slack-upload.sh /usr/local/bin/slack-upload
-COPY --chmod=755 md2docx.py /usr/local/bin/md2docx
+COPY --chmod=755 services/sandbox/call.sh /usr/local/bin/call
+COPY --chmod=755 services/sandbox/slack-upload.sh /usr/local/bin/slack-upload
+COPY --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx
 
 # ── Entrypoint + adapter (change sometimes) ─────────────────────────────────
-COPY --chmod=755 entrypoint.sh /entrypoint.sh
-COPY --chown=agent:agent harness_session.py /home/agent/harness_session.py
+COPY --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
+COPY --chown=agent:agent services/sandbox/harness_session.py /home/agent/harness_session.py
 
 # ── System prompt fallback (bind-mounted at runtime; baked-in as safety net) ─
-COPY --chown=agent:agent SYSTEM_PROMPT.md /home/agent/AGENTS.md
+COPY --chown=agent:agent services/sandbox/SYSTEM_PROMPT.md /home/agent/AGENTS.md
 
 WORKDIR /home/agent
 ENTRYPOINT ["/entrypoint.sh"]
