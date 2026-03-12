@@ -21,98 +21,30 @@ jobs:
         working-directory: /home/ubuntu/github/paradigmxyz/centaur
 
     steps:
-      # --- Workspace setup ---
-
-      - name: Clean runner workspace
-        working-directory: ${{ github.workspace }}
-        run: sudo find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Sync canonical dir
+      - name: Sync repo
         run: |
           git fetch origin main
           git reset --hard origin/main
 
-      - name: Ensure external volumes exist
-        run: |
-          docker volume create ai_v2_pgdata 2>/dev/null || true
-          docker volume create ai_v2_grafanadata 2>/dev/null || true
-          docker volume create ai_v2_firewall-certs 2>/dev/null || true
-          docker volume create ai_v2_prometheusdata 2>/dev/null || true
-          docker volume create ai_v2_vldata 2>/dev/null || true
-
-      # --- Deploy ---
-
       - name: Build sandbox image
         run: docker build -t agent2:latest services/sandbox/
 
-      - name: Build all images
-        run: docker compose build
-
-      - name: Deploy secrets
+      - name: Deploy
         run: |
-          # Secrets must be healthy before anything else starts (firewall, pgbouncer,
-          # api, slackbot, web, auth all depend on it transitively).
-          docker compose up -d secrets
-          for i in $(seq 1 90); do
-            FMT='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'
-            STATUS=$(docker inspect --format "$FMT" ai_v2-secrets-1 2>/dev/null || echo "missing")
-            if [ "$STATUS" = "healthy" ]; then
-              echo "Secrets healthy after ${i}s"
-              exit 0
-            fi
-            if [ "$STATUS" = "unhealthy" ]; then
-              echo "Secrets went unhealthy — dumping logs"
-              docker compose logs --tail 50 secrets || true
-              exit 1
-            fi
-            sleep 1
-          done
-          echo "Secrets health check timed out after 90s"
-          docker compose logs --tail 50 secrets || true
-          exit 1
-
-      - name: Deploy all services (except secrets)
-        run: |
-          docker compose up -d --no-build --remove-orphans \
-            postgres docker-socket-proxy firewall pgbouncer api slackbot web auth \
-            nginx grafana prometheus victorialogs alloy
-
-      - name: Restart nginx
-        run: docker compose restart nginx
-
-      # --- Post-deploy health checks ---
+          docker compose build
+          docker compose up -d
 
       - name: Health check
         run: |
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
               echo "API healthy after ${i}s"
               exit 0
             fi
             sleep 1
           done
-          echo "API health check failed after 60s"
+          echo "API health check failed after 90s"
           exit 1
-
-      - name: Verify tools loaded
-        continue-on-error: true
-        run: |
-          TOOLS_HEALTH_JSON=$(curl -sf http://localhost:8000/health/tools || echo '{}')
-          export TOOLS_HEALTH_JSON
-
-          FAILED_COUNT=$(python3 -c 'import json, os; print(json.loads(os.environ["TOOLS_HEALTH_JSON"]).get("summary", {}).get("failed_count", 0))')
-          if [ "$FAILED_COUNT" != "0" ]; then
-            echo "::warning::$FAILED_COUNT tools failed to load. Check /health/tools for details."
-          else
-            echo "All tools loaded successfully"
-          fi
-
-      # --- Notify ---
 
       - name: Notify Slack
         if: always()
