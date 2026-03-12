@@ -284,6 +284,14 @@ function createBot() {
       }
     }
 
+    // Ensure the "Starting…" init step is marked complete before the stream
+    // ends. If no canonical events arrived (e.g. empty response or error before
+    // first event), Slack would otherwise render the stuck in_progress step as
+    // failed (red).
+    if (!tracker.initCompleted) {
+      yield { type: "task_update", id: "init", title: "Started", status: "complete" };
+    }
+
     // Yield the final result as the last streamed chunk so everything
     // appears in a single Slack message instead of a separate follow-up.
     const finalMessage = (tracker.resultText || tracker.lastAssistantText).trim();

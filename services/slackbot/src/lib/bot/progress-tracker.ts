@@ -15,7 +15,7 @@ export class ProgressTracker {
   agentThreadId = "";
   private activeTools = new Map<string, ActiveTool>();
   private _pendingChunks: StreamChunk[] = [];
-  private initCompleted = false;
+  initCompleted = false;
   /** Ordered history of all step entries (grows unbounded but entries are tiny). */
   private stepHistory: HistoryEntry[] = [];
 
