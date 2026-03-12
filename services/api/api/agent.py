@@ -25,6 +25,7 @@ from api.sandbox.registry import get_backend
 log = structlog.get_logger()
 
 _ENGINE_HARNESSES = {"amp", "claude-code", "codex", "pi-mono"}
+_REUSABLE_DB_STATES = {"running", "idle", "error"}
 
 # ── Process-local runtime state (ephemeral: queues, locks, sockets) ──────────
 
@@ -413,13 +414,13 @@ async def get_or_spawn(
     """
     session = await _db_get_session(thread_key)
     if session:
-        if session.db_state == "running":
+        if session.db_state in _REUSABLE_DB_STATES:
             backend = get_backend()
             st = await asyncio.to_thread(backend.status, session)
             if st == "running":
                 _get_runtime(session.sandbox_id)
                 return session
-            # DB says running but container is gone — clean up
+            # DB points at a reusable session but the container is gone — clean up.
             await _db_delete_session(thread_key)
             _drop_runtime(session.sandbox_id)
         else:
@@ -639,33 +640,45 @@ async def stream_exec(
     user_id: str | None = None,
 ) -> AsyncIterator[str]:
     """Run a command in the sandbox and yield raw stdout lines."""
-    if attachments:
-        await _download_attachments_into_sandbox(session, attachments)
+    await _db_update_state(session.thread_key, "running")
+    try:
+        if attachments:
+            await _download_attachments_into_sandbox(session, attachments)
 
-    # Inject session context into the system prompt on first turn
-    rt = _get_runtime(session.sandbox_id)
-    if rt.turn_counter == 0 and (platform or user_id):
-        context = _build_session_context(
-            session.thread_key, platform=platform, user_id=user_id
-        )
-        await asyncio.to_thread(_inject_session_context, session, context)
+        # Inject session context into the system prompt on first turn
+        rt = _get_runtime(session.sandbox_id)
+        if rt.turn_counter == 0 and (platform or user_id):
+            context = _build_session_context(
+                session.thread_key, platform=platform, user_id=user_id
+            )
+            await asyncio.to_thread(_inject_session_context, session, context)
 
-    result_text = ""
-    async for line in _async_stream(_stream_turn, session, message):
-        yield line
-        # Extract result text from turn.done events
-        try:
-            evt = json.loads(line)
-            if evt.get("type") == "turn.done":
-                r = evt.get("result", "")
-                result_text = r if isinstance(r, str) else r.get("text", "") if isinstance(r, dict) else ""
-            elif evt.get("type") == "result" and isinstance(evt.get("text"), str):
-                result_text = evt["text"]
-        except (json.JSONDecodeError, TypeError):
-            pass
+        result_text = ""
+        stream_failed = False
+        async for line in _async_stream(_stream_turn, session, message):
+            yield line
+            # Extract result text from turn.done events
+            try:
+                evt = json.loads(line)
+                if evt.get("type") == "error":
+                    stream_failed = True
+                    result_text = ""
+                elif evt.get("type") == "turn.done":
+                    r = evt.get("result", "")
+                    result_text = (
+                        r if isinstance(r, str) else r.get("text", "") if isinstance(r, dict) else ""
+                    )
+                elif evt.get("type") == "result" and isinstance(evt.get("text"), str):
+                    result_text = evt["text"]
+            except (json.JSONDecodeError, TypeError):
+                pass
 
-    # Persist after stream completes (async context — safe to use asyncpg)
-    await _persist_turn_messages(session.thread_key, message, result_text, session.harness)
+        # Persist after stream completes (async context — safe to use asyncpg)
+        await _persist_turn_messages(session.thread_key, message, result_text, session.harness)
+        await _db_update_state(session.thread_key, "error" if stream_failed else "idle")
+    except Exception:
+        await _db_update_state(session.thread_key, "error")
+        raise
 
 
 async def _persist_turn_messages(

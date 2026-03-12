@@ -326,7 +326,9 @@ async def _get_assigned_sandbox_ids() -> set[str]:
     from api.agent import _get_pool
 
     pool = _get_pool()
-    rows = await pool.fetch("SELECT sandbox_id FROM sandbox_sessions WHERE state = 'running'")
+    rows = await pool.fetch(
+        "SELECT sandbox_id FROM sandbox_sessions WHERE state IN ('running', 'idle', 'error')"
+    )
     return {row["sandbox_id"] for row in rows}
 
 

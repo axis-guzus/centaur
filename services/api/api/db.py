@@ -33,12 +33,20 @@ async def _ensure_schema(pool: asyncpg.Pool) -> None:
                 harness      TEXT NOT NULL DEFAULT 'amp',
                 engine       TEXT NOT NULL DEFAULT 'amp',
                 state        TEXT NOT NULL DEFAULT 'creating'
-                             CHECK (state IN ('creating','running','stopped','gone')),
+                             CHECK (state IN ('creating','running','idle','error','stopped','gone')),
                 config_sent  BOOLEAN NOT NULL DEFAULT FALSE,
                 thread_name  TEXT,
                 started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
+        """)
+        await conn.execute(
+            "ALTER TABLE sandbox_sessions DROP CONSTRAINT IF EXISTS sandbox_sessions_state_check"
+        )
+        await conn.execute("""
+            ALTER TABLE sandbox_sessions
+            ADD CONSTRAINT sandbox_sessions_state_check
+            CHECK (state IN ('creating','running','idle','error','stopped','gone'))
         """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
