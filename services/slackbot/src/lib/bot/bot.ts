@@ -110,15 +110,16 @@ export function getSlackBootstrapState(): { ready: boolean; missingEnvKeys: stri
 }
 
 async function fetchThreadHistory(
-  thread: { allMessages: AsyncIterable<{ author: { isBot: boolean | "unknown"; isMe: boolean; userId: string }; text: string; id: string }> ; id: string },
+  thread: { allMessages: AsyncIterable<{ author: { isBot: boolean | "unknown"; isMe: boolean; userId: string }; text: string; id: string; attachments?: Array<{ url?: string; name?: string; mimeType?: string; fetchData?: () => Promise<Buffer> }> }> ; id: string },
   currentTs?: string,
+  resolveAttachments?: (atts: Array<{ url?: string; name?: string; mimeType?: string; fetchData?: () => Promise<Buffer> }>) => Promise<ContentBlock[]>,
 ): Promise<string> {
   try {
-    const prior: Array<{ userId: string; text: string }> = [];
+    const prior: Array<{ userId: string; text: string; attachments?: Array<{ url?: string; name?: string; mimeType?: string; fetchData?: () => Promise<Buffer> }> }> = [];
     for await (const msg of thread.allMessages) {
       if (msg.author.isBot || msg.author.isMe) continue;
       if (currentTs && msg.id === currentTs) continue;
-      prior.push({ userId: msg.author.userId, text: msg.text });
+      prior.push({ userId: msg.author.userId, text: msg.text, attachments: msg.attachments });
     }
     if (prior.length === 0) return "";
 
@@ -127,14 +128,26 @@ async function fetchThreadHistory(
       return `${user}: ${m.text || "(no text)"}`;
     });
 
-    // Backfill prior messages via POST /agent/messages
+    // Backfill prior messages via POST /agent/messages (including file attachments)
     try {
-      const backfillMessages = prior.map((m) => ({
-        role: "user" as const,
-        parts: [{ type: "text" as const, text: m.text || "(no text)" }],
-        user_id: m.userId || undefined,
-        metadata: { source: "slack_backfill" },
-      }));
+      const backfillMessages = [];
+      for (const m of prior) {
+        const parts: Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string }; name?: string }> = [
+          { type: "text", text: m.text || "(no text)" },
+        ];
+        if (resolveAttachments && m.attachments && m.attachments.length > 0) {
+          const attBlocks = await resolveAttachments(m.attachments);
+          for (const block of attBlocks) {
+            parts.push(block as any);
+          }
+        }
+        backfillMessages.push({
+          role: "user" as const,
+          parts,
+          user_id: m.userId || undefined,
+          metadata: { source: "slack_backfill" },
+        });
+      }
       if (backfillMessages.length > 0) {
         const normalizedKey = normalizeThreadKey(thread.id);
         await postMessages(normalizedKey, backfillMessages);
@@ -456,7 +469,7 @@ function createBot() {
       const instruction = parsed.cleanedText || "hey";
       let threadHistory = "";
       if (isFirstMessage) {
-        threadHistory = await fetchThreadHistory(thread, slackTs);
+        threadHistory = await fetchThreadHistory(thread, slackTs, resolveAttachmentBlocks);
       }
 
       let textMessage = isFirstMessage ? threadHistory + instruction : instruction;
