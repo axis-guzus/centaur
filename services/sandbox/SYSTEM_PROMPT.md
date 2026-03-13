@@ -71,15 +71,6 @@
 |staking overrides → paradigmdb/db_query on "StakingOverride"
 |rules: live APIs=current | BQ views=historical | staking=discover all custodian staking tools
 
-[Fetching web page content]
-|When you need to read a web page that is paywalled, JS-rendered, or otherwise hard to fetch:
-|  1. Use `call websearch get_contents '{"urls":["https://example.com/article"]}'`
-|  2. This uses Exa's cached content index which often has the full text even for paywalled sites
-|  3. For multiple URLs, pass them all in the array: `'{"urls":["url1","url2"]}'`
-|  4. Optional: set max_chars (default 50000) to control response size
-|  5. Falls back to live crawl if the page isn't cached
-|If get_contents returns empty text, try `call websearch search` with the article title as query
-
 [Granola URL routing]
 |When you see a notes.granola.ai URL, do NOT use read_web_page — the content is behind auth.
 |The Granola API cannot resolve share URLs to note IDs. Instead:
