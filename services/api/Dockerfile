@@ -4,6 +4,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl \
     ripgrep fd-find jq yq tree gettext-base \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL -o /usr/local/bin/dbmate "https://github.com/amacneil/dbmate/releases/latest/download/dbmate-linux-${ARCH}" \
+    && chmod +x /usr/local/bin/dbmate \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.7 /uv /uvx /usr/local/bin/
@@ -12,21 +15,14 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
 WORKDIR /app
 
-# 1. Install core dependencies from pyproject metadata.
+# 1. Install core + tool dependencies (changes rarely)
 COPY services/api/pyproject.toml ./
 COPY centaur_sdk/ centaur_sdk/
-# Fix centaur-sdk path for Docker layout (repo root = /app, not ../../)
 RUN sed -i 's|path = "../../centaur_sdk"|path = "centaur_sdk"|' pyproject.toml \
     && rm -f uv.lock
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-install-project --no-dev
 
-# 2. Install project with source
-COPY services/api/api/ api/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev
-
-# 3. Install tool dependencies via bind mount
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=tools,target=/tmp/tools \
     python -c "\
@@ -38,8 +34,12 @@ open('/tmp/pd.txt','w').write('\n'.join(sorted(deps)))" \
     && uv pip install -r /tmp/pd.txt --quiet \
     && rm /tmp/pd.txt
 
-# 4. Copy tool source
+# 2. Copy source (changes often — keep last for fast rebuilds)
+COPY services/api/api/ api/
+COPY services/api/db/ db/
 COPY tools/ tools/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --no-dev --no-build-isolation-package centaur-api
 
 COPY services/api/bootstrap-secrets.sh /app/scripts/bootstrap-secrets.sh
 COPY services/api/entrypoint.sh /entrypoint.sh

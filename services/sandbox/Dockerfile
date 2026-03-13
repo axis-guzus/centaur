@@ -85,8 +85,8 @@ WORKDIR /home/agent
 
 # No RUN instructions after these — all repo-local content at the very end.
 COPY --link --chown=1001:1001 .agents/skills/qa /home/agent/.agents/skills/dogfood
-COPY --link --chown=1001:1001 services/sandbox/harness_session.py /home/agent/harness_session.py
 COPY --link --chown=1001:1001 services/sandbox/SYSTEM_PROMPT.md /home/agent/AGENTS.md
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python3", "/home/agent/harness_session.py"]
+# Default CMD is amp; docker.py overrides via command= for other engines.
+CMD ["amp", "--no-ide", "--no-notifications", "--dangerously-allow-all", "--execute", "--stream-json", "--stream-json-input"]

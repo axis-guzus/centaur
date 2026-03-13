@@ -20,6 +20,13 @@ import structlog
 
 from api.metrics import record_agent_execution
 from api.sandbox.base import RuntimeState, SandboxSession
+from api.sandbox.harness_protocol import (
+    build_user_input,
+    extract_result,
+    extract_thread_id,
+    is_turn_done,
+    messages_to_content_blocks,
+)
 from api.sandbox.registry import get_backend
 
 log = structlog.get_logger()
@@ -117,6 +124,89 @@ async def _db_delete_session(thread_key: str) -> None:
     await pool.execute("DELETE FROM sandbox_sessions WHERE thread_key = $1", thread_key)
 
 
+# ── Flush pipeline helpers ───────────────────────────────────────────────────
+
+
+async def _flush_pending(
+    thread_key: str, last_delivered_id: str | None
+) -> list[dict]:
+    """Fetch messages from chat_messages that haven't been delivered yet.
+
+    If last_delivered_id is NULL, returns ALL messages (full replay).
+    Otherwise returns messages created after the cursor's created_at.
+    """
+    pool = _get_pool()
+    if last_delivered_id is None:
+        rows = await pool.fetch(
+            "SELECT id, role, parts, user_id, metadata, created_at "
+            "FROM chat_messages WHERE thread_key = $1 ORDER BY created_at",
+            thread_key,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT id, role, parts, user_id, metadata, created_at "
+            "FROM chat_messages WHERE thread_key = $1 "
+            "AND created_at > (SELECT created_at FROM chat_messages WHERE id = $2) "
+            "ORDER BY created_at",
+            thread_key,
+            last_delivered_id,
+        )
+    return [dict(r) for r in rows]
+
+
+def _flushed_to_messages(flushed_rows: list[dict]) -> list[dict]:
+    """Convert flushed DB rows into the message format expected by
+    ``messages_to_content_blocks``."""
+    messages = []
+    for row in flushed_rows:
+        parts = row.get("parts", [])
+        if isinstance(parts, str):
+            parts = json.loads(parts)
+        user_id = row.get("user_id")
+        messages.append({
+            "role": row.get("role", "user"),
+            "parts": parts,
+            **({"user_id": user_id} if user_id else {}),
+        })
+    return messages
+
+
+async def _advance_cursor(thread_key: str, last_msg_id: str) -> None:
+    """Advance the session cursor to the last delivered message ID."""
+    pool = _get_pool()
+    await pool.execute(
+        "UPDATE sandbox_sessions SET last_delivered_id = $1, updated_at = NOW() "
+        "WHERE thread_key = $2",
+        last_msg_id,
+        thread_key,
+    )
+
+
+async def _get_last_delivered_id(thread_key: str) -> str | None:
+    """Get the last_delivered_id cursor from sandbox_sessions."""
+    pool = _get_pool()
+    row = await pool.fetchrow(
+        "SELECT last_delivered_id FROM sandbox_sessions WHERE thread_key = $1",
+        thread_key,
+    )
+    return row["last_delivered_id"] if row else None
+
+
+async def _insert_system_message(thread_key: str, platform: str) -> None:
+    """Insert a static system message with platform formatting rules (idempotent)."""
+    pool = _get_pool()
+    msg_id = f"system-{thread_key}-{platform}"
+    context = _build_session_context(thread_key, platform=platform)
+    await pool.execute(
+        "INSERT INTO chat_messages (id, thread_key, role, parts, metadata) "
+        "VALUES ($1, $2, 'system', $3::jsonb, '{}'::jsonb) "
+        "ON CONFLICT (id) DO NOTHING",
+        msg_id,
+        thread_key,
+        json.dumps([{"type": "text", "text": context}]),
+    )
+
+
 # ── Harness / persona resolution ────────────────────────────────────────────
 
 
@@ -200,18 +290,20 @@ def _spawn_sync(
 
 def _stream_turn(
     session: SandboxSession,
-    message: str | list | None = None,
+    message: dict | None = None,
     *,
     logs: bool = False,
     skip_done_count: int = 0,
 ):
     """Stream stdout lines from the sandbox (blocking generator).
 
-    If *message* is provided, sends a turn.start first. Otherwise just
-    reconnects to the running sandbox's stdout (for mid-turn reconnects).
+    If *message* is provided (a harness-native user input dict built via
+    ``build_user_input``), writes it to stdin. Otherwise reconnects to the
+    running sandbox's stdout (for mid-turn reconnects).
 
-    A single reader thread reads stdout and dispatches lines to the active
-    turn's queue. When a new turn starts, the old queue gets a None sentinel.
+    Turn boundaries are detected from harness-native events using
+    ``is_turn_done``. A synthetic ``turn.done`` event is emitted API-side
+    for downstream SSE consumers (slackbot, web).
     """
     backend = get_backend()
     rt = _get_runtime(session.sandbox_id)
@@ -251,14 +343,8 @@ def _stream_turn(
     )
 
     if message is not None:
-        # Build the turn.start payload. When message is a list of Anthropic
-        # content blocks, send as "content"; otherwise send plain "text".
-        if isinstance(message, list):
-            turn_payload = {"type": "turn.start", "turn_id": turn_id, "content": message}
-        else:
-            turn_payload = {"type": "turn.start", "turn_id": turn_id, "text": message}
         try:
-            backend.write_stdin(session, turn_payload)
+            backend.write_stdin(session, message)
         except (BrokenPipeError, OSError) as exc:
             log.warning("stdin_broken_pipe", sandbox=session.sandbox_id[:12], error=str(exc))
             st = backend.status(session)
@@ -271,14 +357,21 @@ def _stream_turn(
             with rt.turn_lock:
                 rt.active_queue = turn_queue
             _ensure_reader(session, force=True)
-            backend.write_stdin(session, turn_payload)
+            backend.write_stdin(session, message)
 
     first_output = False
     done_seen = 0
+    agent_thread_id: str | None = None
+    last_result: str | None = None
     while True:
         line = turn_queue.get()
         if line is None:
             rt.busy = False
+            if message is not None and done_seen == 0:
+                yield json.dumps({
+                    "type": "error",
+                    "message": "Sandbox container exited unexpectedly before completing the turn.",
+                })
             log.info(
                 "turn_done",
                 thread_key=session.thread_key,
@@ -302,14 +395,28 @@ def _stream_turn(
         yield line
         try:
             evt = json.loads(line)
-            if evt.get("type") == "turn.done" and (
-                message is None or evt.get("turn_id") == turn_id
-            ):
+            # Track agent thread ID from init events
+            tid = extract_thread_id(session.engine, evt)
+            if tid:
+                agent_thread_id = tid
+            # Track result text
+            r = extract_result(session.engine, evt)
+            if r is not None:
+                last_result = r
+            # Detect turn completion from harness-native events
+            if is_turn_done(session.engine, evt):
                 done_seen += 1
                 if done_seen <= skip_done_count:
                     continue
                 rt.busy = False
-                rt.last_result = evt.get("result")
+                rt.last_result = last_result
+                # Synthesize turn.done for downstream consumers
+                yield json.dumps({
+                    "type": "turn.done",
+                    "turn_id": turn_id,
+                    "result": last_result or "",
+                    "agent_thread_id": agent_thread_id or "",
+                })
                 log.info(
                     "turn_done",
                     thread_key=session.thread_key,
@@ -533,36 +640,6 @@ def _build_session_context(
     return "\n".join(lines)
 
 
-def _inject_session_context(session: SandboxSession, context: str) -> None:
-    """Append session context to the workspace AGENTS.md inside the sandbox."""
-    import io
-    import tarfile
-
-    backend = get_backend()
-    client = backend._get_client()
-    try:
-        container = client.containers.get(session.sandbox_id)
-    except Exception:
-        return
-
-    # Read existing AGENTS.md, append context, write back via tar
-    exit_code, output = container.exec_run(
-        ["cat", "/home/agent/workspace/AGENTS.md"], user="agent"
-    )
-    existing = output.decode("utf-8", errors="replace") if exit_code == 0 else ""
-    combined = existing.rstrip() + "\n\n---\n\n" + context
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        data = combined.encode("utf-8")
-        info = tarfile.TarInfo(name="AGENTS.md")
-        info.size = len(data)
-        info.mode = 0o644
-        tar.addfile(info, io.BytesIO(data))
-    buf.seek(0)
-    container.put_archive("/home/agent/workspace", buf)
-
-
 async def stream_exec(
     session: SandboxSession,
     message: str | list,
@@ -570,21 +647,47 @@ async def stream_exec(
     platform: str | None = None,
     user_id: str | None = None,
 ) -> AsyncIterator[str]:
-    """Run a command in the sandbox and yield raw stdout lines."""
+    """Run a turn in the sandbox by flushing pending messages from chat_messages.
+
+    The flush pipeline:
+    1. Insert system context message on first turn (idempotent)
+    2. Fetch undelivered messages via _flush_pending
+    3. Flatten into content blocks via messages_to_content_blocks
+    4. Build harness-native input via build_user_input
+    5. Stream the turn and yield stdout lines
+    6. Advance the cursor on completion
+    7. Persist the assistant response
+    """
     await _db_update_state(session.thread_key, "running")
     started_at = time.monotonic()
     try:
-        # Inject session context into the system prompt on first turn
-        rt = _get_runtime(session.sandbox_id)
-        if rt.turn_counter == 0 and (platform or user_id):
-            context = _build_session_context(
-                session.thread_key, platform=platform, user_id=user_id
-            )
-            await asyncio.to_thread(_inject_session_context, session, context)
+        # Insert platform-specific system message into the transcript (idempotent)
+        if platform:
+            await _insert_system_message(session.thread_key, platform)
+
+        # Flush pending messages from chat_messages
+        last_delivered_id = await _get_last_delivered_id(session.thread_key)
+        flushed = await _flush_pending(session.thread_key, last_delivered_id)
+
+        # Build harness-native input
+        if flushed:
+            msgs = _flushed_to_messages(flushed)
+            content_blocks = messages_to_content_blocks(msgs)
+            turn_input = build_user_input(content_blocks)
+            last_flushed_id = flushed[-1]["id"]
+        elif isinstance(message, list):
+            turn_input = build_user_input(message)
+            last_flushed_id = None
+        elif isinstance(message, str) and message:
+            turn_input = build_user_input([{"type": "text", "text": message}])
+            last_flushed_id = None
+        else:
+            turn_input = None
+            last_flushed_id = None
 
         result_text = ""
         stream_failed = False
-        async for line in _async_stream(_stream_turn, session, message):
+        async for line in _async_stream(_stream_turn, session, turn_input):
             yield line
             # Extract result text from turn.done events
             try:
@@ -595,21 +698,19 @@ async def stream_exec(
                 elif evt.get("type") == "turn.done":
                     r = evt.get("result", "")
                     result_text = (
-                        r if isinstance(r, str) else r.get("text", "") if isinstance(r, dict) else ""
+                        r if isinstance(r, str)
+                        else r.get("text", "") if isinstance(r, dict)
+                        else ""
                     )
-                elif evt.get("type") == "result" and isinstance(evt.get("text"), str):
-                    result_text = evt["text"]
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # Persist after stream completes (async context — safe to use asyncpg)
-        # Extract plain text for persistence when message is content blocks
-        persist_text = message
-        if isinstance(message, list):
-            persist_text = " ".join(
-                b.get("text", "") for b in message if b.get("type") == "text"
-            ).strip() or "(multimodal message)"
-        await _persist_turn_messages(session.thread_key, persist_text, result_text, session.harness)
+        # Advance the cursor to the last flushed message
+        if last_flushed_id and not stream_failed:
+            await _advance_cursor(session.thread_key, last_flushed_id)
+
+        # Persist assistant response (user messages already in chat_messages)
+        await _persist_turn_messages(session.thread_key, "", result_text, session.harness)
         await _db_update_state(session.thread_key, "error" if stream_failed else "idle")
         record_agent_execution(
             harness=session.harness,
@@ -629,22 +730,17 @@ async def stream_exec(
 async def _persist_turn_messages(
     thread_key: str, user_text: str, assistant_text: str, harness: str
 ) -> None:
-    """Persist user + assistant messages to chat_messages after a turn completes."""
+    """Persist assistant message to chat_messages after a turn completes.
+
+    User messages are already in the transcript from POST /agent/messages.
+    Only the assistant response needs to be written here.
+    """
     try:
         pool = _get_pool()
         now_ms = int(time.time() * 1000)
-        user_id = f"turn-{thread_key}-{now_ms}"
-        asst_id = f"turn-{thread_key}-{now_ms + 1}"
+        asst_id = f"turn-{thread_key}-{now_ms}"
 
         async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO chat_messages (id, thread_key, role, parts, metadata) "
-                "VALUES ($1, $2, 'user', $3::jsonb, '{}'::jsonb) "
-                "ON CONFLICT (id) DO NOTHING",
-                user_id,
-                thread_key,
-                json.dumps([{"type": "text", "text": user_text}]),
-            )
             if assistant_text:
                 await conn.execute(
                     "INSERT INTO chat_messages (id, thread_key, role, parts, metadata) "
@@ -655,7 +751,6 @@ async def _persist_turn_messages(
                     json.dumps([{"type": "text", "text": assistant_text}]),
                     json.dumps({"harness": harness}),
                 )
-                # Update thread_name on sandbox_sessions
                 await conn.execute(
                     "UPDATE sandbox_sessions SET thread_name = $1, updated_at = NOW() "
                     "WHERE thread_key = $2",
@@ -677,3 +772,56 @@ async def stop_session(thread_key: str) -> bool:
 
 async def get_status(thread_key: str) -> dict[str, Any]:
     return await _get_status_async(thread_key)
+
+
+async def list_undelivered(max_age_s: int = 300) -> list[dict[str, Any]]:
+    """List threads that completed but may not have been delivered.
+
+    Returns sessions in 'idle' state that haven't been updated recently,
+    indicating the result may not have been picked up by a client.
+    """
+    pool = _get_pool()
+    rows = await pool.fetch(
+        "SELECT thread_key, sandbox_id, harness, engine, state, updated_at "
+        "FROM sandbox_sessions "
+        "WHERE state = 'idle' "
+        "AND updated_at < NOW() - make_interval(secs => $1::double precision) "
+        "ORDER BY updated_at DESC "
+        "LIMIT 50",
+        float(max_age_s),
+    )
+    return [
+        {
+            "thread_key": r["thread_key"],
+            "sandbox_id": r["sandbox_id"][:12],
+            "harness": r["harness"],
+            "state": r["state"],
+            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+async def claim_for_delivery(thread_key: str) -> bool:
+    """Atomically claim an idle session for delivery.
+
+    Uses a CAS update (state idle → delivering) so only one caller wins.
+    Returns True if this caller won the race.
+    """
+    pool = _get_pool()
+    result = await pool.execute(
+        "UPDATE sandbox_sessions SET state = 'delivering', updated_at = NOW() "
+        "WHERE thread_key = $1 AND state = 'idle'",
+        thread_key,
+    )
+    return result == "UPDATE 1"
+
+
+async def mark_delivered(thread_key: str) -> None:
+    """Mark a thread as delivered so it won't appear in orphan checks."""
+    pool = _get_pool()
+    await pool.execute(
+        "UPDATE sandbox_sessions SET state = 'idle', updated_at = NOW() "
+        "WHERE thread_key = $1 AND state = 'delivering'",
+        thread_key,
+    )

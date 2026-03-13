@@ -1,0 +1,257 @@
+"""Tests for the attachment extraction and download flow.
+
+Covers:
+1. POST /agent/messages with inline base64 image/document parts
+   → stores binary in attachments table, replaces parts with attachment_ref
+2. GET /agent/attachments?thread_key=... lists stored attachments
+3. GET /agent/attachments/{id}/download returns the raw binary
+4. harness_protocol.messages_to_content_blocks converts attachment_ref
+   into a curl download instruction for the sandbox agent
+"""
+
+from __future__ import annotations
+
+import base64
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+import pytest_asyncio
+
+from api.sandbox.harness_protocol import messages_to_content_blocks
+
+
+# ── Unit: harness_protocol attachment_ref handling ──────────────────────────
+
+
+class TestAttachmentRefConversion:
+    def test_attachment_ref_produces_curl_instruction(self):
+        messages = [{
+            "role": "user",
+            "parts": [
+                {"type": "text", "text": "analyze this"},
+                {"type": "attachment_ref", "id": "att-abc123", "name": "report.pdf", "mime_type": "application/pdf"},
+            ],
+        }]
+        blocks = messages_to_content_blocks(messages)
+        assert len(blocks) == 2
+        assert blocks[0] == {"type": "text", "text": "analyze this"}
+        assert "att-abc123" in blocks[1]["text"]
+        assert "curl" in blocks[1]["text"]
+        assert "report.pdf" in blocks[1]["text"]
+        assert "/agent/attachments/att-abc123/download" in blocks[1]["text"]
+
+    def test_attachment_ref_with_user_attribution(self):
+        messages = [{
+            "role": "user",
+            "user_id": "U123",
+            "parts": [
+                {"type": "text", "text": "check this file"},
+                {"type": "attachment_ref", "id": "att-xyz", "name": "data.csv", "mime_type": "text/csv"},
+            ],
+        }]
+        blocks = messages_to_content_blocks(messages)
+        assert blocks[0]["text"].startswith("<@U123>:")
+        assert "att-xyz" in blocks[1]["text"]
+
+
+# ── Integration: full roundtrip through the API ────────────────────────────
+
+SAMPLE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100  # fake PNG bytes
+SAMPLE_PDF = b"%PDF-1.4 fake content for testing"
+
+
+@pytest.mark.asyncio
+async def test_attachment_roundtrip(client, api_key):
+    """POST message with base64 image → stored in attachments → downloadable."""
+    thread_key = "test:att-roundtrip"
+    b64_png = base64.b64encode(SAMPLE_PNG).decode()
+
+    # 1. Buffer a message with an inline base64 image
+    resp = await client.post(
+        "/agent/messages",
+        json={
+            "thread_key": thread_key,
+            "messages": [{
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": "what is in this image?"},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": b64_png,
+                        },
+                    },
+                ],
+            }],
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["inserted"] == 1
+
+    # 2. List attachments for the thread
+    resp = await client.get(
+        f"/agent/attachments?thread_key={thread_key}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    attachments = resp.json()
+    assert len(attachments) == 1
+    att = attachments[0]
+    assert att["mime_type"] == "image/png"
+    assert att["name"] == "image.png"
+    att_id = att["id"]
+
+    # 3. Download the attachment
+    resp = await client.get(
+        f"/agent/attachments/{att_id}/download",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    assert resp.content == SAMPLE_PNG
+    assert resp.headers["content-type"] == "image/png"
+
+    # 4. Verify chat_messages stores attachment_ref, not the base64 blob
+    resp = await client.get(
+        f"/agent/messages?thread_key={thread_key}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    messages = resp.json()["messages"]
+    assert len(messages) == 1
+    parts = messages[0]["parts"]
+    assert parts[0]["type"] == "text"
+    assert parts[1]["type"] == "attachment_ref"
+    assert parts[1]["id"] == att_id
+    # Confirm no base64 data leaked into chat_messages
+    assert "data" not in parts[1]
+    assert "source" not in parts[1]
+
+
+@pytest.mark.asyncio
+async def test_document_attachment(client, api_key):
+    """POST message with base64 document part → stored and downloadable."""
+    thread_key = "test:att-doc"
+    b64_pdf = base64.b64encode(SAMPLE_PDF).decode()
+
+    resp = await client.post(
+        "/agent/messages",
+        json={
+            "thread_key": thread_key,
+            "messages": [{
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": "summarize this PDF"},
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": b64_pdf,
+                        },
+                    },
+                ],
+            }],
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+
+    resp = await client.get(
+        f"/agent/attachments?thread_key={thread_key}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    attachments = resp.json()
+    assert len(attachments) == 1
+    assert attachments[0]["mime_type"] == "application/pdf"
+
+    resp = await client.get(
+        f"/agent/attachments/{attachments[0]['id']}/download",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.content == SAMPLE_PDF
+
+
+@pytest.mark.asyncio
+async def test_text_only_message_no_attachments(client, api_key):
+    """Text-only messages pass through without creating attachments."""
+    thread_key = "test:att-textonly"
+
+    resp = await client.post(
+        "/agent/messages",
+        json={
+            "thread_key": thread_key,
+            "messages": [{
+                "role": "user",
+                "parts": [{"type": "text", "text": "just plain text"}],
+            }],
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+
+    resp = await client.get(
+        f"/agent/attachments?thread_key={thread_key}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_attachments_and_text(client, api_key):
+    """Message with text + image + document → two attachments, text preserved."""
+    thread_key = "test:att-mixed"
+    b64_png = base64.b64encode(SAMPLE_PNG).decode()
+    b64_pdf = base64.b64encode(SAMPLE_PDF).decode()
+
+    resp = await client.post(
+        "/agent/messages",
+        json={
+            "thread_key": thread_key,
+            "messages": [{
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": "review both files"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64_png}},
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64_pdf}},
+                ],
+            }],
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+
+    resp = await client.get(
+        f"/agent/attachments?thread_key={thread_key}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    attachments = resp.json()
+    assert len(attachments) == 2
+    mime_types = {a["mime_type"] for a in attachments}
+    assert mime_types == {"image/png", "application/pdf"}
+
+    # Verify parts in chat_messages
+    resp = await client.get(
+        f"/agent/messages?thread_key={thread_key}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    parts = resp.json()["messages"][0]["parts"]
+    assert parts[0]["type"] == "text"
+    assert parts[1]["type"] == "attachment_ref"
+    assert parts[2]["type"] == "attachment_ref"
+
+
+@pytest.mark.asyncio
+async def test_nonexistent_attachment_404(client, api_key):
+    """Downloading a non-existent attachment returns 404."""
+    resp = await client.get(
+        "/agent/attachments/att-doesnotexist/download",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 404
