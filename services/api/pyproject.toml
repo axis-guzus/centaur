@@ -17,10 +17,11 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "mcp>=1.0.0",
     "toon-format @ git+https://github.com/toon-format/toon-python.git",
-    "docker>=7.0.0",
+    "aiodocker>=0.22.0",
     "psycopg2-binary>=2.9.11",
     "centaur-sdk",
     "prometheus-client>=0.24.1",
+    "sse-starlette>=3.2.0",
 ]
 
 [tool.uv]

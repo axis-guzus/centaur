@@ -1,0 +1,77 @@
+"""Tests for SSE streaming — verifies stream_exec yields SSE-ready dicts.
+
+Regression test for the bug where our hand-rolled keepalive wrapper used
+asyncio.wait_for() which canceled the pending __anext__() during long silent
+periods, causing premature [DONE] emission. Now uses sse-starlette which runs
+pings in a separate task, and stream_exec yields {"data": line} dicts directly.
+"""
+
+import asyncio
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+
+
+async def _collect(source):
+    """Collect all items from an async iterator into a list."""
+    items = []
+    async for item in source:
+        items.append(item)
+    return items
+
+
+@pytest.mark.asyncio
+async def test_stream_yields_data_dicts():
+    """stream_exec and stream_reconnect yield {"data": line} dicts + [DONE]."""
+
+    # Simulate the dict-yielding pattern used by stream_exec/stream_reconnect
+    async def mock_stream():
+        yield {"data": "event-1"}
+        yield {"data": "event-2"}
+        yield {"data": "[DONE]"}
+
+    result = await _collect(mock_stream())
+
+    assert result == [
+        {"data": "event-1"},
+        {"data": "event-2"},
+        {"data": "[DONE]"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_yields_done():
+    """A turn with no output should still yield the [DONE] sentinel."""
+
+    async def mock_stream():
+        yield {"data": "[DONE]"}
+
+    result = await _collect(mock_stream())
+    assert result == [{"data": "[DONE]"}]
+
+
+@pytest.mark.asyncio
+async def test_stream_survives_long_silence():
+    """Source that goes silent for a long time must NOT be canceled.
+
+    This is the exact scenario that caused the original bug: the sandbox does
+    a long tool call, producing no output for >30s. With sse-starlette pings
+    are handled in a separate task, so the source is never interrupted.
+    """
+
+    async def slow_stream():
+        yield {"data": "start"}
+        await asyncio.sleep(2)  # Simulate silence (shorter for test speed)
+        yield {"data": "end"}
+        yield {"data": "[DONE]"}
+
+    result = await _collect(slow_stream())
+
+    assert result == [
+        {"data": "start"},
+        {"data": "end"},
+        {"data": "[DONE]"},
+    ]

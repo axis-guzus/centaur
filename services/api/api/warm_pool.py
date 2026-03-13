@@ -2,6 +2,8 @@
 
 Eliminates sandbox startup latency (~15s) by maintaining a pool of idle
 sandboxes that can be instantly claimed when a new thread arrives.
+
+Fully async — no threads or asyncio.to_thread wrappers.
 """
 
 from __future__ import annotations
@@ -9,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import threading
 import time
 from dataclasses import dataclass, field
 
@@ -38,19 +39,19 @@ class WarmContainer:
     created_at: float = field(default_factory=time.time)
 
 
-# Thread-safe pool (accessed from async + sync contexts)
-_pool_lock = threading.Lock()
+# Async-safe pool (single-threaded asyncio — no lock needed for non-awaiting ops,
+# but we use asyncio.Lock around sections with awaits to prevent interleaving)
+_pool_lock = asyncio.Lock()
 _pool: list[WarmContainer] = []
 _replenish_task: asyncio.Task | None = None
 
 
 def pool_status() -> dict:
-    """Return pool diagnostics."""
-    with _pool_lock:
-        containers = [
-            {"sandbox_id": w.sandbox_id[:12], "age_s": round(time.time() - w.created_at, 1)}
-            for w in _pool
-        ]
+    """Return pool diagnostics (sync-safe: no awaits, reads only)."""
+    containers = [
+        {"sandbox_id": w.sandbox_id[:12], "age_s": round(time.time() - w.created_at, 1)}
+        for w in _pool
+    ]
     return {
         "target_size": POOL_SIZE,
         "current_size": len(containers),
@@ -59,14 +60,14 @@ def pool_status() -> dict:
     }
 
 
-def _spawn_warm_container() -> WarmContainer | None:
-    """Synchronously create one warm sandbox. Returns None on failure."""
+async def _spawn_warm_container() -> WarmContainer | None:
+    """Create one warm sandbox. Returns None on failure."""
     backend = get_backend()
     engine = POOL_HARNESS if POOL_HARNESS in {"amp", "claude-code", "codex"} else "amp"
 
-    placeholder_key = f"warm-{int(time.time() * 1000)}-{id(threading.current_thread())}"
+    placeholder_key = f"warm-{int(time.time() * 1000)}-{id(asyncio.current_task())}"
     try:
-        session = backend.create(placeholder_key, POOL_HARNESS, engine, warm=True)
+        session = await backend.create(placeholder_key, POOL_HARNESS, engine, warm=True)
         warm = WarmContainer(
             sandbox_id=session.sandbox_id,
             harness=POOL_HARNESS,
@@ -79,44 +80,37 @@ def _spawn_warm_container() -> WarmContainer | None:
         return None
 
 
-def _replenish_sync() -> int:
+async def replenish() -> int:
     """Spawn sandboxes until the pool reaches target size. Returns count spawned."""
     spawned = 0
     while True:
-        with _pool_lock:
+        async with _pool_lock:
             deficit = POOL_SIZE - len(_pool)
         if deficit <= 0:
             break
-        warm = _spawn_warm_container()
+        warm = await _spawn_warm_container()
         if warm is None:
             break
-        with _pool_lock:
+        async with _pool_lock:
             _pool.append(warm)
         spawned += 1
     return spawned
 
 
-def _inject_persona(
+async def _inject_persona(
     sandbox_id: str,
     persona: str | None,
     repo: str | None,
 ) -> None:
-    """Inject persona/repo config into a running warm container via exec.
-
-    Warm containers have already run the entrypoint with no persona/repo,
-    so we replicate the entrypoint's setup steps here: clone the repo,
-    copy skills, append the persona prompt overlay, and write env overrides.
-    """
+    """Inject persona/repo config into a running warm container via exec."""
     backend = get_backend()
-    client = backend._get_client()
-    container = client.containers.get(sandbox_id)
 
-    # 1. Clone repo into workspace (mirrors entrypoint.sh lines 24-42)
+    # 1. Clone repo into workspace
     if repo:
-        container.exec_run(
+        await backend.exec_run(
+            sandbox_id,
             [
-                "sh",
-                "-c",
+                "sh", "-c",
                 f'''
 REPO_PATH="/home/agent/github/{repo}"
 WORKSPACE="/home/agent/workspace"
@@ -130,11 +124,11 @@ fi
             ],
             user="agent",
         )
-        # Copy project skills (mirrors entrypoint.sh lines 44-50)
-        container.exec_run(
+        # Copy project skills
+        await backend.exec_run(
+            sandbox_id,
             [
-                "sh",
-                "-c",
+                "sh", "-c",
                 '''
 CENTAUR_SKILLS="/home/agent/github/paradigmxyz/centaur/.agents/skills"
 WS_SKILLS="/home/agent/workspace/.agents/skills"
@@ -146,11 +140,11 @@ fi
             ],
             user="agent",
         )
-        # Re-copy base system prompt into new workspace
-        container.exec_run(
+        # Re-copy base system prompt
+        await backend.exec_run(
+            sandbox_id,
             [
-                "sh",
-                "-c",
+                "sh", "-c",
                 '''
 if [ -f /home/agent/AGENTS_BASE.md ]; then
     cp /home/agent/AGENTS_BASE.md /home/agent/workspace/AGENTS.md
@@ -162,7 +156,7 @@ fi
             user="agent",
         )
 
-    # 2. Append persona prompt overlay (read content from host side)
+    # 2. Append persona prompt overlay
     if persona:
         from api.app import get_tool_manager
 
@@ -171,13 +165,14 @@ fi
             prompt_path = persona_info.tool_dir / "PROMPT.md"
             if prompt_path.is_file():
                 prompt_content = prompt_path.read_text()
-                container.exec_run(
+                await backend.exec_run(
+                    sandbox_id,
                     ["sh", "-c", 'printf "%s" "$_CONTENT" >> /home/agent/workspace/AGENTS.md'],
                     environment={"_CONTENT": f"\n\n---\n\n{prompt_content}"},
                     user="agent",
                 )
 
-    # 3. Write env overrides for downstream scripts
+    # 3. Write env overrides
     env_lines: list[str] = []
     if persona:
         env_lines.append(f"export AGENT_PERSONA={persona}")
@@ -185,7 +180,8 @@ fi
         env_lines.append(f"export AGENT_REPO={repo}")
     if env_lines:
         env_content = "\n".join(env_lines) + "\n"
-        container.exec_run(
+        await backend.exec_run(
+            sandbox_id,
             ["sh", "-c", 'printf "%s" "$_CONTENT" > /home/agent/.env_override'],
             environment={"_CONTENT": env_content},
             user="agent",
@@ -199,22 +195,19 @@ fi
     )
 
 
-def claim_container(
+async def claim_container(
     thread_key: str,
     harness: str = "amp",
     *,
     persona: str | None = None,
     repo: str | None = None,
 ) -> SandboxSession | None:
-    """Try to claim a warm sandbox from the pool. Returns SandboxSession or None.
-
-    Only returns a sandbox if the requested harness matches the pool harness.
-    """
+    """Try to claim a warm sandbox from the pool. Returns SandboxSession or None."""
     if harness != POOL_HARNESS:
         return None
 
     warm: WarmContainer | None = None
-    with _pool_lock:
+    async with _pool_lock:
         if _pool:
             warm = _pool.pop(0)
 
@@ -223,24 +216,24 @@ def claim_container(
 
     backend = get_backend()
 
-    st = backend.status_by_id(warm.sandbox_id)
+    st = await backend.status_by_id(warm.sandbox_id)
     if st != "running":
         log.warning("warm_container_dead_on_claim", sandbox=warm.sandbox_id[:12])
         with contextlib.suppress(Exception):
-            backend.stop_by_id(warm.sandbox_id)
+            await backend.stop_by_id(warm.sandbox_id)
         return None
 
     new_name = f"centaur-sandbox-{thread_key.replace(':', '-').replace('.', '-')[:40]}"
-    backend.rename_by_id(warm.sandbox_id, new_name)
+    await backend.rename_by_id(warm.sandbox_id, new_name)
 
     try:
         fresh_token = mint_sandbox_token(thread_key, new_name)
-        backend.refresh_token_by_id(warm.sandbox_id, fresh_token)
+        await backend.refresh_token_by_id(warm.sandbox_id, fresh_token)
     except Exception:
         log.warning("warm_claim_token_refresh_failed", sandbox=warm.sandbox_id[:12])
 
     if persona or repo:
-        _inject_persona(warm.sandbox_id, persona, repo)
+        await _inject_persona(warm.sandbox_id, persona, repo)
 
     session = SandboxSession(
         sandbox_id=warm.sandbox_id,
@@ -262,45 +255,27 @@ def claim_container(
     return session
 
 
-def _cleanup_pool_sync() -> int:
+async def cleanup_pool() -> int:
     """Stop and remove all warm sandboxes. Returns count cleaned."""
-    with _pool_lock:
+    async with _pool_lock:
         to_clean = list(_pool)
         _pool.clear()
     cleaned = 0
     backend = get_backend()
     for warm in to_clean:
         with contextlib.suppress(Exception):
-            backend.stop_by_id(warm.sandbox_id)
+            await backend.stop_by_id(warm.sandbox_id)
             cleaned += 1
     return cleaned
 
 
-# ── Async API ────────────────────────────────────────────────────────────────
-
-
-async def replenish() -> int:
-    """Async wrapper — spawn missing warm sandboxes."""
-    return await asyncio.to_thread(_replenish_sync)
-
-
-async def cleanup_pool() -> int:
-    """Async wrapper — tear down all warm sandboxes."""
-    return await asyncio.to_thread(_cleanup_pool_sync)
-
-
-def _recover_warm_sync(assigned_sandbox_ids: set[str] | None = None) -> int:
-    """Recover existing warm sandboxes from backend on API restart.
-
-    Containers already assigned to a thread (present in sandbox_sessions)
-    are excluded — they belong to active conversations and must not be
-    re-added to the warm pool.
-    """
+async def _recover_warm(assigned_sandbox_ids: set[str] | None = None) -> int:
+    """Recover existing warm sandboxes from backend on API restart."""
     assigned = assigned_sandbox_ids or set()
     backend = get_backend()
     recovered = 0
-    sessions = backend.recover_warm(POOL_HARNESS)
-    with _pool_lock:
+    sessions = await backend.recover_warm(POOL_HARNESS)
+    async with _pool_lock:
         for session in sessions:
             if len(_pool) >= POOL_SIZE:
                 break
@@ -338,7 +313,7 @@ async def start_replenish_loop() -> asyncio.Task:
 
     async def _loop() -> None:
         assigned = await _get_assigned_sandbox_ids()
-        recovered = await asyncio.to_thread(_recover_warm_sync, assigned)
+        recovered = await _recover_warm(assigned)
         if recovered:
             log.info("warm_pool_recovered", recovered=recovered)
         count = await replenish()

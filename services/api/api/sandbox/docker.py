@@ -1,18 +1,18 @@
-"""Docker sandbox backend — runs agent containers via the Docker SDK."""
+"""Docker sandbox backend — runs agent containers via aiodocker (fully async)."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-import docker
+import aiodocker
 import structlog
-from docker.errors import NotFound
 
 from api.deps import mint_sandbox_token
 from api.sandbox.base import SandboxBackend, SandboxSession
@@ -108,40 +108,36 @@ def _container_env(thread_key: str, container_name: str) -> list[str]:
     return env
 
 
-def _container_recent_logs(container: Any, tail: int = 40, max_chars: int = 2000) -> str:
-    try:
-        raw = container.logs(tail=tail)
-    except Exception:
-        return ""
-    text = (
-        raw.decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
-    )
-    text = text.strip()
-    return text[-max_chars:] if len(text) > max_chars else text
-
-
-def _wait_ready(container: Any, timeout: int = 15) -> float:
+async def _wait_ready(client: aiodocker.Docker, container_id: str, timeout: int = 15) -> float:
     """Wait for the entrypoint to signal readiness (touch ~/.ready)."""
     t0 = time.monotonic()
     deadline = t0 + timeout
     while time.monotonic() < deadline:
-        with contextlib.suppress(Exception):
-            container.reload()
-        status = str(getattr(container, "status", "") or "")
+        try:
+            info = await client.containers.get(container_id)
+            state = (await info.show()).get("State", {})
+            status = state.get("Status", "")
+        except Exception:
+            await asyncio.sleep(0.1)
+            continue
         if status and status not in {"created", "running"}:
-            logs = _container_recent_logs(container)
             detail = f"sandbox exited before ready (status={status})"
-            if logs:
-                detail += f"; last logs: {logs}"
             raise RuntimeError(detail)
         try:
-            exit_code, _ = container.exec_run(["test", "-f", "/home/agent/.ready"], demux=False)
+            container = await client.containers.get(container_id)
+            exec_obj = await container.exec(
+                cmd=["test", "-f", "/home/agent/.ready"], stdout=True, stderr=True,
+            )
+            stream = exec_obj.start(detach=False)
+            async with stream:
+                while await stream.read_out() is not None:
+                    pass
+            exec_info = await exec_obj.inspect()
+            if exec_info.get("ExitCode") == 0:
+                return round(time.monotonic() - t0, 3)
         except Exception:
-            time.sleep(0.1)
-            continue
-        if exit_code == 0:
-            return round(time.monotonic() - t0, 3)
-        time.sleep(0.1)
+            pass
+        await asyncio.sleep(0.1)
     raise TimeoutError(f"sandbox readiness timed out after {timeout}s")
 
 
@@ -149,18 +145,18 @@ def _wait_ready(container: Any, timeout: int = 15) -> float:
 
 
 class DockerSandboxBackend(SandboxBackend):
-    """Runs agent sandboxes as local Docker containers."""
+    """Runs agent sandboxes as local Docker containers (fully async via aiodocker)."""
 
     def __init__(self) -> None:
-        self._client: docker.DockerClient | None = None
+        self._client: aiodocker.Docker | None = None
 
-    def _get_client(self) -> docker.DockerClient:
+    def _get_client(self) -> aiodocker.Docker:
         if self._client is None:
             docker_host = os.getenv("DOCKER_HOST")
             if docker_host:
-                self._client = docker.DockerClient(base_url=docker_host)
+                self._client = aiodocker.Docker(url=docker_host)
             else:
-                self._client = docker.from_env()
+                self._client = aiodocker.Docker()
         return self._client
 
     @property
@@ -171,7 +167,7 @@ class DockerSandboxBackend(SandboxBackend):
     def supports_warm_pool(self) -> bool:
         return True
 
-    def create(
+    async def create(
         self,
         thread_key: str,
         harness: str,
@@ -192,9 +188,10 @@ class DockerSandboxBackend(SandboxBackend):
         if repo:
             env.append(f"AGENT_REPO={repo}")
 
+        # Remove stale container with the same name
         with contextlib.suppress(Exception):
-            stale = client.containers.get(container_name)
-            stale.remove(force=True)
+            stale = await client.containers.get(container_name)
+            await stale.delete(force=True)
 
         labels = {
             "centaur-agent": "true",
@@ -206,52 +203,61 @@ class DockerSandboxBackend(SandboxBackend):
         if warm:
             labels["ai2.warm"] = "true"
 
-        volumes: dict[str, dict[str, str]] = {
-            repos_dir: {"bind": "/home/agent/github", "mode": "ro"},
-        }
+        # Build bind mounts
+        binds = [
+            f"{repos_dir}:/home/agent/github:ro",
+        ]
         vol = os.getenv("FIREWALL_CERTS_VOLUME", "firewall-certs")
-        volumes[vol] = {"bind": "/firewall-certs", "mode": "ro"}
+        binds.append(f"{vol}:/firewall-certs:ro")
 
-        # Bind-mount base system prompt (so prompt edits don't require image rebuild)
+        # Bind-mount base system prompt
         repo_host = _repo_host_dir()
         base_prompt_host = os.path.join(repo_host, "services", "sandbox", "SYSTEM_PROMPT.md")
-        volumes[base_prompt_host] = {"bind": "/home/agent/AGENTS_BASE.md", "mode": "ro"}
+        binds.append(f"{base_prompt_host}:/home/agent/AGENTS_BASE.md:ro")
 
-        # Bind-mount persona directory if a persona is selected
+        # Bind-mount persona directory if selected
         if persona:
             from api.app import get_tool_manager
 
             persona_info = get_tool_manager().get_persona(persona)
             if persona_info and persona_info.tool_dir.is_dir():
-                # Resolve host path: tool_dir is /app/tools/personas/<name> inside API container
-                # Map back to host via repo root
                 rel = persona_info.tool_dir.relative_to(Path("/app"))
                 persona_host = os.path.join(repo_host, str(rel))
-                volumes[persona_host] = {
-                    "bind": f"/home/agent/tools/personas/{persona}",
-                    "mode": "ro",
-                }
+                binds.append(f"{persona_host}:/home/agent/tools/personas/{persona}:ro")
 
         cmd = _build_harness_cmd(engine, model)
-        container = client.containers.run(
-            _image(),
-            command=cmd,
-            detach=True,
-            stdin_open=True,
-            tty=False,
-            network=os.getenv("AGENT_NETWORK", "centaur_agent_net"),
-            mem_limit="4g",
-            nano_cpus=int(2 * 1e9),
-            environment=env,
-            working_dir="/home/agent",
-            volumes=volumes,
-            labels=labels,
+        network = os.getenv("AGENT_NETWORK", "centaur_agent_net")
+
+        config: dict[str, Any] = {
+            "Image": _image(),
+            "Cmd": cmd,
+            "OpenStdin": True,
+            "Tty": False,
+            "AttachStdin": True,
+            "AttachStdout": True,
+            "AttachStderr": True,
+            "Env": env,
+            "WorkingDir": "/home/agent",
+            "Labels": labels,
+            "HostConfig": {
+                "Binds": binds,
+                "Memory": 4 * 1024**3,
+                "NanoCpus": int(2 * 1e9),
+                "NetworkMode": network,
+            },
+        }
+
+        container = await client.containers.create_or_replace(
             name=container_name,
+            config=config,
         )
-        _wait_ready(container)
+        await container.start()
+        container_id = container.id
+
+        await _wait_ready(client, container_id)
 
         session = SandboxSession(
-            sandbox_id=container.id,
+            sandbox_id=container_id,
             thread_key=thread_key,
             harness=harness,
             engine=engine,
@@ -261,7 +267,7 @@ class DockerSandboxBackend(SandboxBackend):
         log.info(
             "sandbox_spawned",
             thread_key=thread_key,
-            container_id=container.id[:12],
+            container_id=container_id[:12],
             container_name=container_name,
             harness=harness,
             engine=engine,
@@ -269,49 +275,48 @@ class DockerSandboxBackend(SandboxBackend):
         )
         return session
 
-    def attach(self, session: SandboxSession, *, logs: bool = False) -> None:
+    async def attach(self, session: SandboxSession, *, logs: bool = False) -> None:
         rt = _get_rt(session)
-        if rt.stdin_sock and rt.stdout_sock:
+        if rt.stream is not None:
             return
         client = self._get_client()
-        api = client.api
+        container = await client.containers.get(session.sandbox_id)
+        rt.stream = container.attach(stdin=True, stdout=True, stderr=False, logs=logs)
 
-        stdin_attach = api.attach_socket(session.sandbox_id, params={"stdin": True, "stream": True})
-        rt.stdin_sock = stdin_attach._sock
-
-        container = client.containers.get(session.sandbox_id)
-        rt.stdout_sock = container.attach(stdout=True, stderr=False, stream=True, logs=logs)
-
-    def write_stdin(self, session: SandboxSession, obj: dict) -> None:
+    async def write_stdin(self, session: SandboxSession, obj: dict) -> None:
         rt = _get_rt(session)
-        if rt.stdin_sock is None:
-            raise RuntimeError("stdin not attached")
+        if rt.stream is None:
+            raise RuntimeError("not attached")
         payload = json.dumps(obj, separators=(",", ":")) + "\n"
-        rt.stdin_sock.sendall(payload.encode())
+        await rt.stream.write_in(payload.encode())
 
-    def stream_stdout(self, session: SandboxSession) -> Iterator[str]:
+    async def stream_stdout(self, session: SandboxSession) -> AsyncIterator[str]:
         rt = _get_rt(session)
-        if rt.stdout_sock is None:
-            raise RuntimeError("stdout not attached")
+        if rt.stream is None:
+            raise RuntimeError("not attached")
         buf = ""
-        for chunk in rt.stdout_sock:
-            buf += chunk.decode("utf-8", errors="replace")
+        while True:
+            msg = await rt.stream.read_out()
+            if msg is None:
+                break
+            # msg.stream: 1=stdout, 2=stderr; we only attached stdout
+            buf += msg.data.decode("utf-8", errors="replace")
             while "\n" in buf:
                 line, buf = buf.split("\n", 1)
                 stripped = line.strip()
                 if stripped:
                     yield stripped
 
-    def stop(self, session: SandboxSession) -> None:
+    async def stop(self, session: SandboxSession) -> None:
         client = self._get_client()
         with contextlib.suppress(Exception):
-            container = client.containers.get(session.sandbox_id)
-            container.kill(signal="SIGINT")
-        self.close_streams(session)
+            container = await client.containers.get(session.sandbox_id)
+            await container.kill(signal="SIGINT")
+        await self.close_streams(session)
         with contextlib.suppress(Exception):
-            container = client.containers.get(session.sandbox_id)
-            container.stop(timeout=5)
-            container.remove()
+            container = await client.containers.get(session.sandbox_id)
+            await container.stop(t=5)
+            await container.delete()
         log.info(
             "sandbox_stopped",
             thread_key=session.thread_key,
@@ -319,49 +324,47 @@ class DockerSandboxBackend(SandboxBackend):
             reason="explicit_stop",
         )
 
-    def status(self, session: SandboxSession) -> str:
-        return self.status_by_id(session.sandbox_id)
+    async def status(self, session: SandboxSession) -> str:
+        return await self.status_by_id(session.sandbox_id)
 
-    def status_by_id(self, sandbox_id: str) -> str:
+    async def status_by_id(self, sandbox_id: str) -> str:
         """Check container status by ID (no session needed)."""
         client = self._get_client()
         try:
-            container = client.containers.get(sandbox_id)
-            return container.status
-        except NotFound:
-            return "gone"
+            container = await client.containers.get(sandbox_id)
+            info = await container.show()
+            return info.get("State", {}).get("Status", "unknown")
+        except aiodocker.exceptions.DockerError as exc:
+            if exc.status == 404:
+                return "gone"
+            raise
 
-    def stop_by_id(self, sandbox_id: str) -> None:
+    async def stop_by_id(self, sandbox_id: str) -> None:
         """Stop and remove a container by ID (no session needed)."""
         client = self._get_client()
         with contextlib.suppress(Exception):
-            container = client.containers.get(sandbox_id)
-            container.stop(timeout=5)
-            container.remove()
+            container = await client.containers.get(sandbox_id)
+            await container.stop(t=5)
+            await container.delete()
 
-    def close_streams(self, session: SandboxSession) -> None:
+    async def close_streams(self, session: SandboxSession) -> None:
         rt = _get_rt(session)
-        if rt.stdin_sock is not None:
+        if rt.stream is not None:
             with contextlib.suppress(Exception):
-                rt.stdin_sock.close()
-            rt.stdin_sock = None
-        if rt.stdout_sock is not None and hasattr(rt.stdout_sock, "close"):
-            with contextlib.suppress(Exception):
-                rt.stdout_sock.close()
-            rt.stdout_sock = None
+                await rt.stream.close()
+            rt.stream = None
 
-    def rename_by_id(self, sandbox_id: str, new_name: str) -> None:
+    async def rename_by_id(self, sandbox_id: str, new_name: str) -> None:
         """Rename a container by ID (no session needed)."""
         client = self._get_client()
         with contextlib.suppress(Exception):
-            container = client.containers.get(sandbox_id)
-            container.rename(new_name)
+            container = await client.containers.get(sandbox_id)
+            await container.rename(new_name)
 
-    def refresh_token_by_id(self, sandbox_id: str, new_token: str) -> None:
+    async def refresh_token_by_id(self, sandbox_id: str, new_token: str) -> None:
         """Write a fresh API token into a running container by ID."""
-        client = self._get_client()
-        container = client.containers.get(sandbox_id)
-        exit_code, _ = container.exec_run(
+        exit_code, _ = await self.exec_run(
+            sandbox_id,
             ["sh", "-c", 'printf "%s" "$_TOKEN" > /home/agent/.api_key'],
             environment={"_TOKEN": new_token},
             user="agent",
@@ -373,28 +376,57 @@ class DockerSandboxBackend(SandboxBackend):
                 exit_code=exit_code,
             )
 
-    def recover_warm(self, pool_harness: str) -> list[SandboxSession]:
+    async def exec_run(
+        self, sandbox_id: str, cmd: list[str], *, environment: dict | None = None, user: str = ""
+    ) -> tuple[int, bytes]:
+        """Run a command inside a container and return (exit_code, output)."""
+        client = self._get_client()
+        container = await client.containers.get(sandbox_id)
+        exec_obj = await container.exec(
+            cmd=cmd,
+            stdout=True,
+            stderr=True,
+            environment=environment,
+            user=user,
+        )
+        stream = exec_obj.start(detach=False)
+        output = b""
+        async with stream:
+            while True:
+                msg = await stream.read_out()
+                if msg is None:
+                    break
+                output += msg.data
+        info = await exec_obj.inspect()
+        return info.get("ExitCode", -1), output
+
+    async def recover_warm(self, pool_harness: str) -> list[SandboxSession]:
         """Recover existing warm containers from Docker on API restart."""
         client = self._get_client()
         sessions: list[SandboxSession] = []
         try:
-            containers = client.containers.list(filters={"label": "ai2.warm=true"})
+            containers = await client.containers.list(
+                filters=json.dumps({"label": ["ai2.warm=true"]}),
+            )
         except Exception:
             return sessions
         for container in containers:
-            thread_key = container.labels.get("ai2.thread", "")
+            info = await container.show()
+            labels = info.get("Config", {}).get("Labels", {})
+            thread_key = labels.get("ai2.thread", "")
             if not thread_key.startswith("warm-"):
                 continue
-            if container.status != "running":
+            status = info.get("State", {}).get("Status", "")
+            if status != "running":
                 with contextlib.suppress(Exception):
-                    container.remove(force=True)
+                    await container.delete(force=True)
                 continue
             sessions.append(
                 SandboxSession(
                     sandbox_id=container.id,
                     thread_key="",
-                    harness=container.labels.get("ai2.harness", pool_harness),
-                    engine=container.labels.get("ai2.engine", "amp"),
+                    harness=labels.get("ai2.harness", pool_harness),
+                    engine=labels.get("ai2.engine", "amp"),
                     started_at=time.time(),
                     backend_name=self.name,
                 )

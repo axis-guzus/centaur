@@ -1,31 +1,29 @@
-"""Tests for _stream_turn skip_done_count — the handoff follow fix.
+"""Tests for stream_reconnect skip_done_count — the handoff follow fix.
 
 When the slackbot reconnects after a follow=true handoff, the API replays
 the container's full stdout history (via logs=True).  The old turn's
-turn.done event appears in the replay.  Without skip_done_count, _stream_turn
-would stop at the first turn.done and never stream the followed thread's
-output.
+turn.done event appears in the replay.  Without skip_done_count,
+stream_reconnect would stop at the first turn.done and never stream the
+followed thread's output.
 
-skip_done_count=1 tells _stream_turn to skip the first turn.done event so
-the stream continues through to the followed thread's output and its
+skip_done_count=1 tells stream_reconnect to skip the first turn.done event
+so the stream continues through to the followed thread's output and its
 eventual turn.done.
 """
 
 import json
-import queue
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _simulate_stream_turn(lines: list[str], *, skip_done_count: int = 0) -> list[str]:
-    """Simulate the turn.done counting logic from _stream_turn.
+    """Simulate the turn.done counting logic from stream_reconnect.
 
-    Feeds lines through a queue and applies the same termination check
-    as agent.py's _stream_turn, returning only the lines that would be
-    yielded before the generator returns.
+    Applies the same termination check as agent.py's stream_reconnect,
+    returning only the lines that would be yielded before the generator
+    breaks.
     """
     yielded: list[str] = []
     done_seen = 0

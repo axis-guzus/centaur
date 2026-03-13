@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import abc
-import queue
-import threading
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -14,19 +12,13 @@ from typing import Any
 class RuntimeState:
     """Process-local ephemeral state for a running sandbox.
 
-    Keyed by sandbox_id in agent._runtime. Contains socket handles, reader
-    threads, turn queues, and other objects that cannot survive a process
-    restart.
+    Keyed by sandbox_id in agent._runtime. Contains the aiodocker Stream
+    handle and turn bookkeeping. Fully async — no threads or queues.
     """
 
     turn_counter: int = 0
     active_turn_id: int = 0
-    turn_lock: threading.Lock = field(default_factory=threading.Lock)
-    active_queue: queue.SimpleQueue[str | None] | None = None
-    reader_thread: threading.Thread | None = None
-    reader_gen: int = 0
-    stdin_sock: Any = None
-    stdout_sock: Any = None
+    stream: Any = None  # aiodocker Stream (read_out / write_in)
     busy: bool = False
     last_result: str | None = None
 
@@ -58,7 +50,7 @@ class SandboxBackend(abc.ABC):
         return False
 
     @abc.abstractmethod
-    def create(
+    async def create(
         self,
         thread_key: str,
         harness: str,
@@ -72,31 +64,54 @@ class SandboxBackend(abc.ABC):
         """Create and start a new sandbox. Block until ready."""
 
     @abc.abstractmethod
-    def attach(self, session: SandboxSession, *, logs: bool = False) -> None:
+    async def attach(self, session: SandboxSession, *, logs: bool = False) -> None:
         """Attach stdin/stdout streams to the sandbox.
 
         If logs=True, include buffered output from before the attach point.
         """
 
     @abc.abstractmethod
-    def write_stdin(self, session: SandboxSession, obj: dict) -> None:
+    async def write_stdin(self, session: SandboxSession, obj: dict) -> None:
         """Write an NDJSON line to the sandbox's stdin."""
 
     @abc.abstractmethod
-    def stream_stdout(self, session: SandboxSession) -> Iterator[str]:
-        """Yield stdout lines from the sandbox. Blocks until EOF."""
+    async def stream_stdout(self, session: SandboxSession) -> AsyncIterator[str]:
+        """Yield stdout lines from the sandbox asynchronously."""
+        yield  # pragma: no cover — abstract async generator
 
     @abc.abstractmethod
-    def stop(self, session: SandboxSession) -> None:
+    async def stop(self, session: SandboxSession) -> None:
         """Stop and clean up the sandbox."""
 
     @abc.abstractmethod
-    def status(self, session: SandboxSession) -> str:
+    async def status(self, session: SandboxSession) -> str:
         """Return sandbox status: 'running', 'stopped', 'gone', etc."""
 
-    def close_streams(self, session: SandboxSession) -> None:  # noqa: B027
+    async def close_streams(self, session: SandboxSession) -> None:
         """Close any open streams. Default: no-op."""
 
-    def recover_warm(self, pool_harness: str) -> list[SandboxSession]:
+    async def exec_run(
+        self, sandbox_id: str, cmd: list[str], *, environment: dict | None = None, user: str = ""
+    ) -> tuple[int, bytes]:
+        """Run a command inside a container and return (exit_code, output)."""
+        raise NotImplementedError
+
+    async def status_by_id(self, sandbox_id: str) -> str:
+        """Check container status by ID (no session needed)."""
+        raise NotImplementedError
+
+    async def stop_by_id(self, sandbox_id: str) -> None:
+        """Stop and remove a container by ID (no session needed)."""
+        raise NotImplementedError
+
+    async def rename_by_id(self, sandbox_id: str, new_name: str) -> None:
+        """Rename a container by ID."""
+        raise NotImplementedError
+
+    async def refresh_token_by_id(self, sandbox_id: str, new_token: str) -> None:
+        """Write a fresh API token into a running container."""
+        raise NotImplementedError
+
+    async def recover_warm(self, pool_harness: str) -> list[SandboxSession]:
         """Discover warm (pre-created, unclaimed) sandboxes. Default: empty."""
         return []

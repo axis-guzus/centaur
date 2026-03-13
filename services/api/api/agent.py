@@ -2,16 +2,18 @@
 
 Thin orchestration layer: one sandbox per thread_key, raw NDJSON streaming.
 Session mapping lives in Postgres (sandbox_sessions table). Process-local
-runtime state (queues, locks, reader threads, sockets) stays in-memory keyed
+runtime state (stream handles, turn bookkeeping) stays in-memory keyed
 by sandbox_id.
+
+Streaming architecture (2 layers, 0 queues, 0 threads):
+  Docker stdout (async iterator via aiodocker)
+    → stream_exec (async generator: DB ops + turn detection + yields SSE dicts)
+      → EventSourceResponse (SSE formatting + keepalive via sse-starlette)
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import queue
-import threading
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -34,7 +36,7 @@ log = structlog.get_logger()
 _ENGINE_HARNESSES = {"amp", "claude-code", "codex", "pi-mono"}
 _REUSABLE_DB_STATES = {"running", "idle", "delivering", "error"}
 
-# ── Process-local runtime state (ephemeral: queues, locks, sockets) ──────────
+# ── Process-local runtime state (ephemeral: stream handles, turn counters) ───
 
 _runtime: dict[str, RuntimeState] = {}
 
@@ -232,282 +234,6 @@ def _resolve_harness_profile(
     return normalized_engine_override or "amp", None, None
 
 
-# ── Sync helpers (called from background threads) ───────────────────────────
-
-
-def _ensure_reader(session: SandboxSession, *, force: bool = False) -> None:
-    """Start a single background reader thread that dispatches stdout lines to the
-    active turn's queue. Only one reader ever exists per session.
-
-    Pass force=True after a stream reconnect to start a new reader even if the
-    old one is still alive (it will be invalidated via the generation counter).
-    """
-    rt = _get_runtime(session.sandbox_id)
-    if not force and rt.reader_thread and rt.reader_thread.is_alive():
-        return
-
-    backend = get_backend()
-    rt.reader_gen += 1
-    gen = rt.reader_gen
-
-    def _read_loop(my_gen: int = gen) -> None:
-        try:
-            for line in backend.stream_stdout(session):
-                cur = _runtime.get(session.sandbox_id)
-                if cur is None or cur.reader_gen != my_gen:
-                    return
-                if cur.active_queue is not None:
-                    cur.active_queue.put(line)
-        except Exception:
-            pass
-        # EOF — signal the active queue only if this reader is still current
-        cur = _runtime.get(session.sandbox_id)
-        if cur is not None and cur.reader_gen == my_gen and cur.active_queue is not None:
-            cur.active_queue.put(None)
-
-    t = threading.Thread(target=_read_loop, daemon=True)
-    t.start()
-    rt.reader_thread = t
-
-
-def _spawn_sync(
-    thread_key: str,
-    harness: str,
-    *,
-    engine_override: str | None = None,
-) -> SandboxSession:
-    """Synchronous spawn: create sandbox + register session."""
-    engine, persona, repo = _resolve_harness_profile(harness, engine_override=engine_override)
-
-    backend = get_backend()
-    session = backend.create(thread_key, harness, engine, persona=persona, repo=repo)
-
-    _get_runtime(session.sandbox_id)
-
-    log.info("pipe_session_spawned", thread_key=thread_key, sandbox=session.sandbox_id[:12])
-    return session
-
-
-def _stream_turn(
-    session: SandboxSession,
-    message: dict | None = None,
-    *,
-    logs: bool = False,
-    skip_done_count: int = 0,
-):
-    """Stream stdout lines from the sandbox (blocking generator).
-
-    If *message* is provided (a harness-native user input dict built via
-    ``build_user_input``), writes it to stdin. Otherwise reconnects to the
-    running sandbox's stdout (for mid-turn reconnects).
-
-    Turn boundaries are detected from harness-native events using
-    ``is_turn_done``. A synthetic ``turn.done`` event is emitted API-side
-    for downstream SSE consumers (slackbot, web).
-    """
-    backend = get_backend()
-    rt = _get_runtime(session.sandbox_id)
-
-    if message is not None:
-        backend.attach(session)
-    else:
-        # Reconnect: force fresh sockets
-        backend.close_streams(session)
-        backend.attach(session, logs=True)
-
-    # Create a new queue for this turn and swap it in atomically
-    turn_queue: queue.SimpleQueue[str | None] = queue.SimpleQueue()
-    with rt.turn_lock:
-        if message is not None:
-            rt.turn_counter += 1
-        turn_id = rt.turn_counter
-        rt.active_turn_id = turn_id
-        old_queue = rt.active_queue
-        rt.active_queue = turn_queue
-
-    # Signal old turn to stop
-    if old_queue is not None:
-        old_queue.put(None)
-
-    _ensure_reader(session)
-
-    t0 = time.monotonic()
-    rt.busy = True
-    rt.last_result = None
-    log.info(
-        "turn_start",
-        thread_key=session.thread_key,
-        sandbox=session.sandbox_id[:12],
-        harness=session.harness,
-        turn_id=turn_id,
-    )
-
-    if message is not None:
-        try:
-            backend.write_stdin(session, message)
-        except (BrokenPipeError, OSError) as exc:
-            log.warning("stdin_broken_pipe", sandbox=session.sandbox_id[:12], error=str(exc))
-            st = backend.status(session)
-            if st != "running":
-                raise RuntimeError(f"sandbox exited (status={st})") from exc
-            # Stale sockets — close, re-attach, restart reader, and retry.
-            backend.close_streams(session)
-            backend.attach(session)
-            turn_queue = queue.SimpleQueue()
-            with rt.turn_lock:
-                rt.active_queue = turn_queue
-            _ensure_reader(session, force=True)
-            backend.write_stdin(session, message)
-
-    first_output = False
-    done_seen = 0
-    agent_thread_id: str | None = None
-    last_result: str | None = None
-    while True:
-        line = turn_queue.get()
-        if line is None:
-            rt.busy = False
-            if message is not None and done_seen == 0:
-                yield json.dumps({
-                    "type": "error",
-                    "message": "Sandbox container exited unexpectedly before completing the turn.",
-                })
-            log.info(
-                "turn_done",
-                thread_key=session.thread_key,
-                sandbox=session.sandbox_id[:12],
-                harness=session.harness,
-                turn_id=turn_id,
-                duration_s=round(time.monotonic() - t0, 2),
-                reason="eof",
-            )
-            return
-        if not first_output:
-            first_output = True
-            log.info(
-                "turn_first_output",
-                thread_key=session.thread_key,
-                sandbox=session.sandbox_id[:12],
-                harness=session.harness,
-                turn_id=turn_id,
-                elapsed_s=round(time.monotonic() - t0, 2),
-            )
-        yield line
-        try:
-            evt = json.loads(line)
-            # Track agent thread ID from init events
-            tid = extract_thread_id(session.engine, evt)
-            if tid:
-                agent_thread_id = tid
-            # Track result text
-            r = extract_result(session.engine, evt)
-            if r is not None:
-                last_result = r
-            # Detect turn completion from harness-native events
-            if is_turn_done(session.engine, evt):
-                done_seen += 1
-                if done_seen <= skip_done_count:
-                    continue
-                rt.busy = False
-                rt.last_result = last_result
-                # Synthesize turn.done for downstream consumers
-                yield json.dumps({
-                    "type": "turn.done",
-                    "turn_id": turn_id,
-                    "result": last_result or "",
-                    "agent_thread_id": agent_thread_id or "",
-                })
-                log.info(
-                    "turn_done",
-                    thread_key=session.thread_key,
-                    sandbox=session.sandbox_id[:12],
-                    harness=session.harness,
-                    turn_id=turn_id,
-                    duration_s=round(time.monotonic() - t0, 2),
-                    reason="completed",
-                )
-                return
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-
-async def _stop_async(thread_key: str) -> bool:
-    """Stop sandbox and update DB. Returns True if stopped."""
-    session = await _db_get_session(thread_key)
-    if not session:
-        return False
-
-    rt = _runtime.get(session.sandbox_id)
-    if rt is not None and rt.active_queue is not None:
-        rt.active_queue.put(None)
-
-    _drop_runtime(session.sandbox_id)
-
-    backend = get_backend()
-    await asyncio.to_thread(backend.stop, session)
-    await _db_update_state(thread_key, "stopped")
-    log.info("pipe_session_stopped", thread_key=thread_key)
-    return True
-
-
-async def _get_status_async(thread_key: str) -> dict[str, Any]:
-    """Check if a session/sandbox is alive."""
-    session = await _db_get_session(thread_key)
-    if not session:
-        return {"thread_key": thread_key, "status": "not_found"}
-    backend = get_backend()
-    st = await asyncio.to_thread(backend.status, session)
-    if st == "gone":
-        await _db_update_state(thread_key, "gone")
-        return {"thread_key": thread_key, "status": "gone"}
-    rt = _runtime.get(session.sandbox_id)
-    result: dict[str, Any] = {
-        "thread_key": thread_key,
-        "status": st,
-        "sandbox_id": session.sandbox_id[:12],
-        "harness": session.harness,
-        "engine": session.engine,
-        "started_at": session.started_at,
-    }
-    if rt:
-        result["busy"] = rt.busy
-        if rt.last_result is not None:
-            result["last_result"] = rt.last_result
-    return result
-
-
-# ── Async bridge ─────────────────────────────────────────────────────────────
-
-
-async def _async_stream(gen_fn, *args) -> AsyncIterator[str]:
-    """Bridge a blocking generator to an async iterator via asyncio.to_thread."""
-    q: asyncio.Queue[str | None] = asyncio.Queue()
-    loop = asyncio.get_event_loop()
-
-    def _run() -> None:
-        try:
-            for line in gen_fn(*args):
-                loop.call_soon_threadsafe(q.put_nowait, line)
-        except Exception as exc:
-            loop.call_soon_threadsafe(
-                q.put_nowait,
-                json.dumps({"type": "error", "message": str(exc)}),
-            )
-        finally:
-            loop.call_soon_threadsafe(q.put_nowait, None)
-
-    task = asyncio.ensure_future(asyncio.to_thread(_run))
-    try:
-        while True:
-            item = await q.get()
-            if item is None:
-                break
-            yield item
-    finally:
-        if not task.done():
-            task.cancel()
-
-
 # ── Async public API ─────────────────────────────────────────────────────────
 
 
@@ -525,7 +251,7 @@ async def get_or_spawn(
     if session:
         if session.db_state in _REUSABLE_DB_STATES:
             backend = get_backend()
-            st = await asyncio.to_thread(backend.status, session)
+            st = await backend.status(session)
             if st == "running":
                 _get_runtime(session.sandbox_id)
                 return session
@@ -537,7 +263,7 @@ async def get_or_spawn(
             await _db_delete_session(thread_key)
             _drop_runtime(session.sandbox_id)
             backend = get_backend()
-            await asyncio.to_thread(backend.stop_by_id, session.sandbox_id)
+            await backend.stop_by_id(session.sandbox_id)
 
     # Resolve harness profile (engine, persona, repo) once for both warm and cold paths
     resolved_engine, persona, repo = _resolve_harness_profile(harness, engine_override=engine)
@@ -546,26 +272,26 @@ async def get_or_spawn(
     if not engine:
         from api.warm_pool import claim_container
 
-        claimed = await asyncio.to_thread(
-            claim_container, thread_key, harness, persona=persona, repo=repo
-        )
+        claimed = await claim_container(thread_key, harness, persona=persona, repo=repo)
         if claimed:
             won = await _db_insert_session(claimed, harness=claimed.harness, engine=claimed.engine)
             if won:
                 _get_runtime(claimed.sandbox_id)
                 return claimed
 
-    session = await asyncio.to_thread(
-        _spawn_sync, thread_key, harness, engine_override=engine
-    )
+    # Cold spawn
+    resolved_engine, persona, repo = _resolve_harness_profile(harness, engine_override=engine)
+    backend = get_backend()
+    session = await backend.create(thread_key, harness, resolved_engine, persona=persona, repo=repo)
+    _get_runtime(session.sandbox_id)
+    log.info("pipe_session_spawned", thread_key=thread_key, sandbox=session.sandbox_id[:12])
 
     # INSERT into sandbox_sessions — race-safe
     won = await _db_insert_session(session, harness=session.harness, engine=session.engine)
     if not won:
         # Another request won the race — stop our container, return the winner
         log.warning("spawn_race_lost", thread_key=thread_key, sandbox=session.sandbox_id[:12])
-        backend = get_backend()
-        await asyncio.to_thread(backend.stop_by_id, session.sandbox_id)
+        await backend.stop_by_id(session.sandbox_id)
         _drop_runtime(session.sandbox_id)
         winner = await _db_get_session(thread_key)
         if winner is None:
@@ -574,25 +300,6 @@ async def get_or_spawn(
         return winner
 
     return session
-
-
-async def stream_reconnect(
-    session: SandboxSession, *, skip_done_count: int = 0
-) -> AsyncIterator[str]:
-    """Async wrapper for reconnecting to a running sandbox's stdout.
-
-    *skip_done_count*: number of ``turn.done`` events to skip before treating
-    one as terminal.  The slackbot sets this to 1 when reconnecting after a
-    follow=true handoff so that the old turn's ``turn.done`` (replayed from
-    container stdout history) is passed through and the followed thread's
-    output is streamed.
-    """
-
-    def _reconnect():
-        return _stream_turn(session, skip_done_count=skip_done_count)
-
-    async for line in _async_stream(_reconnect):
-        yield line
 
 
 def _build_session_context(
@@ -646,30 +353,27 @@ async def stream_exec(
     *,
     platform: str | None = None,
     user_id: str | None = None,
-) -> AsyncIterator[str]:
-    """Run a turn in the sandbox by flushing pending messages from chat_messages.
+) -> AsyncIterator[dict]:
+    """Run a turn: flush pending messages, write to stdin, stream stdout.
 
-    The flush pipeline:
-    1. Insert system context message on first turn (idempotent)
-    2. Fetch undelivered messages via _flush_pending
-    3. Flatten into content blocks via messages_to_content_blocks
-    4. Build harness-native input via build_user_input
-    5. Stream the turn and yield stdout lines
-    6. Advance the cursor on completion
-    7. Persist the assistant response
+    Yields SSE-ready ``{"data": line}`` dicts directly to EventSourceResponse.
+    Emits a final ``{"data": "[DONE]"}`` sentinel when the turn completes.
+
+    Pipeline (2 layers):
+      aiodocker stdout async iterator → this generator → EventSourceResponse
     """
     await _db_update_state(session.thread_key, "running")
     started_at = time.monotonic()
     try:
-        # Insert platform-specific system message into the transcript (idempotent)
+        # 1. Insert platform-specific system message (idempotent)
         if platform:
             await _insert_system_message(session.thread_key, platform)
 
-        # Flush pending messages from chat_messages
+        # 2. Flush pending messages from chat_messages
         last_delivered_id = await _get_last_delivered_id(session.thread_key)
         flushed = await _flush_pending(session.thread_key, last_delivered_id)
 
-        # Build harness-native input
+        # 3. Build harness-native input
         if flushed:
             msgs = _flushed_to_messages(flushed)
             content_blocks = messages_to_content_blocks(msgs)
@@ -685,31 +389,117 @@ async def stream_exec(
             turn_input = None
             last_flushed_id = None
 
+        # 4. Attach and write to stdin
+        backend = get_backend()
+        await backend.attach(session)
+
+        rt = _get_runtime(session.sandbox_id)
+        rt.turn_counter += 1
+        turn_id = rt.turn_counter
+        rt.active_turn_id = turn_id
+        rt.busy = True
+        rt.last_result = None
+
+        t0 = time.monotonic()
+        log.info(
+            "turn_start",
+            thread_key=session.thread_key,
+            sandbox=session.sandbox_id[:12],
+            harness=session.harness,
+            turn_id=turn_id,
+        )
+
+        if turn_input:
+            try:
+                await backend.write_stdin(session, turn_input)
+            except (BrokenPipeError, OSError, RuntimeError) as exc:
+                log.warning("stdin_broken_pipe", sandbox=session.sandbox_id[:12], error=str(exc))
+                st = await backend.status(session)
+                if st != "running":
+                    raise RuntimeError(f"sandbox exited (status={st})") from exc
+                # Stale stream — close, re-attach, retry
+                await backend.close_streams(session)
+                await backend.attach(session)
+                await backend.write_stdin(session, turn_input)
+
+        # 5. Stream stdout lines, detect turn boundaries
         result_text = ""
         stream_failed = False
-        async for line in _async_stream(_stream_turn, session, turn_input):
-            yield line
-            # Extract result text from turn.done events
+        agent_thread_id: str | None = None
+        first_output = False
+
+        async for line in backend.stream_stdout(session):
+            if not first_output:
+                first_output = True
+                log.info(
+                    "turn_first_output",
+                    thread_key=session.thread_key,
+                    sandbox=session.sandbox_id[:12],
+                    harness=session.harness,
+                    turn_id=turn_id,
+                    elapsed_s=round(time.monotonic() - t0, 2),
+                )
+
+            yield {"data": line}
+
             try:
                 evt = json.loads(line)
+                # Track agent thread ID
+                tid = extract_thread_id(session.engine, evt)
+                if tid:
+                    agent_thread_id = tid
+                # Track result text
+                r = extract_result(session.engine, evt)
+                if r is not None:
+                    result_text = r
                 if evt.get("type") == "error":
                     stream_failed = True
                     result_text = ""
-                elif evt.get("type") == "turn.done":
-                    r = evt.get("result", "")
-                    result_text = (
-                        r if isinstance(r, str)
-                        else r.get("text", "") if isinstance(r, dict)
-                        else ""
+                # Detect turn completion
+                if is_turn_done(session.engine, evt):
+                    rt.busy = False
+                    rt.last_result = result_text
+                    yield {"data": json.dumps({
+                        "type": "turn.done",
+                        "turn_id": turn_id,
+                        "result": result_text or "",
+                        "agent_thread_id": agent_thread_id or "",
+                    })}
+                    log.info(
+                        "turn_done",
+                        thread_key=session.thread_key,
+                        sandbox=session.sandbox_id[:12],
+                        harness=session.harness,
+                        turn_id=turn_id,
+                        duration_s=round(time.monotonic() - t0, 2),
+                        reason="completed",
                     )
+                    break
             except (json.JSONDecodeError, TypeError):
                 pass
+        else:
+            # EOF without turn.done — container exited unexpectedly
+            rt.busy = False
+            if turn_input:
+                yield {"data": json.dumps({
+                    "type": "error",
+                    "message": "Sandbox container exited unexpectedly before completing the turn.",
+                })}
+                stream_failed = True
+            log.info(
+                "turn_done",
+                thread_key=session.thread_key,
+                sandbox=session.sandbox_id[:12],
+                harness=session.harness,
+                turn_id=turn_id,
+                duration_s=round(time.monotonic() - t0, 2),
+                reason="eof",
+            )
 
-        # Advance the cursor to the last flushed message
+        # 6. DB cleanup
         if last_flushed_id and not stream_failed:
             await _advance_cursor(session.thread_key, last_flushed_id)
 
-        # Persist assistant response (user messages already in chat_messages)
         await _persist_turn_messages(session.thread_key, "", result_text, session.harness)
         await _db_update_state(session.thread_key, "error" if stream_failed else "idle")
         record_agent_execution(
@@ -717,6 +507,9 @@ async def stream_exec(
             status="error" if stream_failed else "completed",
             duration_s=time.monotonic() - started_at,
         )
+
+        yield {"data": "[DONE]"}
+
     except Exception:
         await _db_update_state(session.thread_key, "error")
         record_agent_execution(
@@ -725,6 +518,60 @@ async def stream_exec(
             duration_s=time.monotonic() - started_at,
         )
         raise
+
+
+async def stream_reconnect(
+    session: SandboxSession, *, skip_done_count: int = 0
+) -> AsyncIterator[dict]:
+    """Re-attach to a running sandbox's stdout without sending a new turn.
+
+    Yields SSE-ready ``{"data": line}`` dicts directly to EventSourceResponse.
+
+    *skip_done_count*: number of ``turn.done`` events to skip before treating
+    one as terminal.  The slackbot sets this to 1 when reconnecting after a
+    follow=true handoff so that the old turn's ``turn.done`` (replayed from
+    container stdout history) is passed through and the followed thread's
+    output is streamed.
+    """
+    backend = get_backend()
+    # Force fresh stream for reconnect
+    await backend.close_streams(session)
+    await backend.attach(session, logs=True)
+
+    rt = _get_runtime(session.sandbox_id)
+    rt.busy = True
+
+    done_seen = 0
+    agent_thread_id: str | None = None
+    last_result: str | None = None
+
+    async for line in backend.stream_stdout(session):
+        yield {"data": line}
+        try:
+            evt = json.loads(line)
+            tid = extract_thread_id(session.engine, evt)
+            if tid:
+                agent_thread_id = tid
+            r = extract_result(session.engine, evt)
+            if r is not None:
+                last_result = r
+            if is_turn_done(session.engine, evt):
+                done_seen += 1
+                if done_seen <= skip_done_count:
+                    continue
+                rt.busy = False
+                rt.last_result = last_result
+                yield {"data": json.dumps({
+                    "type": "turn.done",
+                    "turn_id": rt.turn_counter,
+                    "result": last_result or "",
+                    "agent_thread_id": agent_thread_id or "",
+                })}
+                break
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    yield {"data": "[DONE]"}
 
 
 async def _persist_turn_messages(
@@ -767,19 +614,48 @@ async def _persist_turn_messages(
 
 
 async def stop_session(thread_key: str) -> bool:
-    return await _stop_async(thread_key)
+    """Stop sandbox and update DB. Returns True if stopped."""
+    session = await _db_get_session(thread_key)
+    if not session:
+        return False
+
+    _drop_runtime(session.sandbox_id)
+
+    backend = get_backend()
+    await backend.stop(session)
+    await _db_update_state(thread_key, "stopped")
+    log.info("pipe_session_stopped", thread_key=thread_key)
+    return True
 
 
 async def get_status(thread_key: str) -> dict[str, Any]:
-    return await _get_status_async(thread_key)
+    """Check if a session/sandbox is alive."""
+    session = await _db_get_session(thread_key)
+    if not session:
+        return {"thread_key": thread_key, "status": "not_found"}
+    backend = get_backend()
+    st = await backend.status(session)
+    if st == "gone":
+        await _db_update_state(thread_key, "gone")
+        return {"thread_key": thread_key, "status": "gone"}
+    rt = _runtime.get(session.sandbox_id)
+    result: dict[str, Any] = {
+        "thread_key": thread_key,
+        "status": st,
+        "sandbox_id": session.sandbox_id[:12],
+        "harness": session.harness,
+        "engine": session.engine,
+        "started_at": session.started_at,
+    }
+    if rt:
+        result["busy"] = rt.busy
+        if rt.last_result is not None:
+            result["last_result"] = rt.last_result
+    return result
 
 
 async def list_undelivered(max_age_s: int = 300) -> list[dict[str, Any]]:
-    """List threads that completed but may not have been delivered.
-
-    Returns sessions in 'idle' state that haven't been updated recently,
-    indicating the result may not have been picked up by a client.
-    """
+    """List threads that completed but may not have been delivered."""
     pool = _get_pool()
     rows = await pool.fetch(
         "SELECT thread_key, sandbox_id, harness, engine, state, updated_at "
@@ -803,11 +679,7 @@ async def list_undelivered(max_age_s: int = 300) -> list[dict[str, Any]]:
 
 
 async def claim_for_delivery(thread_key: str) -> bool:
-    """Atomically claim an idle session for delivery.
-
-    Uses a CAS update (state idle → delivering) so only one caller wins.
-    Returns True if this caller won the race.
-    """
+    """Atomically claim an idle session for delivery."""
     pool = _get_pool()
     result = await pool.execute(
         "UPDATE sandbox_sessions SET state = 'delivering', updated_at = NOW() "

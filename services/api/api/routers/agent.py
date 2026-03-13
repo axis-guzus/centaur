@@ -2,49 +2,33 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json as _json
 import time as _time
 import uuid
-from collections.abc import AsyncIterator
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from typing import Any
+from sse_starlette import EventSourceResponse, ServerSentEvent
 
 from pydantic import BaseModel
 
-from api.agent import get_or_spawn, get_status, stop_session, stream_exec, stream_reconnect
+from api.agent import (
+    claim_for_delivery,
+    get_or_spawn,
+    get_status,
+    list_undelivered,
+    mark_delivered,
+    stop_session,
+    stream_exec,
+    stream_reconnect,
+)
 from api.deps import require_scope, verify_api_key
 from api.warm_pool import pool_status
 from api.warm_pool import replenish as replenish_pool
 
 log = structlog.get_logger()
-
-SSE_KEEPALIVE_INTERVAL = 30  # seconds
-
-
-async def _sse_with_keepalive(source: AsyncIterator[str]) -> AsyncIterator[str]:
-    """Wrap an SSE source with periodic keepalive comments.
-
-    Sends ``: keepalive\\n\\n`` every SSE_KEEPALIVE_INTERVAL seconds when the
-    underlying source is silent. This prevents proxies and HTTP clients from
-    treating the connection as dead during long-running tool calls (e.g. oracle).
-    """
-    aiter = source.__aiter__()
-    while True:
-        try:
-            line = await asyncio.wait_for(
-                aiter.__anext__(), timeout=SSE_KEEPALIVE_INTERVAL
-            )
-            yield f"data: {line}\n\n"
-        except asyncio.TimeoutError:
-            yield ": keepalive\n\n"
-        except StopAsyncIteration:
-            break
-    yield "data: [DONE]\n\n"
 
 
 router = APIRouter(
@@ -78,16 +62,10 @@ async def execute(request: Request):
 
     session = await get_or_spawn(thread_key, harness, engine=engine)
 
-    return StreamingResponse(
-        _sse_with_keepalive(
-            stream_exec(
-                session,
-                message,
-                platform=platform,
-                user_id=user_id,
-            )
-        ),
-        media_type="text/event-stream",
+    return EventSourceResponse(
+        stream_exec(session, message, platform=platform, user_id=user_id),
+        ping_message_factory=lambda: ServerSentEvent(comment="keepalive"),
+        sep="\n",
     )
 
 
@@ -265,11 +243,10 @@ async def reconnect(req: ReconnectRequest):
     """
     session = await get_or_spawn(req.thread_key, req.harness, engine=req.engine)
 
-    return StreamingResponse(
-        _sse_with_keepalive(
-            stream_reconnect(session, skip_done_count=req.skip_done_count)
-        ),
-        media_type="text/event-stream",
+    return EventSourceResponse(
+        stream_reconnect(session, skip_done_count=req.skip_done_count),
+        ping_message_factory=lambda: ServerSentEvent(comment="keepalive"),
+        sep="\n",
     )
 
 
