@@ -773,6 +773,73 @@ class WebSearchClient:
             raise RuntimeError("Citation validation failed. Report did not include source citations.")
         return report
 
+    async def get_contents(
+        self,
+        urls: list[str],
+        *,
+        max_chars: int = 50000,
+        timeout_seconds: float = 30.0,
+    ) -> dict:
+        """Fetch the text content of one or more URLs via Exa's contents API.
+
+        Useful for reading paywalled articles, JS-rendered pages, or any URL
+        where a simple GET fails. Returns extracted text for each URL.
+        """
+        self._require_exa_api_key()
+        if not urls:
+            raise RuntimeError("urls list cannot be empty.")
+        payload: dict[str, Any] = {
+            "urls": urls,
+            "text": {"maxCharacters": max_chars},
+        }
+        async with httpx.AsyncClient(
+            base_url=self._exa_base_url, timeout=timeout_seconds
+        ) as client:
+            for attempt in range(self._max_retries):
+                response: httpx.Response | None = None
+                try:
+                    response = await client.post(
+                        "/contents", headers=self._exa_headers(), json=payload
+                    )
+                    if (
+                        self._is_retryable_status(response.status_code)
+                        and attempt < self._max_retries - 1
+                    ):
+                        await asyncio.sleep(self._backoff_seconds(attempt))
+                        continue
+                    response.raise_for_status()
+                    data = response.json()
+                    results = []
+                    for item in data.get("results", []):
+                        results.append({
+                            "url": item.get("url", ""),
+                            "title": item.get("title", ""),
+                            "text": item.get("text", ""),
+                            "published_date": item.get("publishedDate"),
+                        })
+                    return {
+                        "results": results,
+                        "cost_usd": self._extract_cost(data),
+                    }
+                except httpx.HTTPStatusError as exc:
+                    if (
+                        response is not None
+                        and self._is_retryable_status(response.status_code)
+                        and attempt < self._max_retries - 1
+                    ):
+                        await asyncio.sleep(self._backoff_seconds(attempt))
+                        continue
+                    body = exc.response.text if exc.response is not None else ""
+                    raise RuntimeError(
+                        f"Exa contents failed ({exc.response.status_code}): {body}"
+                    ) from exc
+                except httpx.RequestError as exc:
+                    if attempt < self._max_retries - 1:
+                        await asyncio.sleep(self._backoff_seconds(attempt))
+                        continue
+                    raise RuntimeError(f"Exa request failed: {exc}") from exc
+        raise RuntimeError("Exa contents failed after retries.")
+
     async def search(
         self,
         query: str,
