@@ -3,20 +3,21 @@ import { Chat } from "chat";
 import { createSlackAdapter, type SlackAdapter } from "@chat-adapter/slack";
 import { createPostgresState } from "@chat-adapter/state-pg";
 import { normalizeThreadKey, splitThreadKey } from "@centaur/harness-events";
+import { Pool } from "pg";
 import { log } from "@/lib/logger";
 import { API_URL, resilientFetch } from "./api-client";
 import { postContextMessage } from "./harness";
 import { handleMessage } from "./stream-turn";
-import { getPool } from "@/lib/db";
+
+let _pool: Pool | null = null;
+function getPool(): Pool {
+  if (!_pool) {
+    _pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
+  }
+  return _pool;
+}
 
 const SLACK_BOT_USERNAME = process.env.SLACK_BOT_USERNAME || "ai-agent";
-
-const DEFAULT_PROMPTS = [
-  { title: "Research a topic", message: "Research the latest developments on..." },
-  { title: "Analyze data", message: "Analyze the following data and summarize key findings:" },
-  { title: "Draft a document", message: "Draft a brief document about..." },
-  { title: "Explain code", message: "Explain how this part of the codebase works:" },
-];
 
 export function getSlackBootstrapState(): { ready: boolean; missingEnvKeys: string[] } {
   const required = ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"] as const;
@@ -108,33 +109,6 @@ function createBot() {
         thread: threadKey,
         error: error instanceof Error ? error.message : String(error),
       });
-    }
-  });
-
-  // ── Assistant events ────────────────────────────────────────────────────
-
-  bot.onAssistantThreadStarted(async (event) => {
-    try {
-      const slack = bot.getAdapter("slack") as SlackAdapter;
-      const prompts = [...DEFAULT_PROMPTS];
-      if (event.context.channelId) {
-        prompts.unshift({ title: "Summarize this channel", message: "Summarize the recent activity in this channel." });
-      }
-      await slack.setSuggestedPrompts(event.channelId, event.threadTs, prompts.slice(0, 4), "What can I help with?");
-    } catch (error) {
-      log.warn("assistant_thread_started_failed", { error: error instanceof Error ? error.message : String(error) });
-    }
-  });
-
-  bot.onAssistantContextChanged(async (event) => {
-    try {
-      const slack = bot.getAdapter("slack") as SlackAdapter;
-      const prompts = event.context.channelId
-        ? [{ title: "Summarize this channel", message: "Summarize the recent activity in this channel." }, ...DEFAULT_PROMPTS.slice(0, 3)]
-        : DEFAULT_PROMPTS.slice(0, 4);
-      await slack.setSuggestedPrompts(event.channelId, event.threadTs, prompts);
-    } catch (error) {
-      log.warn("assistant_context_changed_failed", { error: error instanceof Error ? error.message : String(error) });
     }
   });
 
