@@ -39,7 +39,7 @@ COPY services/api/api/ api/
 COPY services/api/db/ db/
 COPY tools/ tools/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-build-isolation-package centaur-api
+    uv sync --no-dev
 
 COPY services/api/bootstrap-secrets.sh /app/scripts/bootstrap-secrets.sh
 COPY services/api/entrypoint.sh /entrypoint.sh
