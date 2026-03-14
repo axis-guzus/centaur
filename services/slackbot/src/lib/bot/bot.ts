@@ -2,7 +2,6 @@ import { normalizeThreadKey, splitThreadKey } from "@centaur/harness-events";
 import { CentaurClient } from "@centaur/api-client";
 import type { InputContentBlock } from "@centaur/api-client";
 
-import type { StreamChunk } from "chat";
 import { log } from "@/lib/logger";
 import { ProgressTracker } from "./progress-tracker";
 
@@ -11,7 +10,7 @@ import { ProgressTracker } from "./progress-tracker";
 export interface BotThread {
   id: string;
   subscribe(): Promise<void>;
-  post(content: AsyncGenerator<StreamChunk> | { markdown: string }): Promise<{ id: string; edit(content: { markdown: string }): Promise<void> }>;
+  post(content: { markdown: string }): Promise<{ id: string; edit(content: { markdown: string }): Promise<void> }>;
 }
 
 export interface BotMessage {
@@ -109,80 +108,47 @@ export class SlackBot {
     log.info("execute_start", { thread_key: threadKey, user_id: userId });
 
     try {
-      const sent = await thread.post(this.stream(threadKey, text, tracker, userId));
+      // Consume the SSE stream, collect result text (no streaming to Slack)
+      for await (const event of this.client.execute({ threadKey, message: text, platform: "slack", userId })) {
+        // Drain the generator to update tracker state (we ignore the yielded chunks)
+        for (const _ of tracker.update(event)) { /* noop */ }
+      }
+
       const finalText = (tracker.resultText || tracker.lastAssistantText).trim();
-      log.info("execute_complete", { thread_key: threadKey, duration_s: Math.round((Date.now() - t0) / 100) / 10, result_length: finalText.length });
+      const dur = (Date.now() - t0) / 1000;
+      const durStr = dur < 10 ? `${dur.toFixed(1)}s` : `${Math.round(dur)}s`;
+      log.info("execute_complete", { thread_key: threadKey, duration_s: Math.round(dur * 10) / 10, result_length: finalText.length });
 
       if (finalText) {
-        await this.replaceWithFinal(thread, sent, threadKey, finalText, tracker, t0);
+        const harness = tracker.agentThreadId
+          ? `[agent](https://ampcode.com/threads/${tracker.agentThreadId})`
+          : "agent";
+        let md = `_${[process.env.APP_NAME || "Centaur", harness, durStr].join(" · ")}_\n\n${finalText}`;
+        if (this.viewerUrl) md += `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})`;
+        await thread.post({ markdown: md });
+      } else {
+        await thread.post({ markdown: "Agent completed with no output." });
+      }
+
+      if (this.slack) {
+        try {
+          const { channel, threadTs } = splitThreadKey(thread.id);
+          await this.slack.setAssistantTitle(channel, threadTs, finalText.slice(0, 60));
+        } catch (err) {
+          log.warn("set_title_failed", { thread_key: threadKey, error: err instanceof Error ? err.message : String(err) });
+        }
       }
     } catch (err) {
-      if (err instanceof Error && err.message.includes("message_not_in_streaming_state")) {
-        log.warn("slack_stream_expired", { thread_key: threadKey });
-        await this.postRecovery(thread, threadKey);
-        return;
-      }
       log.error("execute_error", { thread_key: threadKey, error: err instanceof Error ? err.message : String(err) });
-      await thread.post(async function* () {
-        yield { type: "task_update" as const, id: "init", title: "Failed", status: "error" as const };
-        yield { type: "markdown_text" as const, text: `Agent request failed: ${err instanceof Error ? err.message : "unknown error"}` };
-      }());
+      try {
+        await thread.post({ markdown: `Agent request failed: ${err instanceof Error ? err.message : "unknown error"}` });
+      } catch (postErr) {
+        log.error("error_post_failed", { thread_key: threadKey, error: postErr instanceof Error ? postErr.message : String(postErr) });
+      }
     }
-  }
-
-  private async *stream(threadKey: string, text: string, tracker: ProgressTracker, userId?: string): AsyncGenerator<StreamChunk> {
-    if (this.viewerUrl) yield { type: "markdown_text", text: `[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})` };
-    yield { type: "task_update", id: "init", title: "Starting…", status: "in_progress" };
-
-    for await (const event of this.client.execute({ threadKey, message: text, platform: "slack", userId })) {
-      yield* tracker.update(event);
-    }
-
-    if (!tracker.initCompleted) yield { type: "task_update", id: "init", title: "Started", status: "complete" };
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────
-
-  private async replaceWithFinal(
-    thread: BotThread,
-    sent: { id: string; edit(content: { markdown: string }): Promise<void> },
-    threadKey: string, text: string, tracker: ProgressTracker, t0: number,
-  ) {
-    const dur = (Date.now() - t0) / 1000;
-    const durStr = dur < 10 ? `${dur.toFixed(1)}s` : `${Math.round(dur)}s`;
-    const harness = tracker.agentThreadId
-      ? `[agent](https://ampcode.com/threads/${tracker.agentThreadId})`
-      : "agent";
-    let md = `_${[process.env.APP_NAME || "Centaur", harness, durStr].join(" · ")}_\n\n${text}`;
-    if (this.viewerUrl) md += `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})`;
-
-    try {
-      if (this.slack) {
-        const { channel } = splitThreadKey(thread.id);
-        await this.slack.replaceMessage(channel, sent.id, md);
-      } else {
-        await sent.edit({ markdown: md });
-      }
-    } catch {}
-
-    if (this.slack) {
-      try {
-        const { channel, threadTs } = splitThreadKey(thread.id);
-        await this.slack.setAssistantTitle(channel, threadTs, text.slice(0, 60));
-      } catch {}
-    }
-  }
-
-  private async postRecovery(thread: BotThread, threadKey: string) {
-    try {
-      const status = await this.client.getStatus(threadKey);
-      const result = typeof status.last_result === "string" ? status.last_result.trim() : "";
-      if (result) { await thread.post({ markdown: result }); return; }
-    } catch {}
-    if (this.viewerUrl) {
-      await thread.post({ markdown: `Agent completed. [View full output](${this.viewerUrl}/${encodeURIComponent(threadKey)})` });
-    }
-  }
 
   async resolveAttachments(threadId: string, msg: BotMessage): Promise<BotAttachment[]> {
     if (msg.attachments?.length) return [...msg.attachments];
