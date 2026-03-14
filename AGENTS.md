@@ -126,15 +126,50 @@ curl -s -X POST http://localhost:8000/agent/execute \
 
 Centaur is a modular service architecture. Each service communicates through well-defined interfaces. As long as you implement these interfaces, you can swap or extend any layer independently.
 
-**Client → API** (`POST /agent/execute`):
+**Client → API** (two-step message + execute protocol):
 
-Clients (slackbot, web app, CLI) are dumb adapters. They translate platform events into a standard execute request and render the SSE response for their platform. The API is the stateful brain — it owns session lifecycle, harness resolution, message persistence, and context accumulation. The `message` field is always treated as a user message — clients never send role information; the API and sandbox wrap it as `role: user` internally.
+Clients (slackbot, web app, CLI) are dumb adapters. They translate platform events into a standard two-step protocol and render the SSE response for their platform. The API is the stateful brain — it owns session lifecycle, harness resolution, message persistence, and context accumulation.
+
+**Step 1: Buffer the message** (`POST /agent/messages`)
+
+Clients first persist the user message (and any attachments) to `chat_messages`. This is a durable write — even if execute fails, the message is saved. Inline base64 image/document blocks are automatically extracted to the `attachments` table and replaced with lightweight `attachment_ref` parts.
+
+```
+POST /agent/messages
+{
+  "thread_key": "slack:C0AJ07U8Z1N:1773364194.179929",
+  "role": "user",
+  "parts": [{"type": "text", "text": "analyze this"}],
+  "user_id": "U123",
+  "metadata": {"user_name": "alice", "platform": "slack"}
+}
+
+// With attachments — parts contain Anthropic content blocks:
+POST /agent/messages
+{
+  "thread_key": "slack:C0AJ07U8Z1N:1773364194.179929",
+  "role": "user",
+  "parts": [
+    {"type": "text", "text": "what is this document?"},
+    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "..."}},
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}
+  ],
+  "user_id": "U123",
+  "metadata": {"user_name": "alice", "platform": "slack"}
+}
+
+← {"ok": true, "inserted": 1}
+```
+
+**Step 2: Execute the turn** (`POST /agent/execute`)
+
+Triggers the sandbox to process all un-delivered messages. The API flushes pending messages from `chat_messages` (using the `last_delivered_id` cursor in `sandbox_sessions`) into the sandbox's stdin. On first execute for a thread, a system message with platform formatting rules is also inserted.
 
 ```
 POST /agent/execute
 {
   "thread_key": "slack:C0AJ07U8Z1N:1773364194.179929",
-  "message": "analyze this",              // plain text (no attachments)
+  "message": "analyze this",              // plain text (duplicated for harness parsing)
   "harness": "amp",
   "platform": "slack",
   "user_id": "U123"
@@ -144,7 +179,7 @@ POST /agent/execute
 POST /agent/execute
 {
   "thread_key": "slack:C0AJ07U8Z1N:1773364194.179929",
-  "message": [                            // Anthropic content blocks
+  "message": [
     {"type": "text", "text": "what is this document?"},
     {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "..."}},
     {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}
@@ -155,8 +190,21 @@ POST /agent/execute
 }
 
 ← SSE stream of CanonicalEvents (NDJSON, one event per `data:` line)
-← data: [DONE]
+← data: {"type":"assistant","message":{...}}
+← data: {"type":"turn.done","turn_id":1,"result":"...","agent_thread_id":""}
 ```
+
+**What gets written to Postgres after a full turn:**
+
+| Table | What | When |
+|-------|------|------|
+| `chat_messages` (role=user) | User message parts (with `attachment_ref` replacing inline blobs) | Step 1 (`/agent/messages`) |
+| `attachments` | Raw binary blobs extracted from base64 image/document parts | Step 1 (automatic) |
+| `chat_messages` (role=system) | Platform formatting context (e.g. Slack markdown rules) | Step 2 (first execute only) |
+| `chat_messages` (role=assistant) | Final assistant response text | Step 2 (after `turn.done`) |
+| `sandbox_sessions` | Session state (`idle`), `last_delivered_id` cursor, `thread_name` | Step 2 (after `turn.done`) |
+
+Multiple messages can be buffered via repeated `/agent/messages` calls before a single `/agent/execute`. The flush pipeline delivers all un-delivered messages to the sandbox in order.
 
 **API → Sandbox** (Docker stdin/stdout, NDJSON):
 

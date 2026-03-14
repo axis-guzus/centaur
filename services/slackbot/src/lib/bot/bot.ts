@@ -75,17 +75,14 @@ export class SlackBot {
     }
 
     const text = (msg.text || "").trim();
-    const files = (msg.attachments || [])
-      .filter((a) => !!a.url && !!a.name)
-      .map((a) => ({ url: a.url!, name: a.name!, mimeType: a.mimeType }));
-    if (!text && files.length === 0) return;
+    if (!text && !(msg.attachments?.length)) return;
 
     try {
-      await this.client.postContext({
+      const parts = await this.buildInput(text || "Shared attachment in thread.", msg.attachments || []);
+      await this.client.message({
         threadKey: normalizeThreadKey(thread.id),
-        text: text || "Shared attachment in thread.",
+        parts,
         userId: msg.author.userId,
-        attachments: files.length > 0 ? files : undefined,
       });
     } catch (err) {
       log.warn("thread_context_post_failed", {
@@ -99,19 +96,12 @@ export class SlackBot {
 
   async executeTurn(thread: BotThread, text: string, attachments: BotAttachment[], userId?: string) {
     const threadKey = normalizeThreadKey(thread.id);
-    const input = await this.buildInput(text, attachments);
+    const parts = await this.buildInput(text, attachments);
 
-    // If there are non-text content blocks (image/document), buffer them via
-    // POST /messages so the API stores base64 in the attachments table and
-    // replaces them with attachment_ref. Then execute with plain text — the
-    // flush pipeline converts attachment_refs to download instructions.
-    let executeInput: string | InputContentBlock[];
-    if (typeof input !== "string" && input.some((b) => b.type !== "text")) {
-      await this.client.bufferMessage({ threadKey, parts: input as Record<string, unknown>[], userId });
-      executeInput = text;
-    } else {
-      executeInput = input;
-    }
+    // Step 1: Always buffer the message first (persists user msg + extracts attachments)
+    await this.client.message({ threadKey, parts, userId });
+
+    // Step 2: Execute with plain text (flush pipeline delivers everything from DB)
 
     const tracker = new ProgressTracker();
     const startTime = Date.now();
@@ -119,7 +109,7 @@ export class SlackBot {
     log.info("execute_start", { thread_key: threadKey, user_id: userId });
 
     try {
-      const sent = await thread.post(this.streamTurn(threadKey, executeInput, tracker, userId));
+      const sent = await thread.post(this.streamTurn(threadKey, text, tracker, userId));
 
       const harness = (tracker as any).harness || "agent";
       const finalText = (tracker.resultText || tracker.lastAssistantText).trim();
@@ -171,7 +161,7 @@ export class SlackBot {
   // ── Private ──────────────────────────────────────────────────────────────
 
   private async *streamTurn(
-    threadKey: string, input: string | InputContentBlock[], tracker: ProgressTracker, userId?: string,
+    threadKey: string, input: string, tracker: ProgressTracker, userId?: string,
   ): AsyncGenerator<StreamChunk> {
     if (this.viewerUrl) {
       yield { type: "markdown_text", text: `[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})` };
@@ -203,8 +193,8 @@ export class SlackBot {
     return [];
   }
 
-  async buildInput(text: string, attachments: BotAttachment[]): Promise<string | InputContentBlock[]> {
-    const blocks: InputContentBlock[] = [];
+  async buildInput(text: string, attachments: BotAttachment[]): Promise<InputContentBlock[]> {
+    const blocks: InputContentBlock[] = [{ type: "text", text }];
     for (const att of attachments) {
       if (!att.fetchData || !att.mimeType) continue;
       try {
@@ -216,7 +206,7 @@ export class SlackBot {
         log.warn("attachment_fetch_failed", { name: att.name || "unknown", error: err instanceof Error ? err.message : String(err) });
       }
     }
-    return blocks.length > 0 ? [{ type: "text", text }, ...blocks] : text;
+    return blocks;
   }
 
   private async recoverExpired(thread: BotThread, threadKey: string) {

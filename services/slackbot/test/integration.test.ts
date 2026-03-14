@@ -44,6 +44,7 @@ function createMockThread(id: string) {
         }
       }
       return {
+        id: `mock-msg-${postCount}`,
         async edit(c: { markdown: string }) {
           editMarkdown = c.markdown;
         },
@@ -134,7 +135,7 @@ describe.skipIf(!RUN_INTEGRATION)("SlackBot integration", () => {
     const beforePostCount = mock.postCount;
     await bot.onSubscribedMessage(mock.thread, userMessage("some context info"));
 
-    // postContext doesn't call thread.post, so postCount shouldn't change
+    // context message doesn't call thread.post, so postCount shouldn't change
     expect(mock.postCount).toBe(beforePostCount);
   }, 120_000);
 

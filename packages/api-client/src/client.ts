@@ -7,32 +7,32 @@ export type InputContentBlock =
   | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
   | { type: "document"; source: { type: "base64"; media_type: string; data: string } };
 
+export interface MessageOptions {
+  threadKey: string;
+  parts: InputContentBlock[];
+  userId?: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface ExecuteOptions {
   threadKey: string;
-  message: string | InputContentBlock[];
+  message: string;
   harness?: string;
   platform?: string;
   userId?: string;
   signal?: AbortSignal;
 }
 
-export interface PostContextOptions {
-  threadKey: string;
-  text: string;
-  userId?: string;
-  attachments?: Array<{ url: string; name: string; mimeType?: string }>;
-}
-
-export interface OrphanedEntry {
-  thread_key: string;
-  text: string;
-  updated_at?: string | null;
-}
-
 const BUSY_MAX_RETRIES = 4;
 const BUSY_INITIAL_DELAY_MS = 300;
 const BUSY_MAX_DELAY_MS = 2500;
 
+/**
+ * Centaur API client. Two-step protocol:
+ *
+ *   1. client.message()  — POST /agent/messages  (persist user message + attachments)
+ *   2. client.execute()  — POST /agent/execute   (run the turn, stream SSE response)
+ */
 export class CentaurClient {
   readonly http: AxiosInstance;
   private log?: { info: Function; warn: Function; error: Function };
@@ -50,6 +50,18 @@ export class CentaurClient {
     });
   }
 
+  /** Step 1: Buffer a user message into chat_messages. Always call before execute(). */
+  async message(opts: MessageOptions): Promise<void> {
+    await this.http.post("/agent/messages", {
+      thread_key: opts.threadKey,
+      role: "user",
+      parts: opts.parts,
+      user_id: opts.userId,
+      metadata: opts.metadata,
+    });
+  }
+
+  /** Step 2: Execute a turn. Streams CanonicalEvents via SSE. */
   async *execute(opts: ExecuteOptions): AsyncGenerator<CanonicalEvent, void, undefined> {
     const { threadKey, message, harness, platform, userId, signal } = opts;
 
@@ -61,7 +73,6 @@ export class CentaurClient {
       if (platform) body.platform = platform;
       if (userId) body.user_id = userId;
 
-      // SSE needs raw fetch — axios doesn't do streaming
       const res = await fetch(`${this.http.defaults.baseURL}/agent/execute`, {
         method: "POST",
         headers: {
@@ -104,50 +115,9 @@ export class CentaurClient {
     }
   }
 
-  async bufferMessage(opts: {
-    threadKey: string;
-    parts: Array<Record<string, unknown>>;
-    userId?: string;
-  }) {
-    await this.http.post("/agent/messages", {
-      thread_key: opts.threadKey,
-      messages: [{ role: "user", parts: opts.parts, user_id: opts.userId }],
-    });
-  }
-
-  async postContext(opts: PostContextOptions) {
-    const { threadKey, text, userId, attachments } = opts;
-    const metadata: Record<string, unknown> = {};
-    if (userId) metadata.user_id = userId;
-    if (attachments?.length) metadata.attachments = attachments;
-
-    await this.http.post("/agent/messages", {
-      thread_key: threadKey,
-      messages: [{ role: "user", parts: [{ type: "text", text }], user_id: userId, metadata }],
-    });
-  }
-
+  /** Check session status (used for recovery on expired streams). */
   async getStatus(threadKey: string) {
     const { data } = await this.http.get("/agent/status", { params: { key: threadKey } });
     return data as Record<string, unknown>;
-  }
-
-  async listOrphaned(opts?: { maxAgeS?: number }) {
-    const params = opts?.maxAgeS != null ? { max_age_s: opts.maxAgeS } : undefined;
-    const { data } = await this.http.get("/agent/orphaned", { params });
-    return data as OrphanedEntry[];
-  }
-
-  async claimDelivery(threadKey: string): Promise<boolean> {
-    try {
-      const { data } = await this.http.post("/agent/claim-delivery", { thread_key: threadKey });
-      return data.claimed;
-    } catch {
-      return false;
-    }
-  }
-
-  async markDelivered(threadKey: string) {
-    await this.http.post("/agent/mark-delivered", { thread_key: threadKey });
   }
 }

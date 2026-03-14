@@ -502,18 +502,17 @@ function makeMockThread(id = "C123:1234567890.123456"): BotThread {
       if (content && Symbol.asyncIterator in content) {
         for await (const _ of content) { /* drain */ }
       }
-      return { edit: vi.fn(async () => {}) };
+      return { id: "mock-msg", edit: vi.fn(async () => {}) };
     }),
   };
 }
 
 function makeMockClient(): CentaurClient {
   return {
+    message: vi.fn(async () => {}),
     execute: vi.fn(async function* () {
       yield { type: "result" as const, text: "done" };
     }),
-    postContext: vi.fn(async () => {}),
-    bufferMessage: vi.fn(async () => {}),
     getStatus: vi.fn(async () => ({})),
   } as unknown as CentaurClient;
 }
@@ -529,6 +528,7 @@ describe("onSubscribedMessage attachment refetch", () => {
     const slackAdapter: SlackAdapter = {
       fetchMessage: vi.fn(async () => ({ attachments: [refetchedAttachment] })),
       setAssistantTitle: vi.fn(async () => {}),
+      replaceMessage: vi.fn(async () => {}),
     };
 
     const client = makeMockClient();
@@ -548,13 +548,13 @@ describe("onSubscribedMessage attachment refetch", () => {
     // fetchMessage was called to refetch files
     expect(slackAdapter.fetchMessage).toHaveBeenCalledWith(thread.id, msg.ts);
 
-    // bufferMessage was called with content blocks containing the refetched PDF
-    expect(client.bufferMessage).toHaveBeenCalledTimes(1);
-    const bufferArgs = vi.mocked(client.bufferMessage).mock.calls[0][0];
-    const parts = bufferArgs.parts as Array<{ type: string }>;
+    // message() was called with content blocks containing the refetched PDF
+    expect(client.message).toHaveBeenCalledTimes(1);
+    const msgArgs = vi.mocked(client.message).mock.calls[0][0];
+    const parts = msgArgs.parts as Array<{ type: string }>;
     expect(parts.some((b) => b.type === "document")).toBe(true);
 
-    // execute was called with plain text (not content blocks)
+    // execute was called with plain text
     expect(client.execute).toHaveBeenCalledTimes(1);
     const executeArgs = vi.mocked(client.execute).mock.calls[0][0];
     expect(typeof executeArgs.message).toBe("string");
@@ -570,6 +570,7 @@ describe("onSubscribedMessage attachment refetch", () => {
     const slackAdapter: SlackAdapter = {
       fetchMessage: vi.fn(async () => ({ attachments: [] })),
       setAssistantTitle: vi.fn(async () => {}),
+      replaceMessage: vi.fn(async () => {}),
     };
 
     const client = makeMockClient();
@@ -589,10 +590,10 @@ describe("onSubscribedMessage attachment refetch", () => {
     // fetchMessage should NOT be called because attachments were already present
     expect(slackAdapter.fetchMessage).not.toHaveBeenCalled();
 
-    // bufferMessage was called with image content blocks
-    expect(client.bufferMessage).toHaveBeenCalledTimes(1);
-    const bufferArgs = vi.mocked(client.bufferMessage).mock.calls[0][0];
-    const parts = bufferArgs.parts as Array<{ type: string }>;
+    // message() was called with image content blocks
+    expect(client.message).toHaveBeenCalledTimes(1);
+    const msgArgs = vi.mocked(client.message).mock.calls[0][0];
+    const parts = msgArgs.parts as Array<{ type: string }>;
     expect(parts.some((b) => b.type === "image")).toBe(true);
 
     // execute was called with plain text
