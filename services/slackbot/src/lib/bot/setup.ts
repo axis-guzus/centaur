@@ -2,11 +2,18 @@ import { Chat } from "chat";
 import { createSlackAdapter, type SlackAdapter } from "@chat-adapter/slack";
 import { createPostgresState } from "@chat-adapter/state-pg";
 import { Pool } from "pg";
-import { SlackBot } from "./bot";
+import { SlackBot, type SlackAdapter as BotSlackAdapter } from "./bot";
 
 const hasSlackCreds = Boolean(process.env.SLACK_BOT_TOKEN && process.env.SLACK_SIGNING_SECRET);
 
 let _instance: { chat: Chat; bot: SlackBot } | null = null;
+
+function wrapAdapter(adapter: SlackAdapter): BotSlackAdapter {
+  return {
+    fetchMessage: (threadId, ts) => adapter.fetchMessage(threadId, ts) as any,
+    setAssistantTitle: (channel, threadTs, title) => adapter.setAssistantTitle(channel, threadTs, title),
+  };
+}
 
 function create() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
@@ -19,7 +26,7 @@ function create() {
   } as ConstructorParameters<typeof Chat>[0]);
 
   const slack = hasSlackCreds ? chat.getAdapter("slack") as SlackAdapter : undefined;
-  const bot = SlackBot.createFromEnv(slack as any);
+  const bot = SlackBot.createFromEnv(slack ? wrapAdapter(slack) : undefined);
 
   chat.onNewMention((t, m) => bot.onNewMention(t as any, m as any));
   chat.onSubscribedMessage((t, m) => bot.onSubscribedMessage(t as any, m as any));

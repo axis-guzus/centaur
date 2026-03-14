@@ -2,6 +2,7 @@ import { normalizeThreadKey, splitThreadKey } from "@centaur/harness-events";
 import { CentaurClient } from "@centaur/api-client";
 import type { InputContentBlock } from "@centaur/api-client";
 
+import type { StreamChunk } from "chat";
 import { log } from "@/lib/logger";
 import { ProgressTracker } from "./progress-tracker";
 
@@ -10,7 +11,7 @@ import { ProgressTracker } from "./progress-tracker";
 export interface BotThread {
   id: string;
   subscribe(): Promise<void>;
-  post(content: { markdown: string }): Promise<{ id: string; edit(content: { markdown: string }): Promise<void> }>;
+  post(content: AsyncGenerator<StreamChunk> | { markdown: string }): Promise<{ id: string; edit(content: { markdown: string }): Promise<void> }>;
 }
 
 export interface BotMessage {
@@ -30,7 +31,6 @@ export interface BotAttachment {
 export interface SlackAdapter {
   fetchMessage(threadId: string, ts: string): Promise<{ attachments?: BotAttachment[] } | null>;
   setAssistantTitle(channel: string, threadTs: string, title: string): Promise<void>;
-  replaceMessage(channel: string, ts: string, text: string): Promise<void>;
 }
 
 // ── Bot ───────────────────────────────────────────────────────────────────
@@ -108,27 +108,9 @@ export class SlackBot {
     log.info("execute_start", { thread_key: threadKey, user_id: userId });
 
     try {
-      // Consume the SSE stream, collect result text (no streaming to Slack)
-      for await (const event of this.client.execute({ threadKey, message: text, platform: "slack", userId })) {
-        // Drain the generator to update tracker state (we ignore the yielded chunks)
-        for (const _ of tracker.update(event)) { /* noop */ }
-      }
-
+      await thread.post(this.stream(threadKey, text, tracker, userId, t0));
       const finalText = (tracker.resultText || tracker.lastAssistantText).trim();
-      const dur = (Date.now() - t0) / 1000;
-      const durStr = dur < 10 ? `${dur.toFixed(1)}s` : `${Math.round(dur)}s`;
-      log.info("execute_complete", { thread_key: threadKey, duration_s: Math.round(dur * 10) / 10, result_length: finalText.length });
-
-      if (finalText) {
-        const harness = tracker.agentThreadId
-          ? `[agent](https://ampcode.com/threads/${tracker.agentThreadId})`
-          : "agent";
-        let md = `_${[process.env.APP_NAME || "Centaur", harness, durStr].join(" · ")}_\n\n${finalText}`;
-        if (this.viewerUrl) md += `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})`;
-        await thread.post({ markdown: md });
-      } else {
-        await thread.post({ markdown: "Agent completed with no output." });
-      }
+      log.info("execute_complete", { thread_key: threadKey, duration_s: Math.round((Date.now() - t0) / 100) / 10, result_length: finalText.length });
 
       if (this.slack) {
         try {
@@ -145,6 +127,33 @@ export class SlackBot {
       } catch (postErr) {
         log.error("error_post_failed", { thread_key: threadKey, error: postErr instanceof Error ? postErr.message : String(postErr) });
       }
+    }
+  }
+
+  private async *stream(
+    threadKey: string, text: string, tracker: ProgressTracker, userId: string | undefined, t0: number,
+  ): AsyncGenerator<StreamChunk> {
+    yield { type: "task_update", id: "init", title: "Starting…", status: "in_progress" };
+
+    for await (const event of this.client.execute({ threadKey, message: text, platform: "slack", userId })) {
+      yield* tracker.update(event);
+    }
+
+    if (!tracker.initCompleted) yield { type: "task_update", id: "init", title: "Started", status: "complete" };
+
+    // Emit the final response as markdown_text so Slack's streaming API includes it
+    const finalText = (tracker.resultText || tracker.lastAssistantText).trim();
+    if (finalText) {
+      const dur = (Date.now() - t0) / 1000;
+      const durStr = dur < 10 ? `${dur.toFixed(1)}s` : `${Math.round(dur)}s`;
+      const harness = tracker.agentThreadId
+        ? `[agent](https://ampcode.com/threads/${tracker.agentThreadId})`
+        : "agent";
+      let md = `_${[process.env.APP_NAME || "Centaur", harness, durStr].join(" · ")}_\n\n${finalText}`;
+      if (this.viewerUrl) md += `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})`;
+      yield { type: "markdown_text", text: md };
+    } else {
+      yield { type: "markdown_text", text: "Agent completed with no output." };
     }
   }
 
