@@ -1,8 +1,8 @@
-import { Chat } from "chat";
+import { Chat, type StreamChunk } from "chat";
 import { createSlackAdapter, type SlackAdapter } from "@chat-adapter/slack";
 import { createPostgresState } from "@chat-adapter/state-pg";
 import { Pool } from "pg";
-import { SlackBot, type SlackAdapter as BotSlackAdapter } from "./bot";
+import { SlackBot, type SlackAdapter as BotSlackAdapter, type BotThread } from "./bot";
 
 const hasSlackCreds = Boolean(process.env.SLACK_BOT_TOKEN && process.env.SLACK_SIGNING_SECRET);
 
@@ -13,6 +13,38 @@ function wrapAdapter(adapter: SlackAdapter): BotSlackAdapter {
     fetchMessage: (threadId, ts) => adapter.fetchMessage(threadId, ts) as any,
     setAssistantTitle: (channel, threadTs, title) => adapter.setAssistantTitle(channel, threadTs, title),
   };
+}
+
+function wrapThread(thread: any): BotThread {
+  return {
+    get id() { return thread.id; },
+    subscribe: () => thread.subscribe(),
+    startTyping: (status?: string) => thread.startTyping(status),
+    post: async (content, options) => {
+      if (options?.taskDisplayMode && isAsyncIterable(content) && thread.adapter?.stream) {
+        // Extract recipient fields from the thread's current message context
+        // (same logic as chat's ThreadImpl.handleStream)
+        const currentMsg = thread._currentMessage;
+        const recipientUserId = currentMsg?.author?.userId;
+        const recipientTeamId = currentMsg?.raw?.team_id ?? currentMsg?.raw?.team;
+
+        const raw = await thread.adapter.stream(
+          thread.id,
+          content as AsyncIterable<string | StreamChunk>,
+          { taskDisplayMode: options.taskDisplayMode, recipientUserId, recipientTeamId },
+        );
+        return {
+          id: raw.id ?? "unknown",
+          edit: async (c: { markdown: string }) => { await thread.adapter.editMessage(thread.id, raw.id, c); },
+        };
+      }
+      return thread.post(content);
+    },
+  };
+}
+
+function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
+  return v != null && typeof v === "object" && Symbol.asyncIterator in v;
 }
 
 function create() {
@@ -28,8 +60,8 @@ function create() {
   const slack = hasSlackCreds ? chat.getAdapter("slack") as SlackAdapter : undefined;
   const bot = SlackBot.createFromEnv(slack ? wrapAdapter(slack) : undefined);
 
-  chat.onNewMention((t, m) => bot.onNewMention(t as any, m as any));
-  chat.onSubscribedMessage((t, m) => bot.onSubscribedMessage(t as any, m as any));
+  chat.onNewMention((t, m) => bot.onNewMention(wrapThread(t), m as any));
+  chat.onSubscribedMessage((t, m) => bot.onSubscribedMessage(wrapThread(t), m as any));
 
   return { chat, bot };
 }
