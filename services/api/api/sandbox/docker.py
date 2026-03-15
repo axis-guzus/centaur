@@ -49,17 +49,10 @@ def _repos_host_dir() -> str:
 
 def _repo_host_dir() -> str:
     """Host-side path to the centaur repo root (for bind-mounting prompts/personas)."""
-    return os.getenv(
-        "REPO_HOST_DIR", os.path.join(_repos_host_dir(), "paradigmxyz", "centaur")
-    )
+    return os.getenv("REPO_HOST_DIR", os.path.join(_repos_host_dir(), "paradigmxyz", "centaur"))
 
 
-_HARNESS_STUB_KEYS = (
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "AMP_API_KEY",
-    "GITHUB_TOKEN",
-)
+_HARNESS_STUB_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AMP_API_KEY", "GITHUB_TOKEN")
 
 
 def _build_harness_cmd(engine: str, model: str | None = None) -> list[str]:
@@ -72,12 +65,8 @@ def _build_harness_cmd(engine: str, model: str | None = None) -> list[str]:
         return cmd
     if engine == "claude-code":
         cmd = [
-            "claude",
-            "--dangerously-skip-permissions",
-            "--output-format",
-            "stream-json",
-            "--input-format",
-            "stream-json",
+            "claude", "--dangerously-skip-permissions",
+            "--output-format", "stream-json", "--input-format", "stream-json",
             "--verbose",
         ]
         if model:
@@ -126,9 +115,7 @@ def _container_env(thread_key: str, container_name: str) -> list[str]:
     return env
 
 
-async def _wait_ready(
-    client: aiodocker.Docker, container_id: str, timeout: int = 15
-) -> float:
+async def _wait_ready(client: aiodocker.Docker, container_id: str, timeout: int = 15) -> float:
     """Wait for the entrypoint to signal readiness (touch ~/.ready)."""
     t0 = time.monotonic()
     deadline = t0 + timeout
@@ -146,9 +133,7 @@ async def _wait_ready(
         try:
             container = await client.containers.get(container_id)
             exec_obj = await container.exec(
-                cmd=["test", "-f", "/home/agent/.ready"],
-                stdout=True,
-                stderr=True,
+                cmd=["test", "-f", "/home/agent/.ready"], stdout=True, stderr=True,
             )
             stream = exec_obj.start(detach=False)
             async with stream:
@@ -203,9 +188,7 @@ class DockerSandboxBackend(SandboxBackend):
         client = self._get_client()
         repos_dir = os.path.abspath(_repos_host_dir())
 
-        container_name = (
-            f"centaur-sandbox-{thread_key.replace(':', '-').replace('.', '-')[:40]}"
-        )
+        container_name = f"centaur-sandbox-{thread_key.replace(':', '-').replace('.', '-')[:40]}"
         env = _container_env(thread_key, container_name)
         if persona:
             env.append(f"AGENT_PERSONA={persona}")
@@ -242,11 +225,6 @@ class DockerSandboxBackend(SandboxBackend):
         # Point sandbox Docker CLI at the sidecar
         env.append(f"DOCKER_HOST=tcp://{dind_name}:2375")
 
-        # Ensure Docker CLI traffic to the DinD sidecar bypasses the HTTP proxy
-        for i, v in enumerate(env):
-            if v.startswith(("NO_PROXY=", "no_proxy=")):
-                env[i] = v + f",{dind_name}"
-
         labels = {
             "centaur-agent": "true",
             "ai2.pipe": "true",
@@ -266,9 +244,7 @@ class DockerSandboxBackend(SandboxBackend):
 
         # Bind-mount base system prompt
         repo_host = _repo_host_dir()
-        base_prompt_host = os.path.join(
-            repo_host, "services", "sandbox", "SYSTEM_PROMPT.md"
-        )
+        base_prompt_host = os.path.join(repo_host, "services", "sandbox", "SYSTEM_PROMPT.md")
         binds.append(f"{base_prompt_host}:/home/agent/AGENTS_BASE.md:ro")
 
         # Bind-mount persona directory if selected
@@ -431,19 +407,10 @@ class DockerSandboxBackend(SandboxBackend):
             rt.stream = None
 
     async def rename_by_id(self, sandbox_id: str, new_name: str) -> None:
-        """Rename a sandbox and its DinD sidecar by ID."""
+        """Rename a container by ID (no session needed)."""
         client = self._get_client()
-        # Rename the DinD sidecar first (derive old name from current sandbox name)
         with contextlib.suppress(Exception):
             container = await client.containers.get(sandbox_id)
-            info = await container.show()
-            old_name = info.get("Name", "").lstrip("/")
-            if old_name:
-                old_dind = _dind_name(old_name)
-                new_dind = _dind_name(new_name)
-                with contextlib.suppress(Exception):
-                    dind = await client.containers.get(old_dind)
-                    await dind.rename(new_dind)
             await container.rename(new_name)
 
     async def refresh_token_by_id(self, sandbox_id: str, new_token: str) -> None:
@@ -462,12 +429,7 @@ class DockerSandboxBackend(SandboxBackend):
             )
 
     async def exec_run(
-        self,
-        sandbox_id: str,
-        cmd: list[str],
-        *,
-        environment: dict | None = None,
-        user: str = "",
+        self, sandbox_id: str, cmd: list[str], *, environment: dict | None = None, user: str = ""
     ) -> tuple[int, bytes]:
         """Run a command inside a container and return (exit_code, output)."""
         client = self._get_client()
