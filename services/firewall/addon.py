@@ -110,6 +110,7 @@ ALLOWED_OUTBOUND_HEADERS: frozenset[str] = frozenset({
     "cache-control", "pragma", "if-none-match", "if-modified-since",
     "range", "cookie",
     "notion-version",
+    "jwt", "api-version",
 })
 
 FIXED_USER_AGENT = "ai-v2-sandbox/1.0"
