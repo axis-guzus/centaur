@@ -60,16 +60,62 @@ Create searches targeting high-signal profiles:
    - Look for promotions, title progressions, scope expansions
 
 4. **Talent Density of Organizations** (20%)
-   - Exclusivity of teams they've worked on
-   - Early employees at hypergrowth startups (Uber pre-2014, Stripe pre-2016, Coinbase pre-2017)
-   - Elite teams: Jane Street, Two Sigma, Renaissance, Google Brain, DeepMind
-   - Early Paradigm portfolio companies
+   - Evaluated **dynamically** — do not rely solely on the static elite list
+   - For any company not in the known-elite cache, run the **Company Enrichment** step (see below) to score it
+   - Signals: investor quality, funding stage, headcount, engineering reputation
+   - Known-elite overrides (always score 20, skip enrichment): Jane Street, Two Sigma, Renaissance, Google Brain, DeepMind, Paradigm, a16z crypto
+   - Early employees at hypergrowth startups get bonus points (see Timing Window)
 
 5. **Timing Window** (15%)
    - When did they join high-performers?
    - Uber 2013 > Uber 2017
    - Coinbase 2015 > Coinbase 2020
    - Earlier = higher agency signal
+
+### Company Enrichment (Dynamic Talent Density Evaluation)
+
+When a candidate's company is **not** in the known-elite list, evaluate it dynamically before scoring.
+Cache results so each company is only looked up once per sourcing run.
+
+**Step 1 — Web search:**
+```bash
+call websearch search '{"query":"<company_name> funding round investors headcount site:crunchbase.com OR site:pitchbook.com OR site:techcrunch.com"}'
+```
+
+**Step 2 — Extract signals and compute a company talent-density score (0–20):**
+
+| Signal | Points | How to Assess |
+|--------|--------|---------------|
+| **Tier-1 VC backing** (Sequoia, a16z, Founders Fund, Paradigm, YC, Benchmark, Accel, Thrive, Ribbit) | +8 | Any tier-1 investor in any round |
+| **Tier-2 VC backing** (other well-known VCs not in tier 1) | +4 | Known institutional lead, but not tier-1 |
+| **Late-stage or public with strong eng reputation** | +6 | Series C+ or public, known for engineering excellence |
+| **Early-stage with strong founding team** | +6 | Pre-Series B, founders from elite companies/schools |
+| **Small headcount / high funding ratio** | +4 | < 100 employees with $20M+ raised = selective hiring |
+| **Open-source presence** | +2 | Popular OSS projects (1k+ GitHub stars) |
+
+Cap the total at 20. If the web search returns no meaningful results (stealth company, very new), default to a score of 5.
+
+**Step 3 — Cache the result:**
+Store `{company_name: {score, investors, headcount, stage, notes}}` in a dict and reuse for all candidates at that company.
+
+**Known-elite cache (skip enrichment, always score 20):**
+```python
+ELITE_COMPANIES = {
+    'jane street', 'two sigma', 'renaissance', 'citadel', 'de shaw',
+    'google brain', 'google deepmind', 'deepmind', 'openai', 'anthropic',
+    'paradigm', 'a16z crypto',
+}
+```
+
+**Early-stage bonus companies (score 20 + timing bonus applies):**
+```python
+EARLY_STAGE_BONUS = {
+    'stripe': 2016, 'coinbase': 2017, 'uber': 2014,
+    'openai': 2020, 'anthropic': 2023, 'square': 2015,
+    'plaid': 2018, 'figma': 2019, 'databricks': 2020,
+}
+# If candidate joined before the cutoff year, add +5 timing bonus (capped at 20 total for density, timing is separate 15% bucket)
+```
 
 ### 4. Data Sources & Tools
 
@@ -284,19 +330,25 @@ async def source_candidates(job_description: str, role_name: str):
     return f"Created sheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
 
 def score_candidates(candidates, target_title: str, target_location: str = None):
-    """Score based on the 5 criteria, with location filtering"""
+    """Score based on the 5 criteria, with location filtering and dynamic company enrichment."""
     elite_schools = {'mit', 'stanford', 'cmu', 'caltech', 'harvard', 'princeton', 'yale', 'berkeley', 'oxford', 'cambridge'}
-    elite_companies = {
-        'stripe': {'weight': 20, 'early_year': 2016},
-        'coinbase': {'weight': 20, 'early_year': 2017},
-        'uber': {'weight': 15, 'early_year': 2014},
-        'openai': {'weight': 20, 'early_year': 2020},
-        'anthropic': {'weight': 20, 'early_year': 2023},
-        'jane street': {'weight': 20, 'early_year': None},
-        'two sigma': {'weight': 20, 'early_year': None},
-        'paradigm': {'weight': 20, 'early_year': None},
-        'a16z crypto': {'weight': 20, 'early_year': None},
+
+    # Static elite companies — always score 20, skip enrichment
+    ELITE_COMPANIES = {
+        'jane street', 'two sigma', 'renaissance', 'citadel', 'de shaw',
+        'google brain', 'google deepmind', 'deepmind', 'openai', 'anthropic',
+        'paradigm', 'a16z crypto',
     }
+
+    # Early-stage bonus companies — score 20 + timing bonus if joined before cutoff year
+    EARLY_STAGE_BONUS = {
+        'stripe': 2016, 'coinbase': 2017, 'uber': 2014,
+        'openai': 2020, 'anthropic': 2023, 'square': 2015,
+        'plaid': 2018, 'figma': 2019, 'databricks': 2020,
+    }
+
+    # Cache for dynamically enriched companies: {name: {score, investors, headcount, stage, notes}}
+    company_cache = {}
 
     # Location filtering (hard requirement)
     if target_location and target_location.lower() not in ['remote', '']:
@@ -329,18 +381,70 @@ def score_candidates(candidates, target_title: str, target_location: str = None)
         elif 'senior' in title or 'lead' in title:
             score += 12
 
-        # Talent density (20%) + Timing (15%)
+        # Talent density (20%) — dynamic enrichment for unknown companies
         company = (c.get('company', '') or '').lower()
-        for co_name, co_data in elite_companies.items():
-            if co_name in company:
-                score += co_data['weight']
-                notes.append(co_name)
+        company_score = 0
+        company_matched = False
+
+        # Check static elite list first (fast path)
+        for elite in ELITE_COMPANIES:
+            if elite in company:
+                company_score = 20
+                notes.append(elite)
+                company_matched = True
                 break
+
+        # Check early-stage bonus list
+        if not company_matched:
+            for co_name, cutoff_year in EARLY_STAGE_BONUS.items():
+                if co_name in company:
+                    company_score = 20
+                    notes.append(f"{co_name} (early-stage)")
+                    company_matched = True
+                    break
+
+        # Dynamic enrichment — websearch for unknown companies
+        if not company_matched and company and company not in company_cache:
+            # Run: call websearch search '{"query":"<company> funding round investors headcount"}'
+            # Parse results for: tier-1 VC backing (+8), tier-2 VC (+4), late-stage eng rep (+6),
+            # early-stage strong founders (+6), small headcount/high funding (+4), OSS presence (+2)
+            # Cap at 20. Default to 5 if no data found.
+            enrichment = enrich_company(company)  # See Company Enrichment section above
+            company_cache[company] = enrichment
+
+        if not company_matched and company in company_cache:
+            enrichment = company_cache[company]
+            company_score = enrichment['score']
+            if enrichment.get('notes'):
+                notes.append(enrichment['notes'])
+
+        score += company_score
 
         c['score'] = min(score, 100)
         c['notes'] = ', '.join(notes)
 
     return candidates
+
+
+def enrich_company(company_name: str) -> dict:
+    """
+    Dynamically evaluate a company's talent density via web search.
+    Called via: call websearch search '{"query":"<company_name> funding round investors headcount"}'
+
+    Returns: {score: int (0-20), investors: str, headcount: str, stage: str, notes: str}
+
+    Scoring rubric:
+      +8  Tier-1 VC backing (Sequoia, a16z, Founders Fund, Paradigm, YC, Benchmark, Accel, Thrive, Ribbit)
+      +4  Tier-2 VC backing (other known institutional investors)
+      +6  Late-stage/public with strong engineering reputation
+      +6  Early-stage with strong founding team (founders from elite cos/schools)
+      +4  Small headcount + high funding ratio (< 100 employees, $20M+ raised)
+      +2  Open-source presence (1k+ GitHub stars)
+      Cap at 20. Default to 5 if no meaningful data found.
+    """
+    # Implementation: use websearch tool, parse results, compute score
+    # This is executed by the agent at runtime, not as literal Python
+    pass
 
 def location_matches(candidate_location: str, target_location: str) -> bool:
     """Check if candidate location matches target (case-insensitive, partial match)"""
