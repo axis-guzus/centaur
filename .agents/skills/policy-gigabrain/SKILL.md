@@ -122,6 +122,9 @@ Write 1-2 paragraphs in full sentences covering: key career milestones (Hill ten
 ## Crypto Knowledge
 Write 1-2 paragraphs in full sentences covering: their overall familiarity level with crypto and digital assets, notable public statements or positions on crypto, DeFi, or stablecoins, relevant votes on crypto or fintech legislation, and the sophistication level of key staffers covering crypto and tech policy.
 
+## Stance on Prediction Markets
+Write 5-7 sentences covering: (1) the member's general opinion of prediction markets (public statements, letters signed, bills sponsored or co-sponsored); (2) relevant current events such as prediction market bills introduced, CFTC rulemakings, or court cases (e.g., Kalshi litigation); (3) whether those current events are likely to shift the member's position; and (4) any constituent, state, or district considerations that could influence their stance — including state gambling revenue, tribal gaming interests, state gambling laws, DGE/gaming commission enforcement actions, and the competitive dynamics between CFTC-regulated event contracts and state-licensed sportsbooks. Frame the analysis around Paradigm's position that prediction markets and all event contracts (including sports betting) should be regulated by the CFTC under exclusive federal jurisdiction.
+
 ## Goals
 - **Primary Ask:** [What we want from this meeting]
 - **Secondary Objectives:** [Relationship-building goals, intel to gather, positions to reinforce]
