@@ -6,6 +6,8 @@ import { log } from "@/lib/logger";
 import { SlackBot, type SlackAdapter as BotSlackAdapter, type BotThread } from "./bot";
 
 const hasSlackCreds = Boolean(process.env.SLACK_BOT_TOKEN && process.env.SLACK_SIGNING_SECRET);
+const POLICY_TOUCHPOINT_CHANNEL_ID = "C0AM0TR8N91";
+const POLICY_TOUCHPOINT_PATTERN = /(^|\s)#touchpoint\b/i;
 
 let _instance: { chat: Chat; bot: SlackBot; ready: Promise<void> } | null = null;
 
@@ -52,6 +54,16 @@ function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
   return v != null && typeof v === "object" && Symbol.asyncIterator in v;
 }
 
+export function registerPolicyTouchpointTrigger(
+  chat: Pick<Chat, "onNewMessage">,
+  bot: Pick<SlackBot, "onNewMention">,
+) {
+  chat.onNewMessage(POLICY_TOUCHPOINT_PATTERN, async (thread, message) => {
+    if (!thread.id.startsWith(`${POLICY_TOUCHPOINT_CHANNEL_ID}:`)) return;
+    await bot.onNewMention(wrapThread(thread), message as any);
+  });
+}
+
 function create() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
 
@@ -75,6 +87,7 @@ function create() {
   });
 
   chat.onNewMention((t, m) => bot.onNewMention(wrapThread(t), m as any));
+  registerPolicyTouchpointTrigger(chat, bot);
   chat.onSubscribedMessage((t, m) => bot.onSubscribedMessage(wrapThread(t), m as any));
 
   return { chat, bot, ready };
