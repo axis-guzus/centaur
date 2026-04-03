@@ -56,7 +56,7 @@ def _normalize_thread_key_input(value: str) -> str:
 class GrafanaClient:
     """Client for the Grafana HTTP API.
 
-    Supports dashboard search, Prometheus/VictoriaLogs datasource proxy queries,
+    Supports dashboard search, VictoriaMetrics/VictoriaLogs datasource proxy queries,
     alert rules, and annotations. Authenticates via service-account token
     (GRAFANA_API_KEY) or basic auth (GRAFANA_USER / GRAFANA_PASSWORD).
     """
@@ -176,9 +176,9 @@ class GrafanaClient:
         """List all configured datasources."""
         return self._request("GET", "/api/datasources")
 
-    # -- Prometheus queries via datasource proxy ------------------------------
+    # -- MetricsQL queries via datasource proxy ---------------------------------
 
-    def query_prometheus(
+    def query_metrics(
         self,
         expr: str,
         datasource_uid: str = "victoriametrics",
@@ -186,11 +186,11 @@ class GrafanaClient:
         end: str | None = None,
         step: str = "60s",
     ) -> dict:
-        """Run a PromQL instant or range query via the datasource proxy.
+        """Run a MetricsQL instant or range query via the datasource proxy.
 
         Args:
-            expr: PromQL expression.
-            datasource_uid: Datasource UID (default: 'prometheus').
+            expr: MetricsQL expression.
+            datasource_uid: Datasource UID (default: 'victoriametrics').
             start: Range query start (RFC3339 or Unix epoch). Omit for instant query.
             end: Range query end. Defaults to 'now' for range queries.
             step: Range query step (e.g. '60s', '5m').
@@ -210,18 +210,18 @@ class GrafanaClient:
             params={"query": expr},
         )
 
-    def prometheus_labels(self, datasource_uid: str = "victoriametrics") -> list[str]:
-        """List all Prometheus label names."""
+    def metric_labels(self, datasource_uid: str = "victoriametrics") -> list[str]:
+        """List all metric label names."""
         data = self._request(
             "GET",
             f"/api/datasources/proxy/uid/{datasource_uid}/api/v1/labels",
         )
         return data.get("data", [])
 
-    def prometheus_label_values(
+    def metric_label_values(
         self, label: str, datasource_uid: str = "victoriametrics"
     ) -> list[str]:
-        """Get values for a Prometheus label."""
+        """Get values for a metric label."""
         data = self._request(
             "GET",
             f"/api/datasources/proxy/uid/{datasource_uid}/api/v1/label/{label}/values",
@@ -288,7 +288,7 @@ class GrafanaClient:
     # -- Alerts --------------------------------------------------------------
 
     def get_alerts(self) -> list[dict]:
-        """Get Prometheus-style active alerts."""
+        """Get active alerts."""
         data = self._request("GET", "/api/prometheus/grafana/api/v1/alerts")
         return data.get("data", {}).get("alerts", [])
 

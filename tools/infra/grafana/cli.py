@@ -111,18 +111,18 @@ def list_datasources(
     console.print(table)
 
 
-@app.command("prom")
-def query_prometheus(
-    expr: str = typer.Argument(..., help="PromQL expression"),
-    datasource: str = typer.Option("prometheus", "--ds", help="Datasource UID"),
+@app.command("query")
+def query_metrics(
+    expr: str = typer.Argument(..., help="MetricsQL expression"),
+    datasource: str = typer.Option("victoriametrics", "--ds", help="Datasource UID"),
     start: str = typer.Option(None, "--start", "-s", help="Range start (RFC3339 / epoch)"),
     end: str = typer.Option(None, "--end", "-e", help="Range end"),
     step: str = typer.Option("60s", "--step", help="Range query step"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
-    """Run a PromQL query via datasource proxy."""
+    """Run a MetricsQL query via datasource proxy."""
     client = get_client()
-    result = client.query_prometheus(
+    result = client.query_metrics(
         expr=expr, datasource_uid=datasource, start=start, end=end, step=step
     )
 

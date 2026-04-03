@@ -35,7 +35,7 @@ Centaur is infrastructure for running AI agents in production that limits the bl
 
 5. **Pluggable secrets**: Ships with [1Password](https://1password.com/) support. The secrets backend is an interface — bring your own HashiCorp Vault, AWS Secrets Manager, or plain environment variables.
 
-6. **Observable by default**: Every service writes structured JSON to stdout. [Promtail](services/promtail/) auto-discovers all containers (including ephemeral agent sandboxes) and ships logs to [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/). The [firewall](services/firewall/) emits audit events for every outbound request. Query everything in [Grafana](services/grafana/) or via [LogsQL](https://docs.victoriametrics.com/victorialogs/logsql/) CLI.
+6. **Observable by default**: Every service writes structured JSON to stdout. [Fluent Bit](services/fluentbit/) auto-discovers all containers (including ephemeral agent sandboxes) and ships logs to [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/). Metrics push to [VictoriaMetrics](https://docs.victoriametrics.com/). The [firewall](services/firewall/) emits audit events for every outbound request. Query everything in [Grafana](services/grafana/) or via [LogsQL](https://docs.victoriametrics.com/victorialogs/logsql/) CLI.
 
 7. **Free for anyone to use any way they want**: Open source, built by [Paradigm](https://paradigm.xyz). Private extensions via submodule + docker-compose override — no fork required.
 

@@ -1,8 +1,7 @@
 """Push-based metrics module for VictoriaMetrics.
 
-Replaces prometheus_client with lightweight in-memory metric types and a
-background asyncio task that periodically POSTs Prometheus text exposition
-format to VictoriaMetrics' ``/api/v1/import/prometheus`` endpoint.
+Lightweight in-memory metric types (Counter, Gauge, Histogram) with a
+background asyncio task that periodically pushes to VictoriaMetrics.
 """
 
 from __future__ import annotations
@@ -471,7 +470,7 @@ async def refresh_runtime_metrics(pool: Pool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Render (Prometheus text exposition format)
+# Render (text exposition format for VictoriaMetrics import)
 # ---------------------------------------------------------------------------
 
 

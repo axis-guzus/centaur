@@ -33,7 +33,8 @@
 | auth | ⬜ | |
 | alloy | ⬜ | |
 | victorialogs | ⬜ | |
-| prometheus | ⬜ | |
+| victoriametrics | ⬜ | |
+| fluentbit | ⬜ | |
 | grafana | ⬜ | |
 | slackbot | ⬜ | |
 | web | ⬜ | |

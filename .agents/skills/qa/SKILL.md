@@ -70,7 +70,7 @@ All calls via `docker exec centaur-api-1 curl -s http://localhost:8000/...` — 
 docker compose ps -a --format '{{.Name}}\t{{.Status}}'
 ```
 
-All must be Up (healthy where applicable): postgres, pgbouncer, secrets, firewall, api, docker-socket-proxy, nginx, auth, alloy, victorialogs, prometheus, grafana, slackbot, web.
+All must be Up (healthy where applicable): postgres, pgbouncer, secrets, firewall, api, docker-socket-proxy, nginx, auth, alloy, victorialogs, victoriametrics, fluentbit, grafana, slackbot, web.
 
 ```bash
 docker exec centaur-api-1 curl -s http://localhost:8000/health/ready
