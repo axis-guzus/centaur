@@ -267,7 +267,7 @@ Agents call tools via `curl http://api:8000/tools/<tool>/<method>` over the `age
 | `app_net` | internal | api ↔ slackbot ↔ auth |
 | `control_net` | internal | api ↔ pgbouncer ↔ firewall |
 | `data_net` | internal | postgres, redis, pgbouncer ↔ api |
-| `obs_net` | internal | prometheus, victorialogs, promtail, grafana |
+| `obs_net` | internal | victoriametrics, victorialogs, fluentbit, grafana |
 
 ## Directory Structure
 
@@ -292,8 +292,8 @@ centaur/
 │   ├── nginx/            # nginx reverse proxy config
 │   ├── pgbouncer/        # PgBouncer connection pooler
 │   ├── grafana/          # Grafana dashboards + provisioning
-│   ├── prometheus/       # Prometheus config
-│   └── promtail/         # Promtail log shipping config
+│   ├── fluentbit/        # Fluent Bit log shipping config
+│   └── alloy/            # Grafana Alloy config
 ├── centaur_sdk/          # Standalone SDK (pip install centaur-sdk)
 ├── tools/                # Open-source tool plugins (by category)
 │   ├── comms/            # Telegram, Twitter
@@ -531,10 +531,10 @@ For local development without 1Password, set `SECRET_MANAGER_BACKEND=env` and pr
 
 ### Architecture
 
-All services write structured JSON logs to **stdout**. Docker captures container logs. **Promtail** discovers all Docker containers (including dynamically spawned agent sandboxes) via the Docker socket and forwards logs to **VictoriaLogs** via the Loki-compatible push API. **Grafana** provides the query UI with a provisioned VictoriaLogs datasource.
+All services write structured JSON logs to **stdout**. Docker captures container logs. **Fluent Bit** discovers all Docker containers (including dynamically spawned agent sandboxes) and forwards logs to **VictoriaLogs**. **VictoriaMetrics** receives metrics via push from the API service. **Grafana** provides the query UI with provisioned VictoriaLogs and VictoriaMetrics datasources.
 
 ```
-Service → stdout (JSON) → Docker log driver → Promtail → VictoriaLogs → Grafana
+Service → stdout (JSON) → Docker log driver → Fluent Bit → VictoriaLogs → Grafana
 ```
 
 This design means ephemeral sandbox containers are captured automatically — no per-container logging config needed.
@@ -544,9 +544,9 @@ This design means ephemeral sandbox containers are captured automatically — no
 | Component | Role | Config |
 |-----------|------|--------|
 | **VictoriaLogs** | Log storage + query engine | 7-day retention, `obs_net` |
-| **Promtail** | Container log collector | Docker SD, `services/promtail/promtail.yml` |
+| **VictoriaMetrics** | Metrics storage + query engine | Push-based, `obs_net` |
 | **Grafana** | Dashboards + log explorer | VictoriaLogs datasource provisioned |
-| **Prometheus** | Metrics collection | `services/prometheus/prometheus.yml` |
+| **Fluent Bit** | Container log collector | `services/fluentbit/fluent-bit.conf` |
 
 ### Querying logs
 
