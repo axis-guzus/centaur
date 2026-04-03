@@ -103,3 +103,41 @@ def test_run_improvement_cycle_dispatches_only_actionable_items(tmp_path, monkey
     assert row_by_id[actionable_id]["agent_execution_id"] == "exec-test-123"
     assert row_by_id[success_id]["status"] == "new"
     assert row_by_id[success_id]["agent_execution_id"] is None
+
+
+def test_analyze_thread_signals_does_not_treat_exceptional_as_error():
+    messages = [
+        {"user": "arjun", "text": "@centaur_ai --invest are L2s still investable or cooked"},
+        {
+            "user": "centaur_ai",
+            "bot_id": "B123",
+            "text": "This is an exceptional business with strong unit economics.",
+        },
+    ]
+
+    signals = feedback.analyze_thread_signals(messages)
+
+    assert signals.has_bot_error is False
+
+
+def test_classify_feedback_prefers_success_for_positive_follow_up_without_error():
+    messages = [
+        {"user": "arjun", "text": "@centaur_ai --invest dig into this co"},
+        {
+            "user": "centaur_ai",
+            "bot_id": "B123",
+            "text": "This is an exceptional manufacturing business with strong margins.",
+            "reactions": [{"name": "thumbsup"}],
+        },
+        {"user": "arjun", "text": "better than the vanilla thread we got before imo"},
+        {"user": "arjun", "text": "could be tighter"},
+        {"user": "arjun", "text": "synthesis seems better to me"},
+    ]
+
+    signals = feedback.analyze_thread_signals(messages)
+    category, severity = feedback.classify_feedback(signals, messages)
+
+    assert signals.repeated_requests is True
+    assert signals.has_bot_error is False
+    assert category == "success"
+    assert severity == "low"

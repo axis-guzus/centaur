@@ -29,6 +29,7 @@ from .client import (
 
 # Feedback database location
 FEEDBACK_DB_PATH = Path.home() / ".cache" / "paradigm-slack" / "feedback.db"
+SANDBOX_API_KEY_PATH = Path("/home/agent/.api_key")
 
 # Heuristic signals for feedback detection
 NEGATIVE_REACTIONS = {"thumbsdown", "-1", "x", "confused", "thinking_face", "bug", "facepalm"}
@@ -56,6 +57,18 @@ POSITIVE_KEYWORDS = ["perfect", "worked", "thanks", "great", "exactly", "awesome
 AMP_THREAD_PATTERN = re.compile(
     r"T-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
 )
+BOT_ERROR_PATTERNS = [
+    re.compile(r"\berror:", re.I),
+    re.compile(r"\bfailed:", re.I),
+    re.compile(r"\bexception\b", re.I),
+    re.compile(r"\btimeout(?:ms|s)?\b", re.I),
+    re.compile(r"\bcontainer exited\b", re.I),
+    re.compile(r"\btool not found\b", re.I),
+    re.compile(
+        r"\b(?:could not|couldn't|was not able to|wasn't able to|unable to)\b.*\b(parse|process|load|open|read|find|download)\b",
+        re.I,
+    ),
+]
 
 
 @dataclass
@@ -105,7 +118,7 @@ class CentaurAgentClient:
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None):
         self.base_url = (base_url or os.environ.get("CENTAUR_API_URL") or "http://api:8000").rstrip("/")
-        self.api_key = api_key or os.environ.get("CENTAUR_API_KEY")
+        self.api_key = api_key or _load_centaur_api_key()
         if not self.api_key:
             raise RuntimeError("CENTAUR_API_KEY not set")
 
@@ -229,6 +242,18 @@ def _severity_filter_clause(min_severity: str | None) -> tuple[str, list[str]]:
     min_val = severity_order[min_severity]
     valid = [s for s, v in severity_order.items() if v >= min_val]
     return f" AND severity IN ({','.join('?' * len(valid))})", valid
+
+
+def _load_centaur_api_key() -> str | None:
+    if SANDBOX_API_KEY_PATH.exists():
+        token = SANDBOX_API_KEY_PATH.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+    return os.environ.get("CENTAUR_API_KEY")
+
+
+def _bot_message_looks_like_error(text: str) -> bool:
+    return any(pattern.search(text) for pattern in BOT_ERROR_PATTERNS)
 
 
 def init_db() -> sqlite3.Connection:
@@ -359,17 +384,7 @@ def analyze_thread_signals(messages: list[dict], bot_user_id: str | None = None)
             msg["is_bot"] = True
             # Check for error patterns in bot output
             text = msg.get("text", "").lower()
-            if any(
-                err in text
-                for err in [
-                    "error:",
-                    "failed:",
-                    "exception",
-                    "timeout",
-                    "container exited",
-                    "tool not found",
-                ]
-            ):
+            if _bot_message_looks_like_error(text):
                 signals.has_bot_error = True
         else:
             signals.user_message_count += 1
@@ -419,6 +434,10 @@ def classify_feedback(signals: FeedbackSignals, messages: list[dict]) -> tuple[s
     # Determine category
     if signals.has_bot_error:
         category = "cli_bug"
+    elif (
+        signals.has_positive_reaction or signals.positive_keywords_found
+    ) and not signals.has_negative_reaction and not signals.negative_keywords_found:
+        category = "success"
     elif signals.repeated_requests:
         category = "routing_error"
     elif signals.negative_keywords_found:
@@ -428,8 +447,6 @@ def classify_feedback(signals: FeedbackSignals, messages: list[dict]) -> tuple[s
             category = "missing_capability"
         else:
             category = "routing_error"
-    elif signals.has_positive_reaction or signals.positive_keywords_found:
-        category = "success"
     else:
         category = "unclear"
 
