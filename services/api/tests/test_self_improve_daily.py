@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from workflows.self_improve_daily import (
     SLACK_ONLY_FIX_FIELDS,
+    _merge_review_batches,
+    _selection_limit,
     _annotate_child_results_with_narratives,
     _build_scorecard_markdown,
     _message_user_display,
@@ -211,6 +213,62 @@ def test_annotate_child_results_tolerates_length_mismatch() -> None:
     assert "slack_narrative" not in annotated[2]
 
 
+def test_selection_limit_uses_all_available_when_requested_is_zero() -> None:
+    assert _selection_limit(0, 7) == 7
+    assert _selection_limit(-1, 7) == 7
+    assert _selection_limit(3, 7) == 3
+
+
+def test_merge_review_batches_aggregates_counts_and_failure_modes() -> None:
+    merged = _merge_review_batches(
+        [
+            {
+                "below_bar_count": 1,
+                "task_reviews": [
+                    {"task_id": "t1", "overall": "below_bar"},
+                    {"task_id": "t2", "overall": "above_bar"},
+                ],
+                "top_failure_modes": [
+                    {
+                        "failure_mode": "verification_miss",
+                        "count": 1,
+                        "representative_threads": ["C1:1"],
+                    }
+                ],
+                "selected_fixes": [{"title": "Fix A"}],
+            },
+            {
+                "below_bar_count": 2,
+                "task_reviews": [
+                    {"task_id": "t3", "overall": "below_bar"},
+                ],
+                "top_failure_modes": [
+                    {
+                        "failure_mode": "verification_miss",
+                        "count": 2,
+                        "representative_threads": ["C1:1", "C2:2"],
+                    },
+                    {
+                        "failure_mode": "intent_miss",
+                        "count": 1,
+                        "representative_threads": ["C3:3"],
+                    },
+                ],
+                "selected_fixes": [{"title": "Fix B"}],
+            },
+        ],
+        tasks_reviewed=3,
+    )
+
+    assert merged["below_bar_count"] == 3
+    assert merged["below_bar_rate"] == 1.0
+    assert [task["task_id"] for task in merged["task_reviews"]] == ["t1", "t2", "t3"]
+    assert [fix["title"] for fix in merged["selected_fixes"]] == ["Fix A", "Fix B"]
+    assert merged["top_failure_modes"][0]["failure_mode"] == "verification_miss"
+    assert merged["top_failure_modes"][0]["count"] == 3
+    assert merged["top_failure_modes"][0]["representative_threads"] == ["C1:1", "C2:2"]
+
+
 def _scorecard_review_fixture() -> dict:
     return {
         "tasks_reviewed": 8,
@@ -230,15 +288,15 @@ def _scorecard_review_fixture() -> dict:
                 "title": "Tighten verification reminder",
                 "fix_type": "prompt_tweak",
                 "slack_narrative": (
-                    "Josie's pulumi change shipped without lint on Tuesday and Matt "
-                    "hit the same gap Thursday, so code-change tasks keep bypassing "
+                    "Arjun's code-change task shipped without lint and a teammate "
+                    "hit the same gap later, so code-change tasks keep bypassing "
                     "ruff."
                 ),
                 "source_threads": [
                     {
-                        "thread_key": "C0A82R7S80N:1776374169.372999",
-                        "channel": "C0A82R7S80N",
-                        "thread_ts": "1776374169.372999",
+                        "thread_key": "C111111:1700100000.000000",
+                        "channel": "C111111",
+                        "thread_ts": "1700100000.000000",
                     }
                 ],
             },
@@ -246,14 +304,14 @@ def _scorecard_review_fixture() -> dict:
                 "title": "Add triage-first workflow guidance",
                 "fix_type": "workflow_fix",
                 "slack_narrative": (
-                    "Asher asked why the morning-brief workflow never posted and the "
+                    "A teammate asked why the morning-brief workflow never posted and the "
                     "agent proposed a redesign instead of checking logs."
                 ),
                 "source_threads": [
                     {
-                        "thread_key": "C0ASR4NFLPR:1776222625.548429",
-                        "channel": "C0ASR4NFLPR",
-                        "thread_ts": "1776222625.548429",
+                        "thread_key": "C222222:1700200000.000000",
+                        "channel": "C222222",
+                        "thread_ts": "1700200000.000000",
                     }
                 ],
             },
@@ -279,19 +337,19 @@ def _scorecard_synthesis_fixture() -> dict:
                 "opportunity_type": "new_persona",
                 "title": "Editorial persona for decision memos",
                 "slack_narrative": (
-                    "Matt and Dan both asked for crisper decision memos three times "
+                    "Arjun and another teammate both asked for crisper decision memos "
                     "last week; no existing persona covers that stance."
                 ),
                 "source_threads": [
                     {
-                        "thread_key": "C0ZZZ:1776100000.000000",
-                        "channel": "C0ZZZ",
-                        "thread_ts": "1776100000.000000",
+                        "thread_key": "C333333:1700300000.000000",
+                        "channel": "C333333",
+                        "thread_ts": "1700300000.000000",
                     },
                     {
-                        "thread_key": "C0YYY:1776200000.000000",
-                        "channel": "C0YYY",
-                        "thread_ts": "1776200000.000000",
+                        "thread_key": "C444444:1700400000.000000",
+                        "channel": "C444444",
+                        "thread_ts": "1700400000.000000",
                     },
                 ],
             },
@@ -311,8 +369,8 @@ def test_build_scorecard_markdown_has_clean_indentation() -> None:
             "pr_url": "https://github.com/paradigmxyz/centaur/pull/322",
             "title": "Tighten verification",
             "slack_narrative": (
-                "Josie's pulumi change shipped without lint on Tuesday and Matt "
-                "hit the same gap Thursday, so code-change tasks keep bypassing "
+                "Arjun's code-change task shipped without lint and a teammate "
+                "hit the same gap later, so code-change tasks keep bypassing "
                 "ruff."
             ),
             "fix_type": "prompt_tweak",
@@ -330,7 +388,7 @@ def test_build_scorecard_markdown_has_clean_indentation() -> None:
         if not line.strip():
             continue
         leading_spaces = len(line) - len(line.lstrip(" "))
-        assert leading_spaces in {0, 2, 4}, (
+        assert leading_spaces in {0, 2}, (
             f"unexpected leading whitespace ({leading_spaces} spaces) on line: {line!r}"
         )
 
@@ -364,22 +422,20 @@ def test_build_scorecard_markdown_renders_per_fix_narratives() -> None:
                 "pr_number": 42,
                 "pr_url": "https://example.test/pr/42",
                 "title": "Add lint check",
-                "slack_narrative": "Josie's Tuesday pulumi change failed CI because ruff didn't run.",
+                "slack_narrative": "Arjun's code-change task failed CI because ruff didn't run.",
             }
         ],
         notifier_stats={"merged_prs": 0, "deployed_prs": 0, "source_threads_notified": 0},
     )
 
     # Narratives should land under the Gap Analysis fixes.
-    assert "Josie's pulumi change shipped without lint" in md
-    assert "Asher asked why the morning-brief" in md
-    # ...and under the Learning Synthesis builds.
-    assert "Matt and Dan both asked for crisper decision memos" in md
+    assert "Arjun's code-change task shipped without lint" in md
+    assert "A teammate asked why the morning-brief" in md
+    # ...and under Growth Opportunities.
+    assert "Arjun and another teammate both asked for crisper decision memos" in md
     # ...and next to the opened PR.
-    assert "Josie's Tuesday pulumi change failed CI because ruff" in md
-    # The _Why:_ prefix signals the sub-bullet type and renders as italic
-    # in Slack mrkdwn. Make sure it is wired up.
-    assert "_Why:_" in md
+    assert "Arjun's code-change task failed CI because ruff" in md
+    assert "gap thread" in md
 
 
 def test_build_scorecard_markdown_handles_empty_state() -> None:
@@ -391,30 +447,27 @@ def test_build_scorecard_markdown_handles_empty_state() -> None:
     )
 
     assert "*Self Improve Nightly*" in md
-    assert "- none selected" in md
-    assert "- none found" in md
-    assert "- none opened" in md
-    assert "- none" in md
+    assert "• none selected" in md
+    assert "• none opened" in md
+    assert "Improvements identified: 0" in md
     # No tracebacks, no crashes — the message remains postable.
     assert md.startswith("*Self Improve Nightly*")
 
 
 def test_build_scorecard_markdown_renders_thread_links_in_all_sections() -> None:
-    # Each section (Gap Analysis, Learning Synthesis, Execution) should emit
-    # a `_Thread:_` sub-bullet with a clickable Slack link whenever the
-    # fix / build / PR carries source_threads. The link text is always
-    # the literal word "thread" so a reader knows where to click.
+    # Each section should inline a clickable `gap thread` link whenever the
+    # fix / build / PR carries source_threads.
     child_results = [
         {
             "pr_number": 42,
             "pr_url": "https://github.com/paradigmxyz/centaur/pull/42",
             "title": "Tighten verification",
-            "slack_narrative": "Josie's Tuesday pulumi change failed CI because ruff didn't run.",
+            "slack_narrative": "Arjun's code-change task failed CI because ruff didn't run.",
             "source_threads": [
                 {
-                    "thread_key": "C0A82R7S80N:1776374169.372999",
-                    "channel": "C0A82R7S80N",
-                    "thread_ts": "1776374169.372999",
+                    "thread_key": "C111111:1700100000.000000",
+                    "channel": "C111111",
+                    "thread_ts": "1700100000.000000",
                 }
             ],
         }
@@ -427,19 +480,17 @@ def test_build_scorecard_markdown_renders_thread_links_in_all_sections() -> None
         notifier_stats={"merged_prs": 0, "deployed_prs": 0, "source_threads_notified": 0},
     )
 
-    gap_url = "<https://slack.com/archives/C0A82R7S80N/p1776374169372999|thread>"
-    intent_miss_url = "<https://slack.com/archives/C0ASR4NFLPR/p1776222625548429|thread>"
+    gap_url = "<https://slack.com/archives/C111111/p1700100000000000|gap thread>"
+    intent_miss_url = "<https://slack.com/archives/C222222/p1700200000000000|gap thread>"
 
-    # Gap Analysis section — one `Thread:` per fix.
-    assert f"    - _Thread:_ {gap_url}" in md
-    assert f"    - _Thread:_ {intent_miss_url}" in md
-    # Learning Synthesis build uses `Threads:` (plural) because it has two.
-    assert "    - _Threads:_ " in md
-    assert "<https://slack.com/archives/C0ZZZ/p1776100000000000|thread>" in md
-    assert "<https://slack.com/archives/C0YYY/p1776200000000000|thread>" in md
+    assert gap_url in md
+    assert intent_miss_url in md
+    assert "(gap threads: " in md
+    assert "<https://slack.com/archives/C333333/p1700300000000000|gap thread>" in md
+    assert "<https://slack.com/archives/C444444/p1700400000000000|gap thread>" in md
     # Execution section gets the link next to the PR too.
     exec_section = md.split("*Execution*", 1)[1]
-    assert f"_Thread:_ {gap_url}" in exec_section
+    assert gap_url in exec_section
 
 
 def test_build_scorecard_markdown_never_emits_github_thread_link_syntax() -> None:

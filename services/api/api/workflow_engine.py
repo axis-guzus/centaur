@@ -347,9 +347,9 @@ class WorkflowContext:
 
                 eid = execution_id
                 cid = child_run_id
-                if eid is None and isinstance(result, dict):
+                if eid is None and step_kind == "agent_turn" and isinstance(result, dict):
                     eid = result.get("execution_id")
-                if cid is None and isinstance(result, dict):
+                if cid is None and step_kind == "child_workflow_start" and isinstance(result, dict):
                     cid = result.get("run_id")
 
                 await self._persist_checkpoint(

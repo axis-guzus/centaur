@@ -103,6 +103,21 @@ Interpret execution signals as supporting evidence:
 - Repeated tool retries and tool errors should lower tool_calling_quality.
 - No subagent use on a clearly multi-domain task can lower subagent_usage_quality.
 - These are features, not final verdicts — the reasoning trace must explain how they influenced the score.
+- Failed or cancelled tasks with no delivered output must not receive the
+  "verification not applicable" or "subagent use not applicable" free pass.
+  If the task died before handoff, score those dimensions from the observed
+  failure, not from hypotheticals.
+
+## Cross-Task Calibration
+
+Before finalizing the batch:
+
+1. Identify the **strongest below-bar** task and the **weakest above-bar** task.
+2. Compare them directly.
+3. If the ordering feels wrong, revisit the scores before returning JSON.
+
+This prevents one failed task from being inflated by "N/A means 4" logic and
+keeps the above-bar / below-bar boundary stable across the batch.
 
 ## Prioritization Rules
 

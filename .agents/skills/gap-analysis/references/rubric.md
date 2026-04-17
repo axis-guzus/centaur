@@ -67,6 +67,12 @@ Verification is required when the bot produced code changes, config changes, fac
 
 Verification is **not required** for conversational brainstorming, opinion questions, open-ended ideation, or simple acknowledgment tasks. If verification is not required, score 4 and note "verification not applicable for this task type" in the reasoning trace.
 
+Critical override: if the execution failed, was cancelled, timed out, or never
+delivered a usable result, verification is **not** "not applicable" — it is a
+failure of the task. In that case, `verification_quality` must be `0` unless
+the evidence pack shows a concrete verification step happened before the task
+failed.
+
 Binary sub-questions (when verification is required):
 
 - Did the bot validate its answer or change before delivering? (yes/no)
@@ -109,6 +115,12 @@ Binary sub-questions:
 - If yes, did the bot use subagents? (yes/no)
 - Were subagents scoped well (not too broad, not too narrow)? (yes/no)
 - Were subagent results integrated properly into the final answer? (yes/no)
+
+Critical override: if the execution failed or never delivered a usable result,
+do not award a default `4` just because subagent usage was not obviously
+required. A task that died before delivery should score `0` unless there is
+clear positive evidence that subagent use materially improved the run before it
+failed.
 
 Score anchors:
 

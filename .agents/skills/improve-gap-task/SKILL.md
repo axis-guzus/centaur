@@ -63,6 +63,16 @@ Make the change in the writable clone.
 
 Run the smallest relevant checks. Prefer targeted tests or repo checks over broad full-stack suites unless the change touches infra-wide behavior.
 
+If the fix relies on a heuristic, regex, keyword trigger, or prompt wording
+change, the validation phase must include adversarial examples:
+
+- at least 5 positive examples that should now work
+- at least 3 negative examples that should still be rejected
+- at least 2 paraphrases that were not copied verbatim from the triggering task
+
+Do not ship a prompt tweak or routing heuristic that only matches the exact
+phrasing from the source thread.
+
 ### Open PR
 
 Open one focused PR.

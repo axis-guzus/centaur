@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import textwrap
 from dataclasses import dataclass, field
 from typing import Any
@@ -48,9 +49,18 @@ def _env_positive_int(name: str, default: int) -> int:
     return max(value, 1)
 
 
+def _env_nonnegative_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(value, 0)
+
+
 REVIEW_WINDOW_HOURS_DEFAULT = _env_positive_int("SELF_IMPROVE_REVIEW_WINDOW_HOURS", 24)
-MAX_SELECTED_FIXES_DEFAULT = _env_positive_int("SELF_IMPROVE_MAX_SELECTED_FIXES", 3)
-CANDIDATE_LIMIT_DEFAULT = _env_positive_int("SELF_IMPROVE_CANDIDATE_LIMIT", 5)
+MAX_SELECTED_FIXES_DEFAULT = _env_nonnegative_int("SELF_IMPROVE_MAX_SELECTED_FIXES", 0)
+CANDIDATE_LIMIT_DEFAULT = _env_nonnegative_int("SELF_IMPROVE_CANDIDATE_LIMIT", 0)
+REVIEW_BATCH_SIZE_DEFAULT = _env_positive_int("SELF_IMPROVE_REVIEW_BATCH_SIZE", 10)
 CANDIDATE_FETCH_FACTOR = _env_positive_int("SELF_IMPROVE_CANDIDATE_FETCH_FACTOR", 4)
 REVIEW_PREFERRED_KEYS = (
     "tasks_reviewed",
@@ -89,6 +99,7 @@ class Input:
     review_window_hours: int = REVIEW_WINDOW_HOURS_DEFAULT
     max_selected_fixes: int = MAX_SELECTED_FIXES_DEFAULT
     candidate_limit: int = CANDIDATE_LIMIT_DEFAULT
+    review_batch_size: int = REVIEW_BATCH_SIZE_DEFAULT
     fix_packet: dict[str, Any] = field(default_factory=dict)
 
 
@@ -199,6 +210,18 @@ def _message_user_display(
     return ""
 
 
+def _message_user_id(message: dict[str, Any]) -> str:
+    metadata = message.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("user_id") or "").strip()
+
+
+def _slack_user_mention(user_id: str) -> str:
+    cleaned = str(user_id or "").strip()
+    return f"<@{cleaned}>" if cleaned else ""
+
+
 def _serialize_messages(
     messages: list[dict[str, Any]],
     user_name_by_id: dict[str, str] | None = None,
@@ -261,6 +284,7 @@ def _compact_task_summary(task: dict[str, Any]) -> dict[str, Any]:
     return {
         "task_id": task.get("task_id"),
         "thread_key": task.get("thread_key"),
+        "source_user_mention": str(task.get("source_user_mention") or ""),
         "source_user_name": str(task.get("source_user_name") or ""),
         "ask_text": str(task.get("ask_text") or "")[:500],
         "status": task.get("status"),
@@ -274,6 +298,108 @@ def _compact_task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "followup_texts": followup_summary.get("example_texts", []),
         "delivery_snippet": str(task.get("final_delivery_text") or "")[:300],
     }
+
+
+_RELATED_WINDOW_STOP_WORDS = {
+    "add",
+    "for",
+    "from",
+    "into",
+    "that",
+    "this",
+    "with",
+    "your",
+    "what",
+    "when",
+    "where",
+    "which",
+    "workflow",
+    "system",
+    "persona",
+    "skill",
+    "tool",
+    "improvement",
+}
+
+
+def _keywords_for_related_search(text: str) -> set[str]:
+    tokens = {
+        token.strip().lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", str(text or ""))
+    }
+    return {token for token in tokens if token not in _RELATED_WINDOW_STOP_WORDS}
+
+
+def _augment_builds_with_related_window_threads(
+    selected_builds: list[dict[str, Any]],
+    all_tasks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    task_by_thread = {
+        str(task.get("thread_key") or "").strip(): task
+        for task in all_tasks
+        if isinstance(task, dict) and str(task.get("thread_key") or "").strip()
+    }
+    augmented: list[dict[str, Any]] = []
+    for build in selected_builds:
+        if not isinstance(build, dict):
+            continue
+        enriched = dict(build)
+        source_threads = _normalize_source_threads(build.get("source_threads"))
+        source_thread_keys = {
+            str(item.get("thread_key") or "").strip()
+            for item in source_threads
+            if isinstance(item, dict)
+        }
+        source_user_ids = {
+            str(task_by_thread[key].get("source_user_id") or "").strip()
+            for key in source_thread_keys
+            if key in task_by_thread and str(task_by_thread[key].get("source_user_id") or "").strip()
+        }
+        source_user_names = {
+            str(task_by_thread[key].get("source_user_name") or "").strip()
+            for key in source_thread_keys
+            if key in task_by_thread and str(task_by_thread[key].get("source_user_name") or "").strip()
+        }
+        keywords = _keywords_for_related_search(
+            f"{build.get('title', '')} {build.get('implementation_sketch', '')} {build.get('evidence_summary', '')}"
+        )
+        related_threads: list[dict[str, str]] = []
+        seen_related: set[str] = set()
+        for task in all_tasks:
+            if not isinstance(task, dict):
+                continue
+            thread_key = str(task.get("thread_key") or "").strip()
+            if not thread_key or thread_key in source_thread_keys or thread_key in seen_related:
+                continue
+            source_user_id = str(task.get("source_user_id") or "").strip()
+            source_user_name = str(task.get("source_user_name") or "").strip()
+            ask_text = str(task.get("ask_text") or "").casefold()
+            has_keyword_overlap = bool(keywords) and any(keyword in ask_text for keyword in keywords)
+            if (
+                (source_user_id and source_user_id in source_user_ids)
+                or (source_user_name and source_user_name in source_user_names)
+                or has_keyword_overlap
+            ):
+                seen_related.add(thread_key)
+                related_threads.append(
+                    {
+                        "thread_key": thread_key,
+                        "channel": str(task.get("channel") or "").strip(),
+                        "thread_ts": str(task.get("thread_ts") or "").strip(),
+                    }
+                )
+            if len(related_threads) >= 5:
+                break
+        enriched["related_window_threads"] = related_threads
+        if related_threads:
+            combined_threads = _normalize_source_threads(source_threads + related_threads)
+            enriched["source_threads"] = combined_threads
+            enriched["evidence_summary"] = (
+                f"{str(build.get('evidence_summary') or '').strip()} "
+                f"Related same-day threads in the review window: {len(related_threads)}."
+            ).strip()
+        augmented.append(enriched)
+    return augmented
 
 
 async def _run_triage_pass(
@@ -384,6 +510,69 @@ def _normalize_source_threads(items: Any) -> list[dict[str, str]]:
     return normalized
 
 
+def _selection_limit(requested: int, available: int) -> int:
+    if requested <= 0:
+        return max(available, 1)
+    return max(requested, 1)
+
+
+def _chunk_tasks(tasks: list[dict[str, Any]], chunk_size: int) -> list[list[dict[str, Any]]]:
+    size = max(chunk_size, 1)
+    return [tasks[index:index + size] for index in range(0, len(tasks), size)]
+
+
+def _merge_review_batches(batch_reviews: list[dict[str, Any]], *, tasks_reviewed: int) -> dict[str, Any]:
+    merged = _empty_review(tasks_reviewed)
+    task_reviews: list[dict[str, Any]] = []
+    selected_fixes: list[dict[str, Any]] = []
+    failure_modes: dict[str, dict[str, Any]] = {}
+    below_bar_count = 0
+
+    for review in batch_reviews:
+        if not isinstance(review, dict):
+            continue
+        below_bar_count += int(review.get("below_bar_count") or 0)
+        for task in list(review.get("task_reviews") or []):
+            if isinstance(task, dict):
+                task_reviews.append(task)
+        for fix in list(review.get("selected_fixes") or []):
+            if isinstance(fix, dict):
+                selected_fixes.append(fix)
+        for entry in list(review.get("top_failure_modes") or []):
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("failure_mode") or "").strip()
+            if not key:
+                continue
+            bucket = failure_modes.setdefault(
+                key,
+                {
+                    "failure_mode": key,
+                    "count": 0,
+                    "representative_threads": [],
+                },
+            )
+            bucket["count"] += int(entry.get("count") or 0)
+            seen = set(bucket["representative_threads"])
+            for thread_key in list(entry.get("representative_threads") or []):
+                candidate = str(thread_key or "").strip()
+                if candidate and candidate not in seen:
+                    bucket["representative_threads"].append(candidate)
+                    seen.add(candidate)
+
+    merged["task_reviews"] = task_reviews
+    merged["selected_fixes"] = selected_fixes
+    merged["below_bar_count"] = below_bar_count
+    merged["below_bar_rate"] = (
+        float(below_bar_count) / float(tasks_reviewed) if tasks_reviewed else 0.0
+    )
+    merged["top_failure_modes"] = sorted(
+        failure_modes.values(),
+        key=lambda item: (-int(item.get("count") or 0), str(item.get("failure_mode") or "")),
+    )[:10]
+    return merged
+
+
 def _empty_review(tasks_reviewed: int) -> dict[str, Any]:
     return {
         "tasks_reviewed": tasks_reviewed,
@@ -440,6 +629,7 @@ def _reconstruct_task_from_thread(
     source_user_name = (
         _message_user_display(source_message, user_name_by_id) if source_message else ""
     )
+    source_user_id = _message_user_id(source_message or {})
     prior_messages = [
         message
         for message in thread_messages
@@ -469,6 +659,8 @@ def _reconstruct_task_from_thread(
         "thread_ts": thread_ts,
         "source_message_id": source_message_id,
         "source_created_at": source_created_at.isoformat(),
+        "source_user_id": source_user_id,
+        "source_user_mention": _slack_user_mention(source_user_id),
         "source_user_name": source_user_name,
         "ask_text": ask_text,
         "prior_context": _serialize_messages(prior_context, user_name_by_id),
@@ -526,7 +718,10 @@ async def _fetch_live_thread_messages(
                 "id": str(entry.get("ts") or ""),
                 "role": role,
                 "parts": [{"type": "text", "text": text}] if text else [],
-                "metadata": {"message_id": f"slack:{entry.get('ts') or ''}"},
+                "metadata": {
+                    "message_id": f"slack:{entry.get('ts') or ''}",
+                    "user_id": str(entry.get("user") or "").strip(),
+                },
                 "created_at": created_at,
                 "text": text,
                 "part_types": ["text"] if text else [],
@@ -685,6 +880,32 @@ async def _fetch_user_name_cache(ctx: WorkflowContext) -> dict[str, str]:
     return cache
 
 
+def _review_window_since(review_window_hours: int) -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=review_window_hours)
+
+
+async def _load_review_window_counts(
+    ctx: WorkflowContext,
+    *,
+    review_window_hours: int,
+) -> dict[str, int]:
+    since = _review_window_since(review_window_hours)
+    row = await ctx._pool.fetchrow(
+        "SELECT COUNT(*) AS eligible_run_count, "
+        "       COUNT(DISTINCT thread_key) AS eligible_thread_count "
+        "FROM workflow_runs "
+        "WHERE workflow_name = 'slack_thread_turn' "
+        "  AND created_at >= $1 "
+        "  AND status IN ('completed', 'failed', 'cancelled')",
+        since,
+    )
+    data = dict(row or {})
+    return {
+        "eligible_run_count": int(data.get("eligible_run_count") or 0),
+        "eligible_thread_count": int(data.get("eligible_thread_count") or 0),
+    }
+
+
 async def _collect_evidence_packs(
     ctx: WorkflowContext,
     *,
@@ -692,17 +913,15 @@ async def _collect_evidence_packs(
     candidate_limit: int,
     user_name_by_id: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=review_window_hours)
-    fetch_limit = max(candidate_limit * CANDIDATE_FETCH_FACTOR, candidate_limit)
+    since = _review_window_since(review_window_hours)
     rows = await ctx._pool.fetch(
         "SELECT run_id, thread_key, input_json, created_at "
         "FROM workflow_runs "
         "WHERE workflow_name = 'slack_thread_turn' "
         "  AND created_at >= $1 "
         "  AND status IN ('completed', 'failed', 'cancelled') "
-        "ORDER BY created_at DESC LIMIT $2",
+        "ORDER BY created_at DESC",
         since,
-        fetch_limit,
     )
 
     candidate_runs: list[dict[str, Any]] = []
@@ -808,6 +1027,8 @@ async def _collect_evidence_packs(
                 "thread_ts": task["thread_ts"],
                 "source_message_id": task["source_message_id"],
                 "source_created_at": task["source_created_at"],
+                "source_user_id": task.get("source_user_id", ""),
+                "source_user_mention": task.get("source_user_mention", ""),
                 "source_user_name": task.get("source_user_name", ""),
                 "ask_text": task["ask_text"],
                 "prior_context": task["prior_context"],
@@ -859,6 +1080,7 @@ async def _run_batch_review_pass(
     evidence_packs: list[dict[str, Any]],
     max_selected_fixes: int,
     recent_fix_titles: list[str] | None = None,
+    batch_tag: str = "main",
 ) -> dict[str, Any]:
     if not evidence_packs:
         return _empty_review(0)
@@ -903,6 +1125,15 @@ async def _run_batch_review_pass(
         where none exist. For conversational brainstorming or ideation tasks where
         verification is not applicable, score verification_quality as 4.
 
+        Critical scoring rule: if a task failed, was cancelled, timed out, or
+        never delivered a usable result, do NOT use "not applicable -> 4" for
+        verification_quality or subagent_usage_quality. Score the failure that
+        actually happened.
+
+        Before finalizing the batch, compare the strongest below-bar task to the
+        weakest above-bar task. If the ordering feels wrong, revise the scores
+        before you return the JSON.
+
         After grading all tasks, cluster failures and select fixes.
         Keep clustering simple: dominant failure mode + likely fix surface.
         Prioritize user-value failures before style or polish.
@@ -920,11 +1151,11 @@ async def _run_batch_review_pass(
         Vague recommendations are not acceptable.
 
         `slack_narrative` is a 2-4 sentence human note for the internal
-        `ai-v2` Slack channel. Use the `source_user_name` on each evidence
-        pack to name who surfaced the issue and describe what they were
-        trying to do. This field is posted internally and stripped before
-        any PR is written, so user names and concrete session details are
-        encouraged here.
+        `ai-v2` Slack channel. Use `source_user_mention` when present;
+        otherwise fall back to `source_user_name`. Name who surfaced the
+        issue and describe what they were trying to do. This field is posted
+        internally and stripped before any PR is written, so user mentions or
+        first names and concrete session details are encouraged here.
 
         Prefer structural fix types (workflow_fix, bug_fix, tool_improvement,
         new_skill, new_persona) when the root cause is structural. Reach for
@@ -950,13 +1181,15 @@ async def _run_batch_review_pass(
 
     review_turn = await ctx.agent_turn(
         prompt,
-        thread_key=f"workflow:{ctx.run_id}:gap-analysis",
+        thread_key=f"workflow:{ctx.run_id}:gap-analysis:{batch_tag}",
+        message_id=f"wf:{ctx.run_id}:batch_review:{batch_tag}",
         delivery=Delivery.dev(),
         prompt_selector="eng",
         metadata={
             "source": WORKFLOW_NAME,
             "mode": "parent",
             "stage": "batch_review",
+            "batch_tag": batch_tag,
         },
     )
 
@@ -968,7 +1201,53 @@ async def _run_batch_review_pass(
             required_keys=REVIEW_REQUIRED_KEYS,
         )
 
-    review = await ctx.step("batch_review", _parse_review, step_kind="review")
+    async def _repair_review() -> dict[str, Any]:
+        malformed = str(review_turn.get("result_text") or "").strip()
+        repair_prompt = textwrap.dedent(
+            f"""
+            Your previous `batch_review` response was malformed for the
+            self-improvement workflow.
+
+            Return JSON only with exactly these top-level keys:
+            `tasks_reviewed`, `below_bar_count`, `below_bar_rate`,
+            `task_reviews`, `top_failure_modes`, `selected_fixes`.
+
+            Do not return any prose, explanation, or markdown fences.
+            Re-use the evidence already in this thread. If you are missing a
+            field, infer it conservatively from the existing evidence instead
+            of omitting the key.
+
+            Previous malformed response:
+            ```text
+            {malformed[:2000]}
+            ```
+            """
+        ).strip()
+        repaired_turn = await ctx.agent_turn(
+            repair_prompt,
+            thread_key=f"workflow:{ctx.run_id}:gap-analysis:{batch_tag}",
+            message_id=f"wf:{ctx.run_id}:batch_review:repair:{batch_tag}",
+            delivery=Delivery.dev(),
+            prompt_selector="eng",
+            metadata={
+                "source": WORKFLOW_NAME,
+                "mode": "parent",
+                "stage": "batch_review_repair",
+                "batch_tag": batch_tag,
+            },
+        )
+        return _extract_required_json_payload(
+            str(repaired_turn.get("result_text") or ""),
+            stage="batch_review_repair",
+            preferred_keys=REVIEW_PREFERRED_KEYS,
+            required_keys=REVIEW_REQUIRED_KEYS,
+        )
+
+    try:
+        review = await ctx.step("batch_review", _parse_review, step_kind="review")
+    except RuntimeError as exc:
+        ctx.log("self_improve_batch_review_repair_requested", error=str(exc))
+        review = await ctx.step("batch_review_repair", _repair_review, step_kind="review")
     return _normalize_review(review, tasks_reviewed=len(evidence_packs))
 
 
@@ -981,6 +1260,7 @@ async def _run_learning_synthesis_pass(
     if not evidence_packs:
         return {"sessions_analyzed": 0, "opportunities_found": 0, "opportunities": [], "selected_builds": []}
 
+    summaries = [_compact_task_summary(task) for task in evidence_packs]
     prompt = textwrap.dedent(
         f"""
         Load the `learning-synthesis` skill first.
@@ -998,20 +1278,21 @@ async def _run_learning_synthesis_pass(
         Focus on patterns across 2+ sessions, not one-off requests.
         Every opportunity must name a specific target_surface (file path) and a
         concrete implementation_sketch.
-        Select up to {max_selected_builds} opportunities for autonomous implementation.
+        Select all materially justified opportunities for autonomous implementation.
         Each `selected_builds` entry MUST include `slack_narrative` — 2-4
         sentences of plain-English prose that name the users who surfaced the
-        pattern (use `source_user_name` from each evidence pack), describe
-        what they were trying to do, and explain why this opportunity is
-        worth building now. This narrative is posted internally on `ai-v2`
-        and stripped before the implementing agent sees the fix packet, so
-        names and concrete session details are encouraged here. Stay grounded
-        in provided evidence — do not invent situations.
+        pattern (use `source_user_mention` when present, otherwise
+        `source_user_name`), describe what they were trying to do, and explain
+        why this opportunity is worth building now. This narrative is posted
+        internally on `ai-v2` and stripped before the implementing agent sees
+        the fix packet, so user mentions or first names and concrete session
+        details are encouraged here. Stay grounded in provided evidence — do
+        not invent situations.
         Return JSON only matching the output contract in the skill.
 
-        Evidence pack batch:
+        Compact task summary batch:
         ```json
-        {json.dumps({"max_selected_builds": max_selected_builds, "tasks": evidence_packs}, indent=2)}
+        {json.dumps({"max_selected_builds": max_selected_builds, "tasks": summaries}, indent=2)}
         ```
         """
     ).strip()
@@ -1099,7 +1380,11 @@ def _slack_thread_archive_url(channel: str, thread_ts: str) -> str:
     return f"https://slack.com/archives/{channel}/p{compact}"
 
 
-def _render_source_thread_links(source_threads: list[dict[str, Any]] | None) -> str:
+def _render_source_thread_links(
+    source_threads: list[dict[str, Any]] | None,
+    *,
+    link_text: str = "thread",
+) -> str:
     """Render one or more source threads as Slack `<url|thread>` links.
 
     Returns an empty string when there are no usable entries so the caller
@@ -1117,7 +1402,7 @@ def _render_source_thread_links(source_threads: list[dict[str, Any]] | None) -> 
             str(entry.get("thread_ts") or ""),
         )
         if url:
-            links.append(f"<{url}|thread>")
+            links.append(f"<{url}|{link_text}>")
     return ", ".join(links)
 
 
@@ -1126,6 +1411,81 @@ def _clip(text: str, max_chars: int = 500) -> str:
     if len(stripped) <= max_chars:
         return stripped
     return stripped[: max_chars - 1].rstrip() + "\u2026"
+
+
+_SCORECARD_FLAIR_LINES = (
+    "Some clean wins, a couple rough edges, and a few upgrades worth shipping.",
+    "A pretty healthy nightly pass, with just enough splinters to keep us honest.",
+    "Good instincts in the batch today, plus a few sharp corners worth sanding down.",
+    "A nice mix tonight: a few real fixes, a few growth ideas, and not much theater.",
+)
+
+
+def _scorecard_flair(review: dict[str, Any], synthesis: dict[str, Any]) -> str:
+    seed = (
+        int(review.get("tasks_reviewed") or 0)
+        + int(review.get("below_bar_count") or 0)
+        + len(list(review.get("selected_fixes") or []))
+        + len(list(synthesis.get("selected_builds") or []))
+    )
+    return _SCORECARD_FLAIR_LINES[seed % len(_SCORECARD_FLAIR_LINES)]
+
+
+_FAILURE_MODE_EXPLANATIONS = {
+    "verification_miss": "The agent skipped or under-verified work before handoff.",
+    "intent_miss": "The agent answered a different problem than the one the user actually asked.",
+    "debugging_intent_miss": "The agent treated a debugging request like ideation instead of investigating the live system.",
+    "intent_miss_investigation_replaced_by_ideation": (
+        "The agent proposed redesigns instead of inspecting the broken workflow first."
+    ),
+    "research_miss": "The agent missed important evidence that was available in the repo, tools, or data.",
+    "tool_misuse": "The agent used the wrong tool path or missed the right tool entirely.",
+    "reliability_issue": "The system failed before it could deliver a usable answer.",
+    "reliability_timeout_before_progress": (
+        "Active executions timed out before the system recognized startup progress."
+    ),
+    "missing_sheet_tab_capability": (
+        "The agent could not create the Google Sheet structure the user asked for."
+    ),
+}
+
+
+def _humanize_failure_mode(entry: dict[str, Any]) -> str:
+    failure_mode = str(entry.get("failure_mode") or "").strip()
+    count = int(entry.get("count") or 0)
+    if failure_mode in _FAILURE_MODE_EXPLANATIONS:
+        label = _FAILURE_MODE_EXPLANATIONS[failure_mode]
+    else:
+        label = (
+            failure_mode.replace("_", " ").strip().capitalize()
+            if failure_mode
+            else "Unspecified failure mode."
+        )
+        if label and not label.endswith("."):
+            label += "."
+    if count:
+        task_word = "task" if count == 1 else "tasks"
+        return f"{label} ({count} {task_word})"
+    return label
+
+
+def _gap_thread_suffix(source_threads: list[dict[str, Any]] | None) -> str:
+    thread_links = _render_source_thread_links(source_threads, link_text="gap thread")
+    if not thread_links:
+        return ""
+    if source_threads and len(source_threads) == 1:
+        return f" {thread_links}"
+    return f" (gap threads: {thread_links})"
+
+
+def _scorecard_item_line(label: str, narrative: str, source_threads: list[dict[str, Any]] | None = None) -> str:
+    body = str(narrative or "").strip()
+    suffix = _gap_thread_suffix(source_threads)
+    if suffix:
+        body = f"{body}{suffix}" if body else suffix.strip()
+    if body:
+        return f"  • {label} — {body}"
+    return f"  • {label}"
 
 
 def _fix_headline(item: dict[str, Any]) -> str:
@@ -1140,6 +1500,7 @@ def _build_scorecard_markdown(
     synthesis: dict[str, Any],
     child_results: list[dict[str, Any]],
     notifier_stats: dict[str, int],
+    coverage: dict[str, int] | None = None,
 ) -> str:
     """Build the nightly Slack scorecard as flat lines joined by \n.
 
@@ -1152,27 +1513,55 @@ def _build_scorecard_markdown(
     composite = _mean_composite(review)
     tasks_reviewed = int(review.get("tasks_reviewed") or 0)
     below_bar_rate = float(review.get("below_bar_rate") or 0.0)
-    top_failure_modes = (
-        ", ".join(
-            f"{entry.get('failure_mode', 'unknown')} x{entry.get('count', 0)}"
-            for entry in list(review.get("top_failure_modes") or [])[:3]
-            if isinstance(entry, dict)
-        )
-        or "none"
-    )
+    top_failure_modes = [
+        entry
+        for entry in list(review.get("top_failure_modes") or [])[:3]
+        if isinstance(entry, dict)
+    ]
 
     lines: list[str] = [
         "*Self Improve Nightly*",
+        "",
+        _scorecard_flair(review, synthesis),
         "",
         (
             f"Reviewed {tasks_reviewed} tasks. Mean score: {composite:.0f}/100. "
             f"Below-bar rate: {below_bar_rate:.0%}."
         ),
-        "",
-        "*Gap Analysis*",
-        f"- Top failure modes: {top_failure_modes}",
-        "- Selected fixes:",
     ]
+
+    if coverage:
+        eligible_rows = int(coverage.get("eligible_run_count", 0) or 0)
+        eligible_threads = int(coverage.get("eligible_thread_count", 0) or 0)
+        reconstructed_tasks = int(coverage.get("reconstructed_task_count", 0) or 0)
+        reconstructed_threads = int(coverage.get("reconstructed_thread_count", 0) or 0)
+        triaged_tasks = int(coverage.get("triaged_task_count", 0) or 0)
+        lines.extend(
+            [
+                "",
+                "*Coverage*",
+                f"• Saw {eligible_rows} runs across {eligible_threads} threads in the 24-hour window.",
+                (
+                    f"• Reconstructed {reconstructed_tasks} tasks across "
+                    f"{reconstructed_threads} threads."
+                ),
+                f"• Reviewed {triaged_tasks} tasks end-to-end.",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "*Gap Analysis*",
+            "• Top failure modes",
+        ]
+    )
+    if not top_failure_modes:
+        lines.append("  • none")
+    for entry in top_failure_modes:
+        lines.append(f"  • {_humanize_failure_mode(entry)}")
+
+    lines.append("• Selected fixes")
 
     gap_fixes = [
         item
@@ -1180,16 +1569,15 @@ def _build_scorecard_markdown(
         if isinstance(item, dict)
     ]
     if not gap_fixes:
-        lines.append("  - none selected")
+        lines.append("  • none selected")
     for fix in gap_fixes:
-        lines.append(f"  - {_fix_headline(fix)}")
-        narrative = _clip(fix.get("slack_narrative"))
-        if narrative:
-            lines.append(f"    - _Why:_ {narrative}")
-        thread_links = _render_source_thread_links(fix.get("source_threads"))
-        if thread_links:
-            label = "Thread" if "," not in thread_links else "Threads"
-            lines.append(f"    - _{label}:_ {thread_links}")
+        lines.append(
+            _scorecard_item_line(
+                _fix_headline(fix),
+                _clip(fix.get("slack_narrative")),
+                fix.get("source_threads"),
+            )
+        )
 
     opportunities = [
         item
@@ -1205,31 +1593,24 @@ def _build_scorecard_markdown(
     lines.extend(
         [
             "",
-            "*Learning Synthesis*",
-            f"- Opportunities found: {len(opportunities)}",
+            "*Growth Opportunities*",
+            "A few patterns here look less like bugs and more like things the system should just know how to do.",
+            f"• Improvements identified: {len(selected_builds) or len(opportunities)}",
         ]
     )
-    if not opportunities:
-        lines.append("  - none found")
-    for opportunity in opportunities[:5]:
-        op_type = str(opportunity.get("opportunity_type") or "unknown")
-        title = str(opportunity.get("title") or "Untitled").strip()
-        lines.append(f"  - `{op_type}` {title}")
-
-    lines.append("- Selected builds:")
-    if not selected_builds:
-        lines.append("  - none selected")
-    for build in selected_builds:
+    growth_items = selected_builds or opportunities
+    if not growth_items:
+        lines.append("  • none selected")
+    for build in growth_items:
         op_type = str(build.get("opportunity_type") or "unknown")
         title = str(build.get("title") or "Untitled").strip()
-        lines.append(f"  - `{op_type}` {title}")
-        narrative = _clip(build.get("slack_narrative"))
-        if narrative:
-            lines.append(f"    - _Why:_ {narrative}")
-        thread_links = _render_source_thread_links(build.get("source_threads"))
-        if thread_links:
-            label = "Thread" if "," not in thread_links else "Threads"
-            lines.append(f"    - _{label}:_ {thread_links}")
+        lines.append(
+            _scorecard_item_line(
+                f"`{op_type}` {title}",
+                _clip(build.get("slack_narrative")),
+                build.get("source_threads"),
+            )
+        )
 
     opened_pr_entries = [
         item
@@ -1247,38 +1628,67 @@ def _build_scorecard_markdown(
         and not (item.get("pr_number") and item.get("pr_url"))
     ]
 
-    lines.extend(["", "*Execution*", "- PRs opened:"])
-    if not opened_pr_entries:
-        lines.append("  - none opened")
-    for entry in opened_pr_entries:
-        link = _slack_pr_link(entry.get("pr_number", ""), str(entry.get("pr_url") or ""))
-        title = str(entry.get("title") or "").strip()
-        suffix = f" {title}" if title else ""
-        lines.append(f"  - {link}{suffix}")
-        narrative = _clip(entry.get("slack_narrative"))
-        if narrative:
-            lines.append(f"    - _Why:_ {narrative}")
-        thread_links = _render_source_thread_links(entry.get("source_threads"))
-        if thread_links:
-            label = "Thread" if "," not in thread_links else "Threads"
-            lines.append(f"    - _{label}:_ {thread_links}")
+    lines.extend(["", "*Execution*"])
+    grouped_opened_entries = [
+        (
+            "Gap-fix PRs opened",
+            [
+                item
+                for item in opened_pr_entries
+                if str(item.get("selection_origin") or "gap_analysis") == "gap_analysis"
+            ],
+        ),
+        (
+            "Codify-fix PRs opened",
+            [
+                item
+                for item in opened_pr_entries
+                if str(item.get("selection_origin") or "") == "learning_synthesis"
+            ],
+        ),
+        (
+            "Mixed / other PRs opened",
+            [
+                item
+                for item in opened_pr_entries
+                if str(item.get("selection_origin") or "")
+                not in {"", "gap_analysis", "learning_synthesis"}
+            ],
+        ),
+    ]
+    for label, entries in grouped_opened_entries:
+        lines.append(f"• {label}")
+        if not entries:
+            lines.append("  • none opened")
+            continue
+        for entry in entries:
+            link = _slack_pr_link(entry.get("pr_number", ""), str(entry.get("pr_url") or ""))
+            title = str(entry.get("title") or "").strip()
+            suffix = f" {title}" if title else ""
+            lines.append(
+                _scorecard_item_line(
+                    f"{link}{suffix}",
+                    _clip(entry.get("slack_narrative")),
+                    entry.get("source_threads"),
+                )
+            )
 
-    lines.append("- Child workflow errors:")
+    lines.append("• Child workflow errors")
     if not failed_entries:
-        lines.append("  - none")
+        lines.append("  • none")
     for entry in failed_entries:
         label = (
             str(entry.get("title") or entry.get("child_run_id") or "unknown child").strip()
         )
         error = str(entry.get("error") or "").strip()
-        lines.append(f"  - {label}: {error}" if error else f"  - {label}")
+        lines.append(f"  • {label}: {error}" if error else f"  • {label}")
 
     lines.extend(
         [
-            f"- PRs merged in last 24h: {int(notifier_stats.get('merged_prs', 0) or 0)}",
-            f"- PRs deployed in last 24h: {int(notifier_stats.get('deployed_prs', 0) or 0)}",
+            f"• PRs merged in last 24h: {int(notifier_stats.get('merged_prs', 0) or 0)}",
+            f"• PRs deployed in last 24h: {int(notifier_stats.get('deployed_prs', 0) or 0)}",
             (
-                "- Source threads notified in last 24h: "
+                "• Source threads notified in last 24h: "
                 f"{int(notifier_stats.get('source_threads_notified', 0) or 0)}"
             ),
         ]
@@ -1423,7 +1833,7 @@ def _annotate_child_results_with_narratives(
             source_threads = fix.get("source_threads")
             if source_threads and not entry.get("source_threads"):
                 entry["source_threads"] = source_threads
-            for key in ("dominant_failure_mode", "fix_type", "title"):
+            for key in ("dominant_failure_mode", "fix_type", "title", "selection_origin"):
                 value = fix.get(key)
                 if value and not entry.get(key):
                     entry[key] = value
@@ -1431,7 +1841,7 @@ def _annotate_child_results_with_narratives(
     return annotated
 
 
-async def _load_recent_fix_titles(ctx: WorkflowContext) -> list[str]:
+async def _load_recent_fix_contexts(ctx: WorkflowContext) -> list[dict[str, Any]]:
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=DEDUP_WINDOW_HOURS)
     rows = await ctx._pool.fetch(
         "SELECT output_json FROM workflow_runs "
@@ -1440,14 +1850,32 @@ async def _load_recent_fix_titles(ctx: WorkflowContext) -> list[str]:
         WORKFLOW_NAME,
         since,
     )
-    titles: set[str] = set()
+    seen: set[tuple[str, str, str, str]] = set()
+    fixes: list[dict[str, Any]] = []
     for row in rows:
         output = decode_jsonb(dict(row).get("output_json"), {})
         if isinstance(output, dict):
             title = str(output.get("title") or "").strip().lower()
-            if title:
-                titles.add(title)
-    return sorted(titles)
+            fix_type = str(output.get("fix_type") or "").strip().lower()
+            target_surface = str(output.get("target_surface") or "").strip()
+            dominant_failure_mode = str(output.get("dominant_failure_mode") or "").strip().lower()
+            if not title:
+                continue
+            dedup_key = (title, fix_type, target_surface, dominant_failure_mode)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            fixes.append(
+                {
+                    "title": title,
+                    "fix_type": fix_type,
+                    "target_surface": target_surface,
+                    "dominant_failure_mode": dominant_failure_mode,
+                    "source_threads": _normalize_source_threads(output.get("source_threads")),
+                    "selection_origin": str(output.get("selection_origin") or "").strip(),
+                }
+            )
+    return fixes
 
 
 async def _run_reconcile_fixes_pass(
@@ -1455,13 +1883,13 @@ async def _run_reconcile_fixes_pass(
     *,
     gap_fixes: list[dict[str, Any]],
     build_fixes: list[dict[str, Any]],
-    recent_titles: list[str],
+    recent_fixes: list[dict[str, Any]],
     max_fixes: int,
 ) -> list[dict[str, Any]]:
     all_candidates = gap_fixes + build_fixes
     if not all_candidates:
         return []
-    if len(all_candidates) == 1 and not recent_titles:
+    if len(all_candidates) == 1 and not recent_fixes:
         return all_candidates
 
     prompt = textwrap.dedent(
@@ -1471,13 +1899,18 @@ async def _run_reconcile_fixes_pass(
         child workflows to implement them.
 
         Your job:
-        1. Merge semantically duplicate fixes. Two fixes that target the same
-           file for the same root cause are duplicates even if worded differently.
+        1. Merge semantically duplicate fixes. Two fixes with the same dominant
+           failure mode and overlapping source threads are duplicates even when
+           they target different surfaces. Prefer one coherent stack over
+           multiple fragmented fixes for the same underlying gap.
         2. Drop any fix that substantially overlaps with a recently attempted fix
-           (see recent_titles below). Only keep it if you can articulate why the
-           prior attempt was insufficient.
+           (see recent_fixes below). Compare title, dominant failure mode,
+           target surface, AND source thread overlap. Only keep it if you can
+           articulate why the prior attempt was insufficient.
         3. Rank the surviving fixes by expected user-value impact.
         4. Return at most {max_fixes} fixes.
+        5. Never drop a gap-analysis fix in favor of a learning-synthesis fix
+           unless you can clearly justify the tradeoff in `why_now`.
 
         Each fix in the output must include ALL of these fields:
         `title`, `fix_type`, `target_surface`, `what_to_change`,
@@ -1493,14 +1926,16 @@ async def _run_reconcile_fixes_pass(
         quotes and source threads.
 
         If a field was present in the input fix, preserve it. If you merge two
-        fixes, combine their evidence and source threads.
+        fixes, combine their evidence and source threads. Preserve
+        `selection_origin` when present; if you merge a gap fix with a learning
+        fix, set `selection_origin` to `mixed`.
 
         Return JSON only with exactly this top-level key:
         - `reconciled_fixes`: array of fix objects (at most {max_fixes}).
 
-        Recently attempted fix titles (skip these unless clearly insufficient):
+        Recently attempted fixes (skip these unless clearly insufficient):
         ```json
-        {json.dumps(recent_titles, indent=2)}
+        {json.dumps(recent_fixes, indent=2)}
         ```
 
         Candidate fixes from gap-analysis:
@@ -1544,7 +1979,7 @@ async def _run_reconcile_fixes_pass(
         "self_improve_reconcile_completed",
         input_count=len(all_candidates),
         output_count=len(fixes),
-        recent_titles_count=len(recent_titles),
+        recent_titles_count=len(recent_fixes),
     )
     return [fix for fix in fixes if isinstance(fix, dict)][:max_fixes]
 
@@ -1576,70 +2011,119 @@ async def _load_recent_notifier_stats(ctx: WorkflowContext) -> dict[str, int]:
 
 async def _run_parent(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     user_name_by_id = await _fetch_user_name_cache(ctx)
+    review_window_hours = max(inp.review_window_hours, 1)
+
+    async def _load_window_counts() -> dict[str, int]:
+        return await _load_review_window_counts(
+            ctx,
+            review_window_hours=review_window_hours,
+        )
 
     async def _collect() -> list[dict[str, Any]]:
         return await _collect_evidence_packs(
             ctx,
-            review_window_hours=max(inp.review_window_hours, 1),
+            review_window_hours=review_window_hours,
             candidate_limit=max(inp.candidate_limit, 1),
             user_name_by_id=user_name_by_id,
         )
 
+    coverage = await ctx.step("load_review_window_counts", _load_window_counts, step_kind="gather")
     all_tasks = await ctx.step("collect_tasks", _collect, step_kind="gather")
-    ctx.log("self_improve_batch_collected", tasks_total=len(all_tasks))
-
-    selected_ids = await _run_triage_pass(
-        ctx,
-        tasks=all_tasks,
-        limit=max(inp.candidate_limit, 1),
+    coverage = dict(coverage or {})
+    coverage["reconstructed_task_count"] = len(all_tasks)
+    coverage["reconstructed_thread_count"] = len(
+        {
+            str(task.get("thread_key") or "").strip()
+            for task in all_tasks
+            if isinstance(task, dict) and str(task.get("thread_key") or "").strip()
+        }
     )
-    id_set = set(selected_ids)
-    evidence_packs = [
-        task for task in all_tasks if str(task.get("task_id") or "") in id_set
-    ]
-    if not evidence_packs:
-        evidence_packs = all_tasks[:max(inp.candidate_limit, 1)]
+    ctx.log("self_improve_batch_collected", tasks_total=len(all_tasks), **coverage)
+
+    if inp.candidate_limit > 0:
+        selected_ids = await _run_triage_pass(
+            ctx,
+            tasks=all_tasks,
+            limit=max(inp.candidate_limit, 1),
+        )
+        id_set = set(selected_ids)
+        evidence_packs = [
+            task for task in all_tasks if str(task.get("task_id") or "") in id_set
+        ]
+        if not evidence_packs:
+            evidence_packs = all_tasks[:max(inp.candidate_limit, 1)]
+    else:
+        evidence_packs = list(all_tasks)
     ctx.log(
         "self_improve_triage_applied",
         total_tasks=len(all_tasks),
         selected_tasks=len(evidence_packs),
     )
+    coverage["triaged_task_count"] = len(evidence_packs)
 
-    review = await _run_batch_review_pass(
-        ctx,
-        evidence_packs=evidence_packs,
-        max_selected_fixes=max(inp.max_selected_fixes, 1),
+    async def _load_dedup_contexts() -> list[dict[str, Any]]:
+        return await _load_recent_fix_contexts(ctx)
+
+    selection_limit = _selection_limit(inp.max_selected_fixes, len(all_tasks))
+    recent_fixes = list(
+        await ctx.step("load_recent_fix_contexts", _load_dedup_contexts, step_kind="gather")
     )
+    recent_titles = [
+        str(item.get("title") or "").strip()
+        for item in recent_fixes
+        if isinstance(item, dict) and str(item.get("title") or "").strip()
+    ]
+
+    review_batches = [
+        await _run_batch_review_pass(
+            ctx,
+            evidence_packs=batch,
+            max_selected_fixes=selection_limit,
+            recent_fix_titles=recent_titles,
+            batch_tag=f"chunk-{index}",
+        )
+        for index, batch in enumerate(
+            _chunk_tasks(evidence_packs, max(inp.review_batch_size, 1)),
+            start=1,
+        )
+    ]
+    review = _merge_review_batches(review_batches, tasks_reviewed=len(evidence_packs))
 
     synthesis = await _run_learning_synthesis_pass(
         ctx,
         evidence_packs=evidence_packs,
-        max_selected_builds=max(inp.max_selected_fixes, 1),
+        max_selected_builds=selection_limit,
     )
+    if isinstance(synthesis, dict):
+        synthesis["selected_builds"] = _augment_builds_with_related_window_threads(
+            list(synthesis.get("selected_builds") or []),
+            all_tasks,
+        )
     ctx.log(
         "self_improve_learning_synthesis",
         opportunities_found=synthesis.get("opportunities_found", 0),
         selected_builds=len(list(synthesis.get("selected_builds") or [])),
     )
 
-    async def _load_dedup_titles() -> list[str]:
-        return await _load_recent_fix_titles(ctx)
-
-    recent_titles = list(
-        await ctx.step("load_recent_fix_titles", _load_dedup_titles, step_kind="gather")
-    )
-
-    gap_fixes = list(review.get("selected_fixes") or [])
+    gap_fixes = []
+    for item in list(review.get("selected_fixes") or []):
+        if not isinstance(item, dict):
+            continue
+        fix = dict(item)
+        fix.setdefault("selection_origin", "gap_analysis")
+        gap_fixes.append(fix)
     build_fixes = []
     for build in list(synthesis.get("selected_builds") or []):
         if not isinstance(build, dict):
             continue
+        raw_fix_type = str(build.get("opportunity_type") or "new_skill")
+        fix_type = "tool_improvement" if raw_fix_type == "new_tool_idea" else raw_fix_type
         build_fixes.append({
             "title": build.get("title", ""),
-            "fix_type": build.get("opportunity_type", "new_skill"),
+            "fix_type": fix_type,
             "target_surface": build.get("target_surface", ""),
             "what_to_change": build.get("implementation_sketch", ""),
-            "dominant_failure_mode": f"learning: {build.get('opportunity_type', 'unknown')}",
+            "dominant_failure_mode": f"learning: {raw_fix_type}",
             "priority": "medium",
             "why_now": build.get("user_value", ""),
             "evidence_quotes": [build.get("evidence_summary", "")],
@@ -1647,14 +2131,15 @@ async def _run_parent(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             "representative_tasks": [],
             "new_capability_justification": build.get("what_should_exist", ""),
             "slack_narrative": build.get("slack_narrative", ""),
+            "selection_origin": "learning_synthesis",
         })
 
     selected_fixes = await _run_reconcile_fixes_pass(
         ctx,
         gap_fixes=gap_fixes,
         build_fixes=build_fixes,
-        recent_titles=recent_titles,
-        max_fixes=max(inp.max_selected_fixes, 1),
+        recent_fixes=recent_fixes,
+        max_fixes=_selection_limit(inp.max_selected_fixes, len(gap_fixes) + len(build_fixes)),
     )
 
     children = await _start_fix_children(ctx, selected_fixes=selected_fixes)
@@ -1668,11 +2153,14 @@ async def _run_parent(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         return await _load_recent_notifier_stats(ctx)
 
     notifier_stats = await ctx.step("load_notifier_stats", _load_stats, step_kind="gather")
+    coverage["reviewed_task_count"] = int(review.get("tasks_reviewed") or len(evidence_packs))
+    ctx.log("self_improve_coverage_summary", **coverage)
     scorecard = _build_scorecard_markdown(
         review=review,
         synthesis=synthesis,
         child_results=child_results,
         notifier_stats=notifier_stats,
+        coverage=coverage,
     )
     await ctx.post_to_slack("ai-v2", scorecard)
     ctx.log(
@@ -1688,6 +2176,7 @@ async def _run_parent(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "synthesis": synthesis,
         "selected_fixes": selected_fixes,
         "opened_prs": child_results,
+        "coverage": coverage,
         "merged_prs": notifier_stats.get("merged_prs", 0),
         "deployed_prs": notifier_stats.get("deployed_prs", 0),
         "source_threads_notified": notifier_stats.get("source_threads_notified", 0),

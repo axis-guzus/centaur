@@ -362,6 +362,62 @@ async def test_step_name_deduplication(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_step_only_auto_links_execution_ids_for_agent_turn_steps(db_pool):
+    from api.workflow_engine import WorkflowContext
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    await db_pool.execute(
+        "INSERT INTO workflow_runs ("
+        "run_id, workflow_name, workflow_version, request_hash, root_run_id, "
+        "status, input_json, worker_id"
+        ") VALUES ($1, 'test', 'test-v1', 'hash', $1, 'running', '{}'::jsonb, 'w1')",
+        run_id,
+    )
+
+    ctx = WorkflowContext(
+        pool=db_pool,
+        run_id=run_id,
+        checkpoints={},
+        lease_s=30.0,
+        worker_id="w1",
+    )
+
+    await ctx.step(
+        "review_json",
+        lambda: {"execution_id": "exe-should-not-link", "value": 1},
+        step_kind="review",
+    )
+    await ctx.step(
+        "agent_dispatch",
+        lambda: {"execution_id": "exe-should-link", "status": "waiting"},
+        step_kind="agent_turn",
+    )
+    await db_pool.execute(
+        "INSERT INTO workflow_runs ("
+        "run_id, workflow_name, workflow_version, request_hash, root_run_id, "
+        "status, input_json"
+        ") VALUES ($1, 'child', 'test-v1', 'hash-child', $1, 'queued', '{}'::jsonb)",
+        "wfr_child_123",
+    )
+    await ctx.step(
+        "child_start",
+        lambda: {"run_id": "wfr_child_123", "status": "queued"},
+        step_kind="child_workflow_start",
+    )
+
+    rows = await db_pool.fetch(
+        "SELECT checkpoint_name, execution_id, child_run_id "
+        "FROM workflow_checkpoints WHERE run_id = $1 ORDER BY checkpoint_name",
+        run_id,
+    )
+    indexed = {str(row["checkpoint_name"]): row for row in rows}
+
+    assert indexed["review_json"]["execution_id"] is None
+    assert indexed["agent_dispatch"]["execution_id"] == "exe-should-link"
+    assert indexed["child_start"]["child_run_id"] == "wfr_child_123"
+
+
+@pytest.mark.asyncio
 async def test_sleep_suspends_and_resumes(db_pool):
     """ctx.sleep() raises SuspendWorkflow; on replay after wake time
     it falls through."""
