@@ -1628,6 +1628,7 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
         event_json=execution_started_payload,
     )
     log.info("execute_started", **execution_started_payload)
+    await _touch_execution_progress(pool, execution_id)
 
     turn_done_event: dict[str, Any] | None = None
     pending_event: asyncio.Task | None = None
