@@ -1543,6 +1543,12 @@ def get_sheets_service():
     return build("sheets", "v4", credentials=get_credentials())
 
 
+def _quote_sheet_title(title: str) -> str:
+    """Escape a sheet title for A1 notation."""
+    escaped_title = title.replace("'", "''")
+    return f"'{escaped_title}'"
+
+
 def sheets_create(title: str, content: list[list[str]] | None = None) -> dict:
     """Create a new Google Sheet.
 
@@ -1570,6 +1576,47 @@ def sheets_create(title: str, content: list[list[str]] | None = None) -> dict:
         "spreadsheet_id": spreadsheet_id,
         "title": spreadsheet.get("properties", {}).get("title", ""),
         "url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
+    }
+
+
+def sheets_add_tab(spreadsheet_id: str, title: str, index: int | None = None) -> dict:
+    """Add a worksheet tab to an existing Google Sheet.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        title: Worksheet title to create
+        index: Optional zero-based position for the new tab
+
+    Returns:
+        Dict with spreadsheet_id, sheet metadata, and direct URL
+    """
+    service = get_sheets_service()
+
+    properties: dict[str, str | int] = {"title": title}
+    if index is not None:
+        properties["index"] = index
+
+    result = (
+        service.spreadsheets()
+        .batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": properties}}]},
+        )
+        .execute()
+    )
+
+    sheet_properties = result.get("replies", [{}])[0].get("addSheet", {}).get("properties", {})
+    sheet_id = sheet_properties.get("sheetId")
+
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_id": sheet_id,
+        "title": sheet_properties.get("title", title),
+        "index": sheet_properties.get("index"),
+        "sheet_type": sheet_properties.get("sheetType", ""),
+        "grid_properties": sheet_properties.get("gridProperties", {}),
+        "sheet_properties": sheet_properties,
+        "url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid={sheet_id}",
     }
 
 
@@ -1695,6 +1742,67 @@ def sheets_batch_update(
         "total_updated_rows": result.get("totalUpdatedRows", 0),
         "total_updated_columns": result.get("totalUpdatedColumns", 0),
         "responses": result.get("responses", []),
+    }
+
+
+def sheets_write_table(
+    spreadsheet_id: str,
+    sheet_title: str,
+    headers: list[str],
+    rows: list[dict[str, str | int | float | bool | None]]
+    | list[list[str | int | float | bool | None]],
+    start_cell: str = "A1",
+    value_input_option: str = "USER_ENTERED",
+) -> dict:
+    """Write a header row and table body into a named worksheet tab.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        sheet_title: Worksheet tab title to write into
+        headers: Column headers for the table
+        rows: Table rows as dicts keyed by header or as row arrays
+        start_cell: Top-left cell where the table should be written
+        value_input_option: How to interpret input ("RAW" or "USER_ENTERED")
+
+    Returns:
+        Dict with updated range, counts, and table metadata
+    """
+    if not headers:
+        raise ValueError("headers must not be empty")
+
+    header_count = len(headers)
+    if rows and isinstance(rows[0], dict):
+        table_rows = []
+        for row in rows:
+            table_row = []
+            for header in headers:
+                value = row.get(header, "")
+                table_row.append("" if value is None else value)
+            table_rows.append(table_row)
+    else:
+        table_rows = [
+            [
+                (row[index] if index < len(row) and row[index] is not None else "")
+                for index in range(header_count)
+            ]
+            for row in rows
+        ]
+
+    values = [headers, *table_rows]
+    range_notation = f"{_quote_sheet_title(sheet_title)}!{start_cell}"
+    result = sheets_update(
+        spreadsheet_id,
+        range_notation,
+        values,
+        value_input_option=value_input_option,
+    )
+
+    return {
+        **result,
+        "sheet_title": sheet_title,
+        "headers": headers,
+        "row_count": len(table_rows),
+        "header_count": header_count,
     }
 
 
@@ -2623,6 +2731,24 @@ class GSuiteClient:
         """
         return sheets_create(title, content=content)
 
+    def sheets_add_tab(
+        self,
+        spreadsheet_id: str,
+        title: str,
+        index: int | None = None,
+    ) -> dict:
+        """Add a worksheet tab to an existing Google Sheet.
+
+        Args:
+            spreadsheet_id: The spreadsheet ID (from URL)
+            title: Worksheet title to create
+            index: Optional zero-based position for the new tab
+
+        Returns:
+            Dict with spreadsheet_id, sheet metadata, and direct URL
+        """
+        return sheets_add_tab(spreadsheet_id, title, index=index)
+
     def sheets_read(self, spreadsheet_id: str, range_notation: str = "A1:Z1000") -> dict:
         """Read data from a Google Sheet.
 
@@ -2678,6 +2804,38 @@ class GSuiteClient:
         """
         return sheets_batch_update(
             spreadsheet_id, updates, value_input_option=value_input_option
+        )
+
+    def sheets_write_table(
+        self,
+        spreadsheet_id: str,
+        sheet_title: str,
+        headers: list[str],
+        rows: list[dict[str, str | int | float | bool | None]]
+        | list[list[str | int | float | bool | None]],
+        start_cell: str = "A1",
+        value_input_option: str = "USER_ENTERED",
+    ) -> dict:
+        """Write a header row and table body into a named worksheet tab.
+
+        Args:
+            spreadsheet_id: The spreadsheet ID (from URL)
+            sheet_title: Worksheet tab title to write into
+            headers: Column headers for the table
+            rows: Table rows as dicts keyed by header or as row arrays
+            start_cell: Top-left cell where the table should be written
+            value_input_option: How to interpret input ("RAW" or "USER_ENTERED")
+
+        Returns:
+            Dict with updated range, counts, and table metadata
+        """
+        return sheets_write_table(
+            spreadsheet_id,
+            sheet_title,
+            headers,
+            rows,
+            start_cell=start_cell,
+            value_input_option=value_input_option,
         )
 
     # --- Slides ---
