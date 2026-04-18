@@ -1,11 +1,18 @@
 ---
 name: sourcer
-description: Talent sourcing agent that finds candidates matching a job description. Crawls LinkedIn, GitHub, and X/Twitter, then outputs a Google Sheet with candidate profiles. Use when asked to source candidates, find talent, or build a recruiting pipeline.
+description: Talent sourcing agent that finds candidates matching a job description. Crawls LinkedIn, GitHub, and X/Twitter, then always outputs a Google Sheet with candidate profiles unless the user explicitly opts out. Use when asked to source candidates, find talent, or build a recruiting pipeline.
 ---
 
 # Talent Sourcer Agent
 
 Sources candidates from LinkedIn, GitHub, and X/Twitter based on a job description, then generates a Google Sheet with results.
+
+## Output Contract
+
+- Every sourcing run must end with a Google Sheet unless the user explicitly says they do not want one.
+- Even if the user only asks for a target list, slate, or market map, still create the sheet and return the sheet link in the final response.
+- If the sheet would be low-signal because the market is thin, create a smaller high-conviction sheet instead of skipping sheet creation.
+- If sheet creation or sharing fails, treat that as a blocker and say so explicitly rather than silently returning only a markdown list.
 
 ## Workflow
 
