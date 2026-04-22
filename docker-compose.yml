@@ -171,12 +171,40 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  nginx:
+    build:
+      context: .
+      dockerfile: services/nginx/Dockerfile
+    ports:
+      - "${CENTAUR_NGINX_BIND_ADDRESS:-127.0.0.1}:${CENTAUR_NGINX_HOST_PORT:-8000}:80"
+    environment:
+      CENTAUR_NGINX_SERVER_NAME: ${CENTAUR_NGINX_SERVER_NAME:-_}
+      CENTAUR_NGINX_ENABLED_SERVICES: ${CENTAUR_NGINX_ENABLED_SERVICES:-slackbot}
+      CENTAUR_NGINX_SLACKBOT_UPSTREAM: http://slackbot:3001
+      CENTAUR_NGINX_API_UPSTREAM: http://api:8000
+      CENTAUR_NGINX_ADMIN_UPSTREAM: http://api:8000
+      CENTAUR_NGINX_GRAFANA_UPSTREAM: http://grafana:3000
+      CENTAUR_NGINX_AUTH_UPSTREAM: ${CENTAUR_NGINX_AUTH_UPSTREAM:-http://auth:3000}
+      CENTAUR_NGINX_WEB_UPSTREAM: ${CENTAUR_NGINX_WEB_UPSTREAM:-http://web:3000}
+      CENTAUR_NGINX_NEXT_UPSTREAM: ${CENTAUR_NGINX_NEXT_UPSTREAM:-http://next:3000}
+    networks:
+      - default
+    depends_on:
+      slackbot:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+      start_interval: 1s
+    restart: unless-stopped
+
   slackbot:
     build:
       context: .
       dockerfile: services/slackbot/Dockerfile
-    ports:
-      - "127.0.0.1:8000:3001"
     environment:
       CENTAUR_API_URL: http://api:8000
       SECRET_MANAGER_URL: http://firewall:8081
@@ -193,6 +221,19 @@ services:
         condition: service_healthy
       firewall:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+      start_interval: 2s
     restart: unless-stopped
 
   # Build-only target. Not started by `docker compose up` because it is profiled.
