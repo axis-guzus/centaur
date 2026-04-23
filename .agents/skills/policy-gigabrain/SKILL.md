@@ -500,12 +500,20 @@ If found, note `spreadsheet_id`. If not, create it:
 call gsuite sheets_create '{"title":"Hill Staff Map","content":[["name","office","member","committee","side","party","title","hill_years","earliest_start","committee_staff","issue_coverage","gigabrain_signal","staff_id"]]}'
 ```
 
-**B2. Pull policy staff using issue portfolio filter:**
+**B2. Pull committee professional staff and confirm crypto/digital assets coverage:**
+
+Pull all professional staff by committee office:
 ```bash
-call legistorm get_staff_with_issue_portfolios '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":676,"issue_endpoint":"financial-services","limit":100}'
-call legistorm get_staff_with_issue_portfolios '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":1200,"issue_endpoint":"financial-services","limit":100}'
+call legistorm get_staff '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":676,"limit":100}'
+call legistorm get_staff '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":1200,"limit":100}'
 ```
-If issue portfolios are unavailable, fall back to `get_staff` with the title-based filter described above.
+Apply the title-based filter: include Legislative Director, Policy Advisor, Counsel, Professional Staff Member, Staff Director, Legislative Assistant, Senior Legislative Assistant. Exclude communications, press, scheduling, and constituent services roles.
+
+For each remaining staffer, run a targeted web search to confirm they work on crypto, digital assets, stablecoins, or fintech:
+```bash
+call websearch search '{"query":"[staffer name] Senate Banking digital assets cryptocurrency stablecoin fintech"}'
+```
+Include only those confirmed through web results to be actively working on these issues. If results are ambiguous or absent, exclude.
 
 **B3. Pull personal office policy staff for all committee members:**
 
