@@ -3,7 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { ProgressTracker } from "../src/lib/bot/progress-tracker";
-import { splitSlackMessage } from "../src/lib/bot/bot";
+import {
+  splitSlackMessage,
+  parsePromptSelectorFlag,
+  extractFlagSelector,
+} from "../src/lib/bot/bot";
 import { normalizeHarnessEvent, type CanonicalEvent } from "@centaur/harness-events";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -667,6 +671,80 @@ describe("consumeWire reconnects on graceful EOF without turn.done", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6b. Prompt selector parsing (flag-only; no auto-routing)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("parsePromptSelectorFlag", () => {
+  it("extracts --invest", () => {
+    expect(parsePromptSelectorFlag("--invest hyperliquid miqs")).toBe("invest");
+  });
+
+  it("handles --INVEST (case insensitive)", () => {
+    expect(parsePromptSelectorFlag("--INVEST")).toBe("invest");
+  });
+
+  it("resolves aliases (claude → claude-code, pi → pi-mono)", () => {
+    expect(parsePromptSelectorFlag("--claude do a thing")).toBe("claude-code");
+    expect(parsePromptSelectorFlag("--pi analyse")).toBe("pi-mono");
+  });
+
+  it("skips reserved non-harness flags", () => {
+    expect(parsePromptSelectorFlag("--engine=opus --opus --sonnet --haiku --model")).toBeUndefined();
+  });
+
+  it("returns undefined when no flag is present", () => {
+    expect(parsePromptSelectorFlag("thoughts on hyperliquid?")).toBeUndefined();
+  });
+
+  it("last flag wins (unchanged from legacy single-flag behavior)", () => {
+    expect(parsePromptSelectorFlag("--invest --codex")).toBe("codex");
+  });
+
+  it("does NOT infer persona from DocSend/Drive URLs or attachments", () => {
+    expect(parsePromptSelectorFlag("look at this co https://docsend.com/view/s/abc")).toBeUndefined();
+    expect(parsePromptSelectorFlag("https://drive.google.com/file/d/abc")).toBeUndefined();
+  });
+});
+
+describe("extractFlagSelector — returns stripped text for the agent", () => {
+  it("strips the flag token at start", () => {
+    const { selector, cleaned } = extractFlagSelector("--invest hyperliquid miqs");
+    expect(selector).toBe("invest");
+    expect(cleaned).toBe("hyperliquid miqs");
+  });
+
+  it("strips the flag at end of string", () => {
+    const { selector, cleaned } = extractFlagSelector("hyperliquid miqs --invest");
+    expect(selector).toBe("invest");
+    expect(cleaned).toBe("hyperliquid miqs");
+  });
+
+  it("bare --invest strips to empty text", () => {
+    const { selector, cleaned } = extractFlagSelector("--invest");
+    expect(selector).toBe("invest");
+    expect(cleaned).toBe("");
+  });
+
+  it("no flag leaves text untouched", () => {
+    const { selector, cleaned } = extractFlagSelector("hyperliquid miqs");
+    expect(selector).toBeUndefined();
+    expect(cleaned).toBe("hyperliquid miqs");
+  });
+
+  it("collapses whitespace across multiple flags", () => {
+    const { selector, cleaned } = extractFlagSelector("--invest --codex hyperliquid");
+    expect(selector).toBe("codex");
+    expect(cleaned).toBe("hyperliquid");
+  });
+
+  it("preserves DocSend/URL content in cleaned text when no flag present", () => {
+    const { selector, cleaned } = extractFlagSelector("looking at this co https://docsend.com/view/s/abc");
+    expect(selector).toBeUndefined();
+    expect(cleaned).toBe("looking at this co https://docsend.com/view/s/abc");
   });
 });
 

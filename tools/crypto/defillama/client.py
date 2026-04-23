@@ -6,6 +6,37 @@ import httpx
 from centaur_sdk import secret
 
 
+_PERP_VENUE_HINTS = frozenset({
+    "dydx",
+    "dydx-v4",
+    "dydx-chain",
+    "dydx-v3",
+    "hyperliquid",
+    "hyperliquid-perps",
+    "gmx",
+    "gmx-v1",
+    "gmx-v2",
+    "aster",
+    "lighter",
+    "vertex",
+    "vertex-perps",
+    "synfutures",
+    "kwenta",
+    "drift",
+    "drift-v2",
+    "paradex",
+    "mango-markets",
+    "apex",
+    "apex-pro",
+    "level-finance",
+})
+
+
+def _looks_like_perps(slug: str) -> bool:
+    """Heuristic: is this slug a known perps / derivatives venue?"""
+    return (slug or "").lower().strip() in _PERP_VENUE_HINTS
+
+
 class DefiLlamaClient:
     """Client for DefiLlama API.
 
@@ -234,13 +265,57 @@ class DefiLlamaClient:
     def get_dex_summary(self, protocol: str) -> dict:
         """Get volume details for a specific DEX protocol.
 
+        Note: perpetuals venues (dYdX, Hyperliquid, GMX, Aster, Lighter, etc.) are
+        NOT listed under `/dexs`; use `get_derivatives_summary` instead. If DefiLlama
+        returns a 400 "not found", the error is surfaced with a suggestion.
+
         Args:
             protocol: Protocol slug
 
         Returns:
             Protocol volume details
         """
-        return self._request(f"/summary/dexs/{protocol}")
+        try:
+            return self._request(f"/summary/dexs/{protocol}")
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "not found" in msg.lower() and _looks_like_perps(protocol):
+                raise RuntimeError(
+                    f"{msg}\n"
+                    f"Hint: `{protocol}` looks like a perpetuals venue — try "
+                    f"`get_derivatives_summary(protocol=...)` instead. DefiLlama "
+                    f"splits spot DEX volumes (`/dexs`) from perp volumes (`/derivatives`)."
+                ) from exc
+            raise
+
+    # === Derivatives / Perpetuals ===
+
+    def get_derivatives_volumes(self, chain: str | None = None) -> dict:
+        """Get perpetual-futures venue volumes across chains.
+
+        Covers dYdX, Hyperliquid, GMX, Aster, Lighter, and other perps venues
+        that are NOT listed under `/dexs`.
+
+        Args:
+            chain: Optional chain name to filter
+
+        Returns:
+            Derivatives volume data
+        """
+        if chain:
+            return self._request(f"/overview/derivatives/{chain}")
+        return self._request("/overview/derivatives")
+
+    def get_derivatives_summary(self, protocol: str) -> dict:
+        """Get volume details for a specific perpetuals venue.
+
+        Args:
+            protocol: Protocol slug (e.g., "dydx-v4", "hyperliquid", "gmx-v2")
+
+        Returns:
+            Protocol derivatives volume details
+        """
+        return self._request(f"/summary/derivatives/{protocol}")
 
     # === Bridges ===
 

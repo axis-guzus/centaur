@@ -133,18 +133,35 @@ type FinalDeliveryRecord = {
   final_payload?: Record<string, unknown> | null;
 };
 
-/** Extract harness/persona flag (e.g. --invest, --legal) from message text. */
-function parsePromptSelectorFlag(text: string): string | undefined {
-  // Match --flag patterns, skip known non-harness flags
-  const skip = new Set(["engine", "model", "opus", "sonnet", "haiku"]);
-  const re = /(?:^|\s)--([a-z][a-z0-9-]*)(?=\s|$)/gi;
-  let match: RegExpExecArray | null;
+const PROMPT_FLAG_RE = /(?:^|\s)--([a-z][a-z0-9-]*)(?=\s|$)/gi;
+const PROMPT_FLAG_SKIP = new Set(["engine", "model", "opus", "sonnet", "haiku"]);
+
+/**
+ * Extract every `--flag` token. Returns the last matched selector (persona or
+ * harness) plus the text with all flag tokens stripped so the LLM never sees
+ * `--invest` in the prompt body. Persona/harness routing is flag-only by design:
+ * never infer persona from channel, content, or attachments.
+ */
+export function extractFlagSelector(text: string): { selector?: string; cleaned: string } {
+  const re = new RegExp(PROMPT_FLAG_RE.source, PROMPT_FLAG_RE.flags);
   let selector: string | undefined;
+  let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {
     const flag = match[1].toLowerCase();
-    if (!skip.has(flag)) selector = PROMPT_FLAG_ALIASES.get(flag) || flag;
+    if (!PROMPT_FLAG_SKIP.has(flag)) {
+      selector = PROMPT_FLAG_ALIASES.get(flag) || flag;
+    }
   }
-  return selector;
+  const cleaned = text
+    .replace(new RegExp(PROMPT_FLAG_RE.source, PROMPT_FLAG_RE.flags), " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return { selector, cleaned };
+}
+
+/** Backwards-compat wrapper: the raw selector string only. */
+export function parsePromptSelectorFlag(text: string): string | undefined {
+  return extractFlagSelector(text).selector;
 }
 
 /** Extract text from a message, preferring the formatted AST (preserves links) over plain text. */
@@ -301,18 +318,19 @@ export class SlackBot {
     thread.startTyping().catch(() => {});
 
     const richText = richTextFromMessage(msg);
-    const promptSelector = parsePromptSelectorFlag(richText);
+    const { selector: promptSelector, cleaned } = extractFlagSelector(richText);
+    const agentText = cleaned || richText;
 
     // Buffer prior thread messages as context before the mentioning message
     await this.backfillThreadHistory(thread.id, promptSelector);
 
     const attachments = await this.resolveAttachments(thread.id, msg);
-    const parts = await this.toParts(richText, attachments);
-    await this.bufferAndExecute(thread, richText, parts, {
+    const parts = await this.toParts(agentText, attachments);
+    await this.bufferAndExecute(thread, agentText, parts, {
       messageId: stableSlackMessageId(msg),
       userId: msg.author.userId,
       teamId: slackTeamId(msg),
-    });
+    }, promptSelector);
   }
 
   async onSubscribedMessage(thread: BotThread, msg: BotMessage) {
@@ -322,17 +340,21 @@ export class SlackBot {
     const text = richTextFromMessage(msg);
     if (!text && !attachments.length) return;
 
-    const parts = await this.toParts(text || "Shared attachment in thread.", attachments);
     if (msg.isMention) {
+      const { selector: promptSelector, cleaned } = extractFlagSelector(text);
+      const agentText = cleaned || text;
+      const parts = await this.toParts(agentText || "Shared attachment in thread.", attachments);
       log.info("mention_received", { thread_key: normalizeThreadKey(thread.id), user_id: msg.author.userId, is_new_thread: false });
       thread.startTyping().catch(() => {});
-      await this.bufferAndExecute(thread, text, parts, {
+      await this.bufferAndExecute(thread, agentText, parts, {
         messageId: stableSlackMessageId(msg),
         userId: msg.author.userId,
         teamId: slackTeamId(msg),
-      });
+      }, promptSelector);
       return;
     }
+
+    const parts = await this.toParts(text || "Shared attachment in thread.", attachments);
 
     const threadKey = normalizeThreadKey(thread.id);
     const state = await this.ensureAssignment(threadKey);
@@ -358,10 +380,16 @@ export class SlackBot {
 
   // ── Core ────────────────────────────────────────────────────────────────
 
-  private async bufferAndExecute(thread: BotThread, text: string, parts: InputContentBlock[], delivery: DeliveryContext) {
+  private async bufferAndExecute(
+    thread: BotThread,
+    text: string,
+    parts: InputContentBlock[],
+    delivery: DeliveryContext,
+    promptSelectorOverride?: string,
+  ) {
     const threadKey = normalizeThreadKey(thread.id);
     await this.cancelInflightExecution(threadKey);
-    const promptSelector = parsePromptSelectorFlag(text);
+    const promptSelector = promptSelectorOverride ?? parsePromptSelectorFlag(text);
     const { channel, threadTs } = splitThreadKey(thread.id);
     const accepted = await this.client.startWorkflowRun({
       workflowName: "slack_thread_turn",

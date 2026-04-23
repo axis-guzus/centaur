@@ -7,6 +7,36 @@ import httpx
 from centaur_sdk import secret
 
 
+# Map common LLM-emitted field name mistakes to the real Crunchbase v4 field_ids.
+# LLMs tend to drop the `_identifiers` suffix or pluralize the wrong part.
+_FIELD_ALIASES: dict[str, str] = {
+    "lead_investors": "lead_investor_identifiers",
+    "lead_investor": "lead_investor_identifiers",
+    "investors": "investor_identifiers",
+    "investor": "investor_identifiers",
+    "funded_organization": "funded_organization_identifier",
+    "company": "funded_organization_identifier",
+    "primary_organization_name": "primary_organization",
+}
+
+
+def _normalize_field_ids(field_ids: list[str] | None) -> list[str] | None:
+    """Rewrite common field-name mistakes to real Crunchbase field_ids.
+
+    Preserves order and removes duplicates introduced by the alias rewrite.
+    """
+    if not field_ids:
+        return field_ids
+    seen: set[str] = set()
+    out: list[str] = []
+    for fid in field_ids:
+        mapped = _FIELD_ALIASES.get(fid, fid)
+        if mapped not in seen:
+            seen.add(mapped)
+            out.append(mapped)
+    return out
+
+
 class CrunchbaseClient:
     """Client for Crunchbase Enterprise API v4."""
 
@@ -66,6 +96,7 @@ class CrunchbaseClient:
     ) -> dict:
         """Lookup an organization by permalink or UUID."""
         params = {}
+        field_ids = _normalize_field_ids(field_ids)
         if field_ids:
             params["field_ids"] = ",".join(field_ids)
         if card_ids:
@@ -83,6 +114,7 @@ class CrunchbaseClient:
     ) -> dict:
         """Get a specific card for an organization (for pagination)."""
         params = {"limit": limit}
+        card_field_ids = _normalize_field_ids(card_field_ids)
         if card_field_ids:
             params["card_field_ids"] = ",".join(card_field_ids)
         if after_id:
@@ -101,6 +133,7 @@ class CrunchbaseClient:
     ) -> dict:
         """Lookup a person by permalink or UUID."""
         params = {}
+        field_ids = _normalize_field_ids(field_ids)
         if field_ids:
             params["field_ids"] = ",".join(field_ids)
         if card_ids:
@@ -115,6 +148,7 @@ class CrunchbaseClient:
     ) -> dict:
         """Lookup a funding round by UUID."""
         params = {}
+        field_ids = _normalize_field_ids(field_ids)
         if field_ids:
             params["field_ids"] = ",".join(field_ids)
         if card_ids:
@@ -129,6 +163,7 @@ class CrunchbaseClient:
     ) -> dict:
         """Lookup an acquisition by UUID."""
         params = {}
+        field_ids = _normalize_field_ids(field_ids)
         if field_ids:
             params["field_ids"] = ",".join(field_ids)
         if card_ids:
@@ -143,6 +178,7 @@ class CrunchbaseClient:
     ) -> dict:
         """Lookup an IPO by UUID."""
         params = {}
+        field_ids = _normalize_field_ids(field_ids)
         if field_ids:
             params["field_ids"] = ",".join(field_ids)
         if card_ids:
@@ -157,6 +193,7 @@ class CrunchbaseClient:
     ) -> dict:
         """Lookup a fund by UUID."""
         params = {}
+        field_ids = _normalize_field_ids(field_ids)
         if field_ids:
             params["field_ids"] = ",".join(field_ids)
         if card_ids:
@@ -172,7 +209,7 @@ class CrunchbaseClient:
         after_id: str | None = None,
     ) -> dict:
         """Search for organizations."""
-        body: dict[str, Any] = {"field_ids": field_ids, "limit": limit}
+        body: dict[str, Any] = {"field_ids": _normalize_field_ids(field_ids) or [], "limit": limit}
         if query:
             body["query"] = query
         if order:
@@ -190,7 +227,7 @@ class CrunchbaseClient:
         after_id: str | None = None,
     ) -> dict:
         """Search for people."""
-        body: dict[str, Any] = {"field_ids": field_ids, "limit": limit}
+        body: dict[str, Any] = {"field_ids": _normalize_field_ids(field_ids) or [], "limit": limit}
         if query:
             body["query"] = query
         if order:
@@ -208,7 +245,7 @@ class CrunchbaseClient:
         after_id: str | None = None,
     ) -> dict:
         """Search for funding rounds."""
-        body: dict[str, Any] = {"field_ids": field_ids, "limit": limit}
+        body: dict[str, Any] = {"field_ids": _normalize_field_ids(field_ids) or [], "limit": limit}
         if query:
             body["query"] = query
         if order:
@@ -226,7 +263,7 @@ class CrunchbaseClient:
         after_id: str | None = None,
     ) -> dict:
         """Search for acquisitions."""
-        body: dict[str, Any] = {"field_ids": field_ids, "limit": limit}
+        body: dict[str, Any] = {"field_ids": _normalize_field_ids(field_ids) or [], "limit": limit}
         if query:
             body["query"] = query
         if order:
@@ -244,7 +281,7 @@ class CrunchbaseClient:
         after_id: str | None = None,
     ) -> dict:
         """Search for investments."""
-        body: dict[str, Any] = {"field_ids": field_ids, "limit": limit}
+        body: dict[str, Any] = {"field_ids": _normalize_field_ids(field_ids) or [], "limit": limit}
         if query:
             body["query"] = query
         if order:

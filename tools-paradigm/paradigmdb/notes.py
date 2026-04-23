@@ -79,12 +79,11 @@ class NotesClient:
             FROM "Notes" n
             LEFT JOIN "User" u ON n.created_by_id = u.id
             LEFT JOIN "Person" p ON u."personId" = p.id
-            WHERE n.deleted_at IS NULL
         """
         params: list[Any] = []
 
         if note_type:
-            sql += ' AND n."noteType" = %s'
+            sql += ' WHERE n."noteType" = %s'
             params.append(note_type)
 
         sql += f' ORDER BY n."{order_by}" {order_dir} LIMIT %s OFFSET %s'
@@ -110,8 +109,7 @@ class NotesClient:
             FROM "Notes" n
             LEFT JOIN "User" u ON n.created_by_id = u.id
             LEFT JOIN "Person" p ON u."personId" = p.id
-            WHERE n.deleted_at IS NULL
-              AND (n.notes_search @@ plainto_tsquery('english', %s)
+            WHERE (n.notes_search @@ plainto_tsquery('english', %s)
                    OR n.title_search @@ plainto_tsquery('english', %s)
                    OR n.title ILIKE %s
                    OR n.notes ILIKE %s)
@@ -139,7 +137,7 @@ class NotesClient:
             FROM "Notes" n
             LEFT JOIN "User" u ON n.created_by_id = u.id
             LEFT JOIN "Person" p ON u."personId" = p.id
-            WHERE n.id = %s AND n.deleted_at IS NULL
+            WHERE n.id = %s
         """
         row = self.db.query_one(sql, (note_id,))
         if row:
@@ -194,7 +192,7 @@ class NotesClient:
             LEFT JOIN "Person" p ON u."personId" = p.id
             JOIN "_NotesToOrganization" nto ON n.id = nto."A"
             JOIN "Organization" o ON nto."B" = o.id
-            WHERE n.deleted_at IS NULL AND o.name ILIKE %s
+            WHERE o.name ILIKE %s
             ORDER BY n.created_at DESC
             LIMIT %s
         """
@@ -207,7 +205,6 @@ class NotesClient:
             """
             SELECT "noteType", COUNT(*) as count
             FROM "Notes"
-            WHERE deleted_at IS NULL
             GROUP BY "noteType"
             ORDER BY count DESC
             """
@@ -217,18 +214,17 @@ class NotesClient:
             """
             SELECT source, COUNT(*) as count
             FROM "Notes"
-            WHERE deleted_at IS NULL
             GROUP BY source
             ORDER BY count DESC
             """
         )
 
-        total = self.db.query_one('SELECT COUNT(*) as count FROM "Notes" WHERE deleted_at IS NULL')
+        total = self.db.query_one('SELECT COUNT(*) as count FROM "Notes"')
 
         recent = self.db.query_one(
             """
             SELECT COUNT(*) as count FROM "Notes"
-            WHERE deleted_at IS NULL AND created_at > NOW() - INTERVAL '30 days'
+            WHERE created_at > NOW() - INTERVAL '30 days'
             """
         )
 
@@ -247,7 +243,6 @@ class NotesClient:
             FROM "Notes" n
             JOIN "User" u ON n.created_by_id = u.id
             JOIN "Person" p ON u."personId" = p.id
-            WHERE n.deleted_at IS NULL
             GROUP BY u.id, p."fullName", u.email
             ORDER BY note_count DESC
             LIMIT %s
