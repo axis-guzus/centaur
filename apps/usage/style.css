@@ -266,6 +266,17 @@ tbody td.user-name {
   background: var(--border);
 }
 
+.placeholder-icon {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 600;
+  font-style: normal;
+  font-family: var(--font);
+}
+
 .user-realname {
   display: block;
   font-weight: 500;

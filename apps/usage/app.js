@@ -163,25 +163,27 @@ function renderHead() {
   $("#thead").innerHTML = `<tr>${ths}</tr>`;
 }
 
+const PLACEHOLDER = `<span class="team-emoji placeholder-icon">?</span>`;
+
 function renderTeamCell(r) {
-  return `<td class="tool-name"><span class="tool-identity"><span class="team-emoji">${r.emoji || ""}</span>${escapeHtml(r.team)}</span></td>`;
+  return `<td class="tool-name"><span class="tool-identity"><span class="team-emoji">${r.emoji || PLACEHOLDER}</span>${escapeHtml(r.team)}</span></td>`;
 }
 
 function renderTeamBadge(r) {
-  return `<td class="col-team"><span class="tool-identity"><span class="team-emoji">${r.team_emoji || ""}</span>${escapeHtml(r.team || "")}</span></td>`;
+  return `<td class="col-team"><span class="tool-identity"><span class="team-emoji">${r.team_emoji || PLACEHOLDER}</span>${escapeHtml(r.team || "")}</span></td>`;
 }
 
 function renderToolCell(r) {
   const icon = r.icon
-    ? `<img class="tool-icon" src="${escapeHtml(r.icon)}" loading="lazy" alt="" onerror="this.style.display='none'">`
-    : "";
+    ? `<img class="tool-icon" src="${escapeHtml(r.icon)}" loading="lazy" alt="" onerror="this.replaceWith(document.createRange().createContextualFragment('${PLACEHOLDER}'))">`
+    : PLACEHOLDER;
   return `<td class="tool-name"><span class="tool-identity">${icon}${escapeHtml(r.tool)}</span></td>`;
 }
 
 function renderUserCell(r) {
   const pfp = r.pfp
-    ? `<img class="pfp" src="${escapeHtml(r.pfp)}" loading="lazy" alt="">`
-    : `<span class="pfp pfp-placeholder"></span>`;
+    ? `<img class="pfp" src="${escapeHtml(r.pfp)}" loading="lazy" alt="" onerror="this.replaceWith(document.createRange().createContextualFragment('${PLACEHOLDER}'))">`
+    : PLACEHOLDER;
   const handle = r.handle && r.handle !== "\u2014" ? `<span class="handle">@${escapeHtml(r.handle)}</span>` : "";
   return `<td class="user-name"><span class="user-identity">${pfp}<span><span class="user-realname">${escapeHtml(r.name)}</span>${handle}</span></span></td>`;
 }
@@ -193,9 +195,9 @@ function renderBody() {
 
   const html = rows.map((r, i) => {
     const tds = cols.map((c) => {
-      if (c.hasWorkflowEmoji) return `<td class="tool-name"><span class="tool-identity"><span class="team-emoji">${r.emoji || ""}</span>${escapeHtml(r.workflow)}</span></td>`;
-      if (c.hasAppLink) return `<td class="tool-name"><span class="tool-identity"><span class="team-emoji">${r.emoji || ""}</span><a href="https://svc-ai.dayno.xyz/apps/${escapeHtml(r.app)}/" target="_blank" class="app-link">${escapeHtml(r.app)}</a></span></td>`;
-      if (c.hasSkillEmoji) return `<td class="tool-name"><span class="tool-identity"><span class="team-emoji">${r.emoji || ""}</span>${escapeHtml(r.skill)}</span></td>`;
+      if (c.hasWorkflowEmoji) return `<td class="tool-name"><span class="tool-identity"><span class="team-emoji">${r.emoji || PLACEHOLDER}</span>${escapeHtml(r.workflow)}</span></td>`;
+      if (c.hasAppLink) return `<td class="tool-name"><span class="tool-identity"><span class="team-emoji">${r.emoji || PLACEHOLDER}</span><a href="https://svc-ai.dayno.xyz/apps/${escapeHtml(r.app)}/" target="_blank" class="app-link">${escapeHtml(r.app)}</a></span></td>`;
+      if (c.hasSkillEmoji) return `<td class="tool-name"><span class="tool-identity"><span class="team-emoji">${r.emoji || PLACEHOLDER}</span>${escapeHtml(r.skill)}</span></td>`;
       if (c.hasIcon && state.view === "tools") return renderToolCell(r);
       if (c.hasPfp && state.view === "users") return renderUserCell(r);
       if (c.hasEmoji) return renderTeamCell(r);
