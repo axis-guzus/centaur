@@ -38,16 +38,6 @@ class DeployRequest(BaseModel):
     created_by: str | None = None
 
 
-def _hash_password(password: str) -> str:
-    """Hash a password with SHA-256 for basic auth storage."""
-    return hashlib.sha256(password.encode()).hexdigest()
-
-
-def _verify_password(password: str, hashed: str) -> bool:
-    """Verify a password against its SHA-256 hash."""
-    return hashlib.sha256(password.encode()).hexdigest() == hashed
-
-
 @router.post("")
 async def deploy_app(request: Request, body: DeployRequest):
     """Deploy a new app from a GitHub repo."""
@@ -57,7 +47,11 @@ async def deploy_app(request: Request, body: DeployRequest):
     if existing:
         raise HTTPException(status_code=409, detail=f"App '{body.name}' already exists")
 
-    pass_hash = _hash_password(body.basic_auth_pass) if body.basic_auth_pass else None
+    pass_hash = (
+        hashlib.sha256(body.basic_auth_pass.encode()).hexdigest()
+        if body.basic_auth_pass
+        else None
+    )
 
     try:
         result = await app_manager.deploy(
@@ -183,24 +177,35 @@ async def get_app_logs(request: Request, name: str, tail: int = 200):
 proxy_router = APIRouter(prefix="/apps", tags=["app-proxy"])
 
 
-def _check_basic_auth(request: Request, auth_user: str, auth_pass_hash: str) -> bool:
-    """Verify Basic auth credentials from the request."""
+async def _check_global_auth(request: Request) -> bool:
+    """Check password against the global hash in app_config."""
     auth_header = request.headers.get("authorization", "")
     if not auth_header.lower().startswith("basic "):
         return False
     try:
         decoded = base64.b64decode(auth_header[6:]).decode()
-        username, password = decoded.split(":", 1)
+        _, password = decoded.split(":", 1)
     except Exception:
         return False
-    return username == auth_user and _verify_password(password, auth_pass_hash)
+    pool = request.app.state.db_pool
+    row = await pool.fetchrow("SELECT password_hash FROM app_config WHERE id = 1")
+    if not row:
+        return False
+    return hashlib.sha256(password.encode()).hexdigest() == row["password_hash"]
 
 
 async def _do_proxy(request: Request, name: str, path: str):
     """Shared proxy logic used by both path-based and subdomain routes."""
+    if not await _check_global_auth(request):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Unauthorized"},
+            headers={"WWW-Authenticate": 'Basic realm="Centaur App"'},
+        )
+
     pool = request.app.state.db_pool
     row = await pool.fetchrow(
-        "SELECT container_id, status, port, basic_auth_user, basic_auth_pass_hash "
+        "SELECT container_id, status, port "
         "FROM apps WHERE name = $1",
         name,
     )
@@ -212,17 +217,6 @@ async def _do_proxy(request: Request, name: str, path: str):
             status_code=503,
             detail=f"App '{name}' is not running (status: {row['status']})",
         )
-
-    # Check basic auth if configured
-    if row["basic_auth_user"] and row["basic_auth_pass_hash"]:
-        if not _check_basic_auth(
-            request, row["basic_auth_user"], row["basic_auth_pass_hash"]
-        ):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Unauthorized"},
-                headers={"WWW-Authenticate": 'Basic realm="Centaur App"'},
-            )
 
     container_ip = await app_manager.get_container_ip(row["container_id"])
     if not container_ip:
