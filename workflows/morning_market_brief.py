@@ -166,9 +166,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         )
         if next_run <= now:
             next_run += dt.timedelta(days=1)
-        # Advance past weekends
-        while next_run.weekday() >= 5:
-            next_run += dt.timedelta(days=1)
 
         await ctx.sleep(f"wait_{iteration}", next_run - now)
 
