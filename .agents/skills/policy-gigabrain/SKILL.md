@@ -400,7 +400,7 @@ Answer any question about a Member of Congress — their staff, donors, voting r
 
 ### 2c. Hill Staff Map
 
-Maintain standing intelligence on current staff across the Senate Banking Committee and House Financial Services Committee (HFSC). This is part of the Gigabrain's persistent context — not a one-off report. Once built, the agent draws on it to answer any question about these people: who covers crypto for a given member, who's rising, who would be a strong hire for a portfolio company, who's the right door for a specific issue. The map is built once, stored in a Google Sheet as a memory layer, and refreshed weekly in the background.
+Maintain standing intelligence on current policy staff across the Senate Banking Committee and House Financial Services Committee (HFSC). This is part of the Gigabrain's persistent context. Once built, the agent draws on it to answer any question about these people: who covers digital assets for a given member, who's rising, who would be a strong hire for a portfolio company. The map is built once, stored in a Google Sheet as a memory layer, and refreshed weekly in the background.
 
 **LegiStorm office IDs (hardcoded):**
 - Senate Banking, Housing and Urban Affairs Committee: `office_id = 676`
@@ -411,10 +411,10 @@ Maintain standing intelligence on current staff across the Senate Banking Commit
 ---
 
 **Trigger Phrases:**
-- "Who's the lead staffer for crypto on Senate Banking?"
-- "Who covers fintech / financial regulation for [member]?"
-- "Who on HFSC would be a strong hire for a portfolio company?"
-- "Who's up and coming on Senate Banking?"
+- "Who's the lead staffer for crypto / digital assets / fintech on Senate Banking?"
+- "Who covers financial services for [member]?"
+- "Who on Senate Banking / HFSC would be a strong hire for a portfolio company?"
+- "Who's up and coming on Senate Banking / HFSC?"
 - "Hill staff map" / "HFSC bench" / "Banking Committee staff"
 - "Who's doing what on Senate Banking / HFSC?"
 - "Build the Hill Staff Map" / "Refresh the Hill Staff Map"
@@ -424,85 +424,120 @@ Maintain standing intelligence on current staff across the Senate Banking Commit
 
 **What this map is for**
 
-Three connected uses — answered from the same knowledge base, no mode-switching:
+Three connected uses, answered from the same stored context:
 
-1. **Issue mapping** — who is the lead staffer on crypto (and eventually AI and defense tech) for each member and on the committee staff itself. When someone asks "who's the right door on Senate Banking for stablecoin legislation," this is what the agent draws on.
+1. **Issue mapping** — who is the lead staffer on digital assets, fintech, or financial services for each member and on the committee staff itself. The primary question this answers: "who's the right door for this issue?"
 
-2. **Talent intelligence** — who is up-and-coming (strong trajectory, committee exposure, early career), and who is experienced enough to be a strong hire for a portfolio company Head of Policy or similar role. Trajectory matters more than current title — titles are inconsistent across offices.
+2. **Talent intelligence** — who has the depth and trajectory to be a strong hire for a portfolio company. Gigabrain intel is the primary signal here — LegiStorm tells you who someone is on paper, the Gigabrain knows how they've actually shown up. Tenure is a tiebreaker, not the main sort.
 
-3. **Landscape awareness** — who's doing what, who's moving, who just joined, who has depth on financial regulation vs. crypto vs. broader economic policy.
+3. **Landscape awareness** — who's doing what, who just joined, who's rising, who covers what across both committees.
 
-These are not separate views. They are different questions answered from the same stored context.
+These are not separate modes. They are different questions answered from the same knowledge.
+
+---
+
+**Primary filter: issue portfolio**
+
+Only include staff whose coverage includes financial services, digital assets, fintech, or financial technology. This is the first filter applied — everything else flows from it.
+
+Use LegiStorm's issue portfolio endpoint as the primary source:
+```bash
+call legistorm get_staff_with_issue_portfolios '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":676,"issue_endpoint":"financial-services","limit":100}'
+call legistorm get_staff_with_issue_portfolios '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":1200,"issue_endpoint":"financial-services","limit":100}'
+```
+
+If `issue_portfolios_available` is false for a given record, fall back to title-based inference: include `Legislative Director`, `Policy Advisor`, `Counsel`, `Professional Staff Member`, `Staff Director`, `Legislative Assistant`, `Senior Legislative Assistant`. Exclude roles whose primary function is communications, press, scheduling, or constituent services — regardless of whether they are formally attached to a committee. A communications director on committee staff is not a policy staffer.
+
+Do not include someone solely because they are committee staff. Committee assignment is not a proxy for issue coverage.
+
+---
+
+**Ranking**
+
+Sort by total years of Hill experience only — not by committee vs. personal office, not by title. An LD in a personal office covering the full financial services portfolio is as relevant as a committee staffer with the same tenure.
+
+- **Seniority proxy:** years of Hill experience, computed from earliest `positions[].start_date` across all Hill roles to today
+- **Title:** descriptive metadata only — record as-is, never use for ranking or filtering
+- **Committee staff flag:** record for reference, not for ranking
+
+---
+
+**Talent tier logic**
+
+Applied when answering talent questions. Gigabrain intel is the primary signal; tenure is the tiebreaker.
+
+- **Hireable senior:** 7+ years of Hill experience with demonstrated policy depth in financial services or digital assets. Where Gigabrain notes or touchpoints exist for this person, weight that intelligence heavily — how they showed up in a conversation matters more than their tenure alone.
+- **Up-and-coming:** earlier career but already carrying a relevant policy portfolio. Committee exposure or a senior-level reporting line at a young tenure is a positive signal.
+
+Do not write evaluative judgments in notes. Tier classification is computed from structured fields and Gigabrain context, not stored as text.
 
 ---
 
 **Data to capture per staffer**
 
-| Field | Source | Notes |
-|-------|--------|-------|
-| Name | `staff.preferred_first_name` + `preferred_last_name` | |
-| Office / member | `positions[].office` or member name | Committee staff vs. personal office |
-| Committee | Senate Banking or HFSC | |
-| Side | `bio_details.party_name` + `maj_min` | Republican/Democrat, majority/minority |
-| Current title | `positions[is_current=true].position_title` | Metadata only — not used for ranking |
-| Hill years | Earliest `positions[].start_date` → today | Primary ranking signal |
-| Committee staff flag | Whether current position is office_id 676 or 1200 | Committee staff ranked above personal office |
-| Issue coverage | Inferred from title, committee, web search if needed | Crypto / fintech / financial regulation — flag as primary if apparent |
-| Trajectory signal | Junior + committee exposure = up-and-coming; 7+ years + policy depth = senior/hireable | Computed, not stored as a note |
-
-**Do not store evaluative notes.** Issue coverage and trajectory are structured fields, not written assessments.
+| Field | Source |
+|-------|--------|
+| Name | `staff.preferred_first_name` + `preferred_last_name` |
+| Office / member | Current position office or member name |
+| Committee | Senate Banking or HFSC |
+| Side | `bio_details.party_name` + `maj_min` |
+| Title | `positions[is_current=true].position_title` — metadata only |
+| Hill years | Earliest `positions[].start_date` → today |
+| Issue coverage | From LegiStorm issue portfolio; fallback: inferred from title/web |
+| Committee staff | Boolean — for reference, not ranking |
+| Gigabrain signal | Any touchpoint, note, or `#gigabrain-feed` mention — used for talent tier |
 
 ---
 
 #### Build the Map (run once, then weekly)
 
-**Step B1. Check for existing sheet:**
+**B1. Check for existing sheet:**
 ```bash
 call gsuite drive_search '{"query":"Hill Staff Map","max_results":5}'
 ```
-If found, note the `spreadsheet_id`. If not, create it:
+If found, note `spreadsheet_id`. If not, create it:
 ```bash
-call gsuite sheets_create '{"title":"Hill Staff Map","content":[["name","office","member","committee","side","party","title","hill_years","earliest_start","committee_staff","crypto_coverage","staff_id"]]}'
+call gsuite sheets_create '{"title":"Hill Staff Map","content":[["name","office","member","committee","side","party","title","hill_years","earliest_start","committee_staff","issue_coverage","gigabrain_signal","staff_id"]]}'
 ```
 
-**Step B2. Pull committee professional staff directly:**
+**B2. Pull policy staff using issue portfolio filter:**
 ```bash
-call legistorm get_staff '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":676,"limit":100}'
-call legistorm get_staff '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":1200,"limit":100}'
+call legistorm get_staff_with_issue_portfolios '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":676,"issue_endpoint":"financial-services","limit":100}'
+call legistorm get_staff_with_issue_portfolios '{"updated_from":"2025-01-01","updated_to":"2026-12-31","office_id":1200,"issue_endpoint":"financial-services","limit":100}'
 ```
-These are the professional committee staff — the people who actually draft legislation. Mark `committee_staff = true`.
+If issue portfolios are unavailable, fall back to `get_staff` with the title-based filter described above.
 
-**Step B3. Get current committee membership:**
+**B3. Pull personal office policy staff for all committee members:**
+
+Get current membership:
 ```bash
 read_web_page https://www.banking.senate.gov/about/members
 read_web_page https://financialservices.house.gov/about/members.htm
 ```
 
-**Step B4. Resolve members to LegiStorm IDs:**
+Resolve to LegiStorm member IDs:
 ```bash
 call legistorm get_members '{"updated_from":"2025-01-01","updated_to":"2026-12-31","limit":100}'
 ```
-Match by name and state.
-
-**Step B5. Pull personal office policy staff for each committee member:**
+Pull staff with issue portfolio filter for each member:
 ```bash
-call legistorm get_staff '{"updated_from":"2025-01-01","updated_to":"2026-12-31","member_id":[member_id],"limit":50}'
+call legistorm get_staff_with_issue_portfolios '{"updated_from":"2025-01-01","updated_to":"2026-12-31","member_id":[member_id],"issue_endpoint":"financial-services","limit":50}'
 ```
-Filter to policy-relevant titles: `Legislative Assistant`, `Senior Legislative Assistant`, `Legislative Correspondent`, `Legislative Director`, `Policy Advisor`, `Counsel`, `Professional Staff Member`, `Staff Director`. Skip schedulers, press, and casework staff. Mark `committee_staff = false`.
+Apply the same fallback if issue portfolios are unavailable.
 
-**Step B6. Flag crypto/fintech coverage.**
-For committee staff, check `positions[].position_title` and the committee's known issue jurisdictions. For personal office staff, check title and — where not obvious — run a targeted web search:
+**B4. Check Gigabrain for each staffer:**
 ```bash
-call websearch search '{"query":"[member name] legislative assistant crypto fintech financial services"}'
+call slack search_messages '{"query":"in:#gigabrain-feed [staffer_name]"}'
+call paradigmdb notes_search '{"query":"[staffer_name]"}'
 ```
-Mark `crypto_coverage = true` where apparent.
+Record any signal found in the `gigabrain_signal` field — used for talent tier, not for display.
 
-**Step B7. Write to the sheet:**
+**B5. Write to sheet:**
 ```bash
-call gsuite sheets_update '{"spreadsheet_id":"[sheet_id]","range_notation":"A2:L[N]","values":[[...rows...]]}'
+call gsuite sheets_update '{"spreadsheet_id":"[sheet_id]","range_notation":"A2:M[N]","values":[[...rows...]]}'
 ```
 
-**Step B8. Share with requesting user (first build only):**
+**B6. Share with requesting user (first build only):**
 ```bash
 call gsuite drive_share '{"file_id":"[sheet_id]","email":"[requester_email]","role":"writer","send_notification":false}'
 ```
@@ -511,26 +546,25 @@ call gsuite drive_share '{"file_id":"[sheet_id]","email":"[requester_email]","ro
 
 #### Answer Questions from the Map
 
-When any question triggers this section, read the stored sheet first — do not re-pull from LegiStorm:
-
+Read from the stored sheet first — do not re-pull from LegiStorm:
 ```bash
 call gsuite drive_search '{"query":"Hill Staff Map","max_results":5}'
-call gsuite sheets_read '{"spreadsheet_id":"[sheet_id]","range_notation":"A:L"}'
+call gsuite sheets_read '{"spreadsheet_id":"[sheet_id]","range_notation":"A:M"}'
 ```
 
-Then join against the broader Gigabrain context as needed — `#gigabrain-feed`, touchpoint log, paradigmdb — the same way any other Gigabrain workflow does. Use the combined context to answer the question. Do not just dump the table. Answer like someone who knows these people.
+Then join against the broader Gigabrain context as needed — `#gigabrain-feed`, touchpoint log, paradigmdb — the same way any other Gigabrain workflow does. Answer the question. Do not dump the table.
 
-**Issue questions** ("who covers crypto for Lummis?"): filter by member, flag `crypto_coverage = true`, return name + title + context.
+**Issue questions** ("who covers digital assets for Lummis?"): filter by member, return name + title + issue coverage + any Gigabrain context.
 
-**Talent questions** ("who would be strong for a Head of Policy hire?"): sort by `hill_years` descending, filter `crypto_coverage = true`, surface people with 5+ years and committee exposure. Up-and-coming means 2–5 years, committee staff flag, or strong trajectory visible from career history.
+**Talent questions** ("who would be strong for a Head of Policy hire?"): sort by `gigabrain_signal` first, then `hill_years` descending. Apply talent tier logic. Surface hireable seniors first, then up-and-coming. Do not write evaluative notes — tier is computed, not stored.
 
-**Landscape questions** ("who's doing what on Senate Banking?"): return the full roster sorted by `committee_staff` first, then `hill_years` descending, with issue coverage noted.
+**Landscape questions** ("who's doing what on Senate Banking?"): return the full filtered roster sorted by `hill_years` descending, issue coverage noted.
 
 ---
 
 **Weekly Refresh**
 
-Silently re-run the build steps in the background. No notification unless:
+Silently re-run the build steps. No notification unless:
 
 - **New staffer** enters the universe: post to the policy Slack channel:
   > "New staffer added to your bench — do you know them?" [name, office, committee side]
@@ -539,13 +573,13 @@ Silently re-run the build steps in the background. No notification unless:
 Do not ping for title changes, intra-office transfers, or data corrections.
 
 ```bash
-call legistorm get_staff '{"updated_from":"[last_refresh_date]","updated_to":"[today]","office_id":676,"limit":100}'
-call legistorm get_staff '{"updated_from":"[last_refresh_date]","updated_to":"[today]","office_id":1200,"limit":100}'
+call legistorm get_staff_with_issue_portfolios '{"updated_from":"[last_refresh_date]","updated_to":"[today]","office_id":676,"issue_endpoint":"financial-services","limit":100}'
+call legistorm get_staff_with_issue_portfolios '{"updated_from":"[last_refresh_date]","updated_to":"[today]","office_id":1200,"issue_endpoint":"financial-services","limit":100}'
 ```
 
 **Notes policy (scoped to this section)**
 
-Do not write evaluative or comparative assessments about individual staffers. Issue coverage and trajectory are structured fields. Notes, if any, must be positive, observational, concrete, and professional — limited to what you would say directly to the person.
+Notes must be positive, observational, concrete, and professional — limited to what you would say directly to the person. No evaluative or comparative judgments. Candidate filtering and talent tier classification happen through structured data and Gigabrain context, not written notes.
 
 ### 3. Bill Tracking & Analysis
 
