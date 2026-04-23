@@ -216,8 +216,21 @@ tbody td {
 tbody td.num { text-align: right; }
 
 tbody td.method {
-  color: var(--text-muted);
   font-size: 12px;
+  white-space: normal;
+}
+
+.ranked-name {
+  display: block;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+.ranked-count {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 tbody td.tool-name {

@@ -198,6 +198,10 @@ function renderBody() {
         val = fmt(r[c.key]);
       } else {
         val = r[c.key] || "\u2014";
+        if (c.cls && c.cls.includes("method") && val && val.includes(" (")) {
+          const m = val.match(/^(.+)\s+\((.+)\)$/);
+          if (m) val = `<span class="ranked-name">${escapeHtml(m[1])}</span><span class="ranked-count">${m[2]}</span>`;
+        }
       }
       return `<td class="${cls}">${val}</td>`;
     }).join("");
