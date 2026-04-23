@@ -47,11 +47,12 @@ const TEAM_COLS = [
   { key: "members",     label: "Members",  num: true,  w: "7%" },
   { key: "calls",       label: "Calls",    num: true,  w: "8%" },
   { key: "threads",     label: "Threads",  num: true,  w: "8%" },
-  { key: "calls_per_member", label: "C/M", num: true,  w: "6%" },
-  { key: "member_list", label: "Members",  num: false, w: "54%", noSort: true, cls: "member-list" },
+  { key: "calls_per_member", label: "C/M", num: true,  w: "5%" },
+  { key: "threads_per_member", label: "T/M", num: true, w: "5%" },
+  { key: "member_list", label: "Members",  num: false, w: "48%", noSort: true, cls: "member-list" },
 ];
 
-const DEFAULT_SORT = { tools: "threads", users: "calls", teams: "calls" };
+const DEFAULT_SORT = { tools: "threads", users: "calls", teams: "threads_per_member" };
 
 function fmt(n) {
   if (n == null) return "\u2014";
