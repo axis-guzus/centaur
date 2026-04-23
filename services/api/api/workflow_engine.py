@@ -163,6 +163,12 @@ WORKFLOW_SCHEDULE_MISFIRE_GRACE_S = max(
 WORKFLOW_INSTANCE_ID = (
     f"{os.getenv('HOSTNAME') or 'api'}:wf:{uuid.uuid4().hex[:8]}"
 )
+# Minimum delay before a waiting/sleeping workflow run can be re-claimed.
+# Prevents hot-loop starvation when available_at is in the past (e.g. elapsed
+# deadline on a still-running child workflow).
+WORKFLOW_RESUSPEND_BACKOFF_S = max(
+    float(os.getenv("WORKFLOW_RESUSPEND_BACKOFF_S", "5.0")), 1.0
+)
 
 _workflow_tasks: list[asyncio.Task] = []
 _workflow_wake = asyncio.Event()
@@ -2121,12 +2127,23 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         )
 
     except SuspendWorkflow as exc:
-        # Handler suspended — set status and available_at for re-wake
+        # Handler suspended — set status and available_at for re-wake.
+        now = dt.datetime.now(dt.timezone.utc)
         available_at = exc.available_at
-        if exc.status == "waiting" and await _linked_execution_is_terminal(
+        linked_terminal = exc.status == "waiting" and await _linked_execution_is_terminal(
             pool, run_id,
-        ):
-            available_at = dt.datetime.now(dt.timezone.utc)
+        )
+        if linked_terminal:
+            # Linked execution finished — wake immediately so the handler
+            # can pick up the result.
+            available_at = now
+        else:
+            # Enforce a minimum backoff so we never hot-loop on runs whose
+            # available_at is already in the past (e.g. elapsed deadline on
+            # a child that is still running).
+            min_available = now + dt.timedelta(seconds=WORKFLOW_RESUSPEND_BACKOFF_S)
+            if available_at < min_available:
+                available_at = min_available
         updated = await pool.execute(
             "UPDATE workflow_runs "
             "SET status = $2, "
@@ -2484,6 +2501,9 @@ async def _workflow_worker_loop(pool) -> None:
                     pass
                 continue
             await _run_handler(pool, run_row)
+            # Yield to the event loop after each handler run so execution
+            # workers and other asyncio tasks are not starved.
+            await asyncio.sleep(0)
         except asyncio.CancelledError:
             raise
         except Exception:

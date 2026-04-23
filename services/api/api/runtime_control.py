@@ -59,6 +59,17 @@ EXECUTION_WORKER_CONCURRENCY = max(
     int(os.getenv("EXECUTION_WORKER_CONCURRENCY", "4")),
     1,
 )
+# Number of execution worker slots reserved for non-workflow (user-facing)
+# requests.  Workflow-spawned executions cannot consume more than
+# EXECUTION_WORKER_CONCURRENCY - EXECUTION_RESERVED_USER_SLOTS slots.
+EXECUTION_RESERVED_USER_SLOTS = max(
+    int(os.getenv("EXECUTION_RESERVED_USER_SLOTS", "2")),
+    0,
+)
+_MAX_WORKFLOW_EXECUTION_SLOTS = max(
+    EXECUTION_WORKER_CONCURRENCY - EXECUTION_RESERVED_USER_SLOTS,
+    1,
+)
 EXECUTION_WORKER_LEASE_S = max(
     float(os.getenv("EXECUTION_WORKER_LEASE_S", "5.0")),
     max(EXECUTION_WATCHDOG_POLL_S * 2, 1.0),
@@ -1353,6 +1364,16 @@ async def _claim_next_execution(pool) -> dict[str, Any] | None:
                 "LIMIT 32 "
                 "FOR UPDATE SKIP LOCKED"
             )
+            # Count how many workflow-linked executions are currently running
+            # to enforce the slot reservation for user-facing requests.
+            workflow_running_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_execution_requests er "
+                "WHERE er.status IN ('running', 'retry_wait') "
+                "AND EXISTS ("
+                "  SELECT 1 FROM workflow_checkpoints wc "
+                "  WHERE wc.execution_id = er.execution_id"
+                ")"
+            )
             for candidate in candidates:
                 thread_key = str(candidate["thread_key"])
                 lock_acquired = await conn.fetchval(
@@ -1376,6 +1397,14 @@ async def _claim_next_execution(pool) -> dict[str, Any] | None:
                     candidate["execution_id"],
                 )
                 if has_active:
+                    continue
+                # If this execution is workflow-linked, check the slot cap.
+                is_workflow_linked = await conn.fetchval(
+                    "SELECT 1 FROM workflow_checkpoints "
+                    "WHERE execution_id = $1 LIMIT 1",
+                    candidate["execution_id"],
+                )
+                if is_workflow_linked and workflow_running_count >= _MAX_WORKFLOW_EXECUTION_SLOTS:
                     continue
                 row = await conn.fetchrow(
                     "UPDATE agent_execution_requests er "
