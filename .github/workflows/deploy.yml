@@ -28,10 +28,26 @@ jobs:
           git fetch origin main
           git reset --hard origin/main
 
+      - name: Sync overlay repo
+        run: |
+          OVERLAY_DIR="/home/ubuntu/github/paradigmxyz/centaur-paradigm"
+          if [ -d "$OVERLAY_DIR/.git" ]; then
+            git -C "$OVERLAY_DIR" fetch origin main
+            git -C "$OVERLAY_DIR" reset --hard origin/main
+          else
+            mkdir -p "$(dirname "$OVERLAY_DIR")"
+            git clone git@github.com:paradigmxyz/centaur-paradigm.git "$OVERLAY_DIR"
+          fi
+
       - name: Build & deploy
         run: |
-          docker compose build sandbox
-          docker compose up -d --build --remove-orphans
+          OVERLAY_DIR="/home/ubuntu/github/paradigmxyz/centaur-paradigm"
+          COMPOSE_CMD="docker compose -f docker-compose.yml"
+          if [ -f "$OVERLAY_DIR/docker-compose.override.yml" ]; then
+            COMPOSE_CMD="$COMPOSE_CMD -f $OVERLAY_DIR/docker-compose.override.yml"
+          fi
+          $COMPOSE_CMD build sandbox
+          $COMPOSE_CMD up -d --build --remove-orphans
 
       - name: Health check
         run: |
