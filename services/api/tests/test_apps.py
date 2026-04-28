@@ -31,6 +31,39 @@ async def test_recover_apps_skips_docker_client_for_kubernetes_backend(
 
 
 @pytest.mark.asyncio
+async def test_build_and_start_wraps_custom_start_command_in_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = AppManager()
+    pool = AsyncMock()
+    manager._exec = AsyncMock(
+        side_effect=[
+            (0, b"clone ok"),
+            (0, b"build ok"),
+            (0, b"start ok"),
+        ]
+    )
+    monkeypatch.setattr("api.apps.asyncio.sleep", AsyncMock())
+
+    await manager._build_and_start(
+        pool,
+        "app-123",
+        "container-123",
+        "https://github.com/paradigmxyz/centaur",
+        3000,
+        build_cmd="cd apps/venue-scout && npm install --no-package-lock && npm run build",
+        start_cmd="cd apps/venue-scout && npm start",
+    )
+
+    start_call = manager._exec.await_args_list[2].args[1]
+    assert start_call == [
+        "sh",
+        "-c",
+        "PORT=3000 nohup sh -lc 'cd /home/agent/app && cd apps/venue-scout && npm start' > /tmp/app.log 2>&1 &",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_app_proxy_strips_prefix_and_allows_public_apps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

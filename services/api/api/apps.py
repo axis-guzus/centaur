@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import uuid
 
 import aiodocker
@@ -218,6 +219,7 @@ class AppManager:
         build_log_parts: list[str] = []
         effective_build = build_cmd or "npm install && npm run build"
         effective_start = start_cmd or "npm start"
+        start_shell = shlex.quote(f"cd /home/agent/app && {effective_start}")
         try:
             # Clone
             app_dir = "/home/agent/app"
@@ -244,7 +246,7 @@ class AppManager:
                 [
                     "sh",
                     "-c",
-                    f"cd {app_dir} && PORT={port} nohup {effective_start} > /tmp/app.log 2>&1 &",
+                    f"PORT={port} nohup sh -lc {start_shell} > /tmp/app.log 2>&1 &",
                 ],
             )
             build_log_parts.append(f"=== start ===\n{output.decode(errors='replace')}")
