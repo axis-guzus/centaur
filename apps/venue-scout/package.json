@@ -1,6 +1,6 @@
 {
   "name": "venue-scout",
-  "description": "Venue Scout web app deployed from the Centaur monorepo.",
+  "description": "Venue Scout web app deployed from the Centaur monorepo and managed by Centaur deploy automation.",
   "version": "1.0.0",
   "type": "module",
   "main": "server.js",

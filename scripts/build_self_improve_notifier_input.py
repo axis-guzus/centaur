@@ -7,6 +7,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -191,6 +193,108 @@ def _git_stdout(*args: str) -> str:
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
+def _maybe_redeploy_venue_scout(before_sha: str, after_sha: str) -> None:
+    if not before_sha.strip() or not after_sha.strip():
+        return
+
+    changed_files = _git_stdout("diff", "--name-only", f"{before_sha}..{after_sha}")
+    if not any(line.startswith("apps/venue-scout/") for line in changed_files.splitlines()):
+        return
+
+    print(
+        "Redeploying venue-scout app from paradigmxyz/centaur/apps/venue-scout",
+        file=sys.stderr,
+    )
+
+    payload = json.dumps(
+        {
+            "name": "venue-scout",
+            "repo_url": "https://github.com/paradigmxyz/centaur",
+            "port": 3000,
+            "build_cmd": "cd apps/venue-scout && npm install --no-package-lock && npm run build",
+            "start_cmd": "cd apps/venue-scout && npm start",
+            "created_by": "self-improve-deploy-notifier",
+        }
+    )
+
+    lookup = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "centaur-api-1",
+            "sh",
+            "-lc",
+            "curl -s -o /tmp/venue-scout-manage.json -w '%{http_code}' http://localhost:8000/apps/_manage/venue-scout",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    status_code = lookup.stdout.strip()
+
+    if status_code == "200":
+        subprocess.run(
+            [
+                "docker",
+                "exec",
+                "centaur-api-1",
+                "curl",
+                "-sSf",
+                "-X",
+                "DELETE",
+                "http://localhost:8000/apps/_manage/venue-scout",
+            ],
+            check=True,
+        )
+    elif status_code != "404":
+        details = subprocess.run(
+            ["docker", "exec", "centaur-api-1", "cat", "/tmp/venue-scout-manage.json"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        raise RuntimeError(
+            f"unexpected venue-scout lookup status {status_code}: {details.stdout.strip() or lookup.stderr.strip()}"
+        )
+
+    subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-i",
+            "centaur-api-1",
+            "sh",
+            "-lc",
+            "curl -sSf -X POST http://localhost:8000/apps -H 'Content-Type: application/json' --data @-",
+        ],
+        input=payload,
+        text=True,
+        check=True,
+        capture_output=True,
+    )
+
+    for attempt in range(1, 61):
+        response = _api_json("/apps/_manage/venue-scout")
+        app_status = str(response.get("status") or "").strip()
+        print(f"venue-scout status attempt {attempt}: {app_status}", file=sys.stderr)
+
+        if app_status == "running":
+            subprocess.run(
+                ["curl", "-fsSI", "https://svc-ai.dayno.xyz/apps/venue-scout"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+
+        if app_status == "failed":
+            raise RuntimeError(f"venue-scout deploy failed: {json.dumps(response)}")
+
+        time.sleep(5)
+
+    raise RuntimeError("timed out waiting for venue-scout to reach running status")
+
+
 def _commit_is_ancestor(commit_sha: str, after_sha: str) -> bool:
     return subprocess.run(
         ["git", "merge-base", "--is-ancestor", commit_sha, after_sha],
@@ -233,6 +337,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=200)
     args = parser.parse_args()
     baseline_sha = _resolve_baseline_sha(args.before_sha, args.after_sha)
+    _maybe_redeploy_venue_scout(args.before_sha, args.after_sha)
 
     prs = _gh_json(
         "pr",
