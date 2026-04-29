@@ -46,6 +46,26 @@ class TestAmpLike:
         )
         assert result == [{"type": "error", "error": "amp exited with code 1"}]
 
+    def test_amp_wrapper_restart_notice_is_not_user_visible(self):
+        result = normalize_harness_event(
+            "amp",
+            {
+                "type": "error",
+                "error": {"message": "amp exited with code 1, restarting (1/5)"},
+            },
+        )
+        assert result == []
+
+    def test_amp_wrapper_give_up_error_is_user_visible(self):
+        result = normalize_harness_event(
+            "amp",
+            {
+                "type": "error",
+                "error": {"message": "amp crashed 6 times, giving up"},
+            },
+        )
+        assert result == [{"type": "error", "error": "amp crashed 6 times, giving up"}]
+
     def test_system_init(self):
         result = normalize_harness_event(
             "amp",

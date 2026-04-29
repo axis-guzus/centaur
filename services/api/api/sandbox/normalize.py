@@ -314,6 +314,9 @@ def _normalize_amp_like_event(event: dict) -> list[dict]:
             or _as_str(event.get("message"))
             or "Unknown error"
         )
+        lowered = message.lower()
+        if "restarting (" in lowered and "giving up" not in lowered:
+            return []
         return [{"type": "error", "error": message}]
 
     if event_type == "system":

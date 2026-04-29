@@ -305,7 +305,14 @@ function normalizeAmpLikeEvent(event: Record<string, unknown>): CanonicalEvent[]
 
   if (eventType === "error") {
     const message =
-      asString(event.error) || asString(event.message) || "Unknown error";
+      asString(event.error) ||
+      asString(asRecord(event.error).message) ||
+      asString(event.message) ||
+      "Unknown error";
+    const lowered = message.toLowerCase();
+    if (lowered.includes("restarting (") && !lowered.includes("giving up")) {
+      return [];
+    }
     return [{ type: "error", error: message }];
   }
 
