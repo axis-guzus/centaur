@@ -9,6 +9,7 @@ import type {
   List,
   ListItem,
   Paragraph,
+  Heading,
   Root,
   Strong,
   Table,
@@ -35,6 +36,7 @@ export type {
   List,
   ListItem,
   Paragraph,
+  Heading,
   Root,
   Strong,
   Table,
@@ -64,6 +66,10 @@ export function isTextNode(node: Content): node is Text {
 
 export function isParagraphNode(node: Content): node is Paragraph {
   return node.type === "paragraph";
+}
+
+export function isHeadingNode(node: Content): node is Heading {
+  return node.type === "heading";
 }
 
 export function isStrongNode(node: Content): node is Strong {
@@ -142,7 +148,7 @@ export function renderMarkdownForSlack(markdown: string): {
   blocks?: SlackBlock[];
 } {
   const ast = parseMarkdown(markdown);
-  const blocks = astToSlackBlocksWithTable(ast);
+  const blocks = astToSlackBlocks(ast);
   return {
     text: astToSlackMrkdwn(ast),
     ...(blocks ? { blocks } : {}),
@@ -156,6 +162,10 @@ export function astToSlackMrkdwn(ast: Root): string {
 function nodeToMrkdwn(node: Content): string {
   if (isParagraphNode(node)) {
     return getNodeChildren(node).map(nodeToMrkdwn).join("");
+  }
+
+  if (isHeadingNode(node)) {
+    return `*${getNodeChildren(node).map(nodeToMrkdwn).join("")}*`;
   }
 
   if (isTextNode(node)) return node.value;
@@ -245,9 +255,12 @@ export function tableToAscii(node: Table): string {
   return [header, separator, ...body].join("\n");
 }
 
-function astToSlackBlocksWithTable(ast: Root): SlackBlock[] | null {
-  const hasTable = ast.children.some((node) => isTableNode(node as Content));
-  if (!hasTable) return null;
+function astToSlackBlocks(ast: Root): SlackBlock[] | null {
+  const shouldUseBlocks = ast.children.some((node) => {
+    const content = node as Content;
+    return isHeadingNode(content) || isTableNode(content);
+  });
+  if (!shouldUseBlocks) return null;
 
   const blocks: SlackBlock[] = [];
   const textBuffer: string[] = [];
@@ -257,14 +270,17 @@ function astToSlackBlocksWithTable(ast: Root): SlackBlock[] | null {
     const text = textBuffer.join("\n\n").trim();
     textBuffer.length = 0;
     if (!text) return;
-    blocks.push({
-      type: "section",
-      text: { type: "mrkdwn", text },
-    });
+    pushMrkdwnSections(blocks, text);
   };
 
   for (const child of ast.children) {
     const node = child as Content;
+    if (isHeadingNode(node)) {
+      flushText();
+      pushMrkdwnSections(blocks, nodeToMrkdwn(node));
+      continue;
+    }
+
     if (!isTableNode(node)) {
       textBuffer.push(nodeToMrkdwn(node));
       continue;
@@ -288,6 +304,32 @@ function astToSlackBlocksWithTable(ast: Root): SlackBlock[] | null {
 
   flushText();
   return blocks;
+}
+
+function pushMrkdwnSections(blocks: SlackBlock[], text: string): void {
+  for (const chunk of splitMrkdwnSectionText(text)) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: chunk },
+    });
+  }
+}
+
+function splitMrkdwnSectionText(text: string): string[] {
+  const limit = 2900;
+  if (text.length <= limit) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > limit) {
+    const newline = remaining.lastIndexOf("\n", limit);
+    const space = remaining.lastIndexOf(" ", limit);
+    const cut = newline > limit * 0.3 ? newline : space > limit * 0.3 ? space : limit;
+    chunks.push(remaining.slice(0, cut).trimEnd());
+    remaining = remaining.slice(cut).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
 }
 
 function mdastTableToSlackBlock(node: Table): SlackBlock {

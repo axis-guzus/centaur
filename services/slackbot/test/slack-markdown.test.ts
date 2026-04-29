@@ -32,4 +32,23 @@ describe("Slack markdown rendering", () => {
 
     expect(rendered.blocks?.some((block) => block.type === "table")).toBe(true);
   });
+
+  it("renders headings as separate Slack section blocks", () => {
+    const rendered = renderMarkdownForSlack([
+      "# Summary",
+      "",
+      "Short intro.",
+      "",
+      "## Details",
+      "",
+      "- One",
+    ].join("\n"));
+
+    expect(rendered.blocks).toEqual([
+      { type: "section", text: { type: "mrkdwn", text: "*Summary*" } },
+      { type: "section", text: { type: "mrkdwn", text: "Short intro." } },
+      { type: "section", text: { type: "mrkdwn", text: "*Details*" } },
+      { type: "section", text: { type: "mrkdwn", text: "- One" } },
+    ]);
+  });
 });

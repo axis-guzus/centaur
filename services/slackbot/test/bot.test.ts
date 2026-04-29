@@ -670,6 +670,57 @@ describe("consumeWire reconnects on graceful EOF without turn.done", () => {
       vi.useRealTimers();
     }
   });
+
+  it("emits run metadata as a context block before heading-based answer sections", async () => {
+    const mockClient = {
+      streamEvents: () => (async function* () {
+        yield {
+          eventId: 1,
+          eventKind: "amp_raw_event",
+          data: { type: "system", subtype: "init", session_id: "T-test-thread" },
+        };
+        yield {
+          eventId: 2,
+          eventKind: "amp_raw_event",
+          data: {
+            type: "turn.done",
+            turn_id: 1,
+            result: "# Summary\n\nHello.",
+          },
+        };
+      })(),
+      markFinalDelivered: async () => ({ ok: true }),
+    };
+    const { SlackBot } = await import("../src/lib/bot/bot");
+    const bot = new SlackBot(mockClient as any);
+
+    const chunks: any[] = [];
+    for await (const chunk of (bot as any).streamExecution(
+      "test:context-block",
+      "exe-context-block",
+      new ProgressTracker(),
+      Date.now() - 1200,
+      new AbortController().signal,
+    )) {
+      chunks.push(chunk);
+    }
+
+    const contextChunk = chunks.find(
+      (chunk) => chunk.type === "blocks" && chunk.blocks[0]?.type === "context",
+    );
+    const appName = process.env.APP_NAME || "Centaur";
+    expect(contextChunk?.blocks[0].elements[0].text).toContain(
+      `${appName} · <https://ampcode.com/threads/T-test-thread|agent> · `,
+    );
+    expect(chunks.some((chunk) => chunk.type === "markdown_text" && chunk.text.includes("Centaur"))).toBe(false);
+    expect(chunks).toContainEqual({
+      type: "blocks",
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: "*Summary*" } },
+        { type: "section", text: { type: "mrkdwn", text: "Hello." } },
+      ],
+    });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

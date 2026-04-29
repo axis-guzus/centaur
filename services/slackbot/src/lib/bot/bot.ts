@@ -6,10 +6,8 @@ import type { InputContentBlock } from "@centaur/api-client";
 import { log } from "@/lib/logger";
 import {
   stringifyMarkdown,
-  parseMarkdown,
-  isTableNode,
+  renderMarkdownForSlack,
   type Root,
-  type Content,
 } from "@/lib/slack/markdown";
 import type { StreamChunk } from "@/lib/slack/types";
 import { ProgressTracker } from "./progress-tracker";
@@ -63,12 +61,6 @@ export function splitSlackMessage(text: string, limit = SLACK_MSG_MAX_CHARS): st
   }
   if (remaining) chunks.push(remaining);
   return chunks;
-}
-
-/** Check if markdown text contains a pipe-delimited table. */
-function containsMarkdownTable(md: string): boolean {
-  const ast = parseMarkdown(md);
-  return ast.children.some((node) => isTableNode(node as Content));
 }
 
 function parseMarkdownTableRow(line: string): string[] | null {
@@ -236,6 +228,20 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function slackAdapterThreadId(threadKey: string): string {
   return threadKey.startsWith("slack:") ? threadKey : `slack:${threadKey}`;
+}
+
+function slackLink(url: string, label: string): string {
+  return `<${url}|${label}>`;
+}
+
+type SlackBlocks = Extract<StreamChunk, { type: "blocks" }>["blocks"];
+
+function splitSlackBlocks(blocks: SlackBlocks): SlackBlocks[] {
+  const chunks: SlackBlocks[] = [];
+  for (let i = 0; i < blocks.length; i += 50) {
+    chunks.push(blocks.slice(i, i + 50));
+  }
+  return chunks;
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -525,7 +531,6 @@ export class SlackBot {
 
     log.info("execute_start", { thread_key: threadKey, user_id: opts.userId, execution_id: executionId });
 
-    let sentMessage: Awaited<ReturnType<typeof thread.post>> | undefined;
     let deliveredToSlack = false;
     try {
       try {
@@ -541,7 +546,7 @@ export class SlackBot {
         }
 
         if (firstChunk) {
-          sentMessage = await thread.post(
+          await thread.post(
             (async function* () {
               yield firstChunk;
               while (true) {
@@ -597,18 +602,6 @@ export class SlackBot {
           log.error("error_post_failed", { thread_key: threadKey, error: postErr instanceof Error ? postErr.message : String(postErr) });
         }
         return;
-      }
-
-      // If the response contains markdown tables, edit the streamed message to
-      // use native Slack table blocks (the streaming path renders tables as plain
-      // code blocks; editMessage rerenders markdown through the Slack adapter).
-      if (sentMessage && tracker.streamedMarkdown && containsMarkdownTable(tracker.streamedMarkdown)) {
-        try {
-          await sentMessage.edit({ markdown: tracker.streamedMarkdown });
-          log.info("table_reformat", { thread_key: threadKey });
-        } catch (err) {
-          log.warn("table_reformat_failed", { thread_key: threadKey, error: err instanceof Error ? err.message : String(err) });
-        }
       }
 
       // Post any overflow chunks that didn't fit in the streaming message
@@ -701,7 +694,7 @@ export class SlackBot {
     // Complete all in-progress steps and set plan title to "Completed"
     yield* tracker.finalize();
 
-    // Emit the final response as markdown_text so Slack's streaming API includes it.
+    // Emit the final response after a context block with run metadata.
     // If the text exceeds Slack's 4k char limit, yield only the first chunk here
     // and stash overflow for the caller to post as separate messages.
     // Convert ```dashboard blocks to markdown tables so they render as Slack Block Kit.
@@ -710,15 +703,29 @@ export class SlackBot {
       const dur = (Date.now() - t0) / 1000;
       const durStr = dur < 10 ? `${dur.toFixed(1)}s` : `${Math.round(dur)}s`;
       const harness = tracker.agentThreadId
-        ? `[agent](https://ampcode.com/threads/${tracker.agentThreadId})`
+        ? slackLink(`https://ampcode.com/threads/${tracker.agentThreadId}`, "agent")
         : "agent";
-      const prefix = `_${[process.env.APP_NAME || "Centaur", harness, durStr].join(" · ")}_\n\n`;
       const suffix = this.viewerUrl ? `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})` : "";
-      const fullMd = `${prefix}${finalText}${suffix}`;
-      tracker.streamedMarkdown = fullMd;
-      const chunks = splitSlackMessage(fullMd);
-      yield { type: "markdown_text", text: chunks[0] };
-      tracker.overflowChunks = chunks.slice(1);
+      const fullMd = `${finalText}${suffix}`;
+      yield {
+        type: "blocks",
+        blocks: [{
+          type: "context",
+          elements: [{ type: "mrkdwn", text: [process.env.APP_NAME || "Centaur", harness, durStr].join(" · ") }],
+        }],
+      };
+
+      const rendered = renderMarkdownForSlack(fullMd);
+      if (rendered.blocks) {
+        for (const blocks of splitSlackBlocks(rendered.blocks)) {
+          yield { type: "blocks", blocks };
+        }
+        tracker.overflowChunks = [];
+      } else {
+        const chunks = splitSlackMessage(fullMd);
+        yield { type: "markdown_text", text: chunks[0] };
+        tracker.overflowChunks = chunks.slice(1);
+      }
     } else {
       yield { type: "markdown_text", text: "Agent completed with no output." };
     }

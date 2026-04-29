@@ -36,8 +36,6 @@ export class ProgressTracker {
   agentThreadId = "";
   /** Overflow chunks when the final text exceeds Slack's message limit. */
   overflowChunks: string[] = [];
-  /** Full markdown of the streamed message (used for post-stream table reformatting). */
-  streamedMarkdown = "";
 
   private activeTools = new Map<string, ActiveTool>();
   private tasks = new Map<string, { title: string; status: TaskStatus }>();
