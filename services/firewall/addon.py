@@ -36,6 +36,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from mitmproxy import http, tls
 
 from centaur_sdk.logging import configure_json_logging
+from classification import classify_proxy_error, is_credential_header
 
 log = configure_json_logging("firewall")
 
@@ -130,47 +131,6 @@ ALLOWED_OUTBOUND_HEADERS: frozenset[str] = frozenset({
     "notion-version",
     "jwt", "api-version",
 })
-
-# Header names that may legitimately carry a secret/placeholder value.
-# Only these headers are scanned for key-name placeholders; non-credential
-# headers (e.g. Content-Type, Accept) must never have substrings of secret
-# names rewritten — that previously mangled `Content-Type: application/json`
-# into `Content-Type: application/` when a secret named `json` existed.
-CREDENTIAL_HEADER_NAMES: frozenset[str] = frozenset({
-    "authorization",
-    "proxy-authorization",
-    "x-api-key",
-    "api-key",
-    "anthropic-api-key",
-    "x-goog-api-key",
-    "x-browser-use-api-key",
-    "x-cg-pro-api-key",
-    "x-cg-demo-api-key",
-    "x-auth-token",
-    "x-access-token",
-    "auth-token",
-    "jwt",
-    "cookie",
-})
-
-CREDENTIAL_HEADER_SUFFIXES: tuple[str, ...] = (
-    "-api-key",
-    "-apikey",
-    "-secret",
-    "-token",
-    "-auth",
-)
-
-
-def _is_credential_header(name: str) -> bool:
-    """Return True if a header name is allowed to carry a credential placeholder."""
-    n = name.lower()
-    if n in CREDENTIAL_HEADER_NAMES:
-        return True
-    if n.startswith("x-") and any(n.endswith(suffix) for suffix in CREDENTIAL_HEADER_SUFFIXES):
-        return True
-    return False
-
 
 FIXED_USER_AGENT = "ai-v2-sandbox/1.0"
 
@@ -350,6 +310,10 @@ class CredentialInjector:
         # Injection map: host_pattern → set of allowed key names
         self._injection_map: dict[str, set[str]] = {}
         self._injection_map_lock = threading.Lock()
+        self._injection_map_last_success_monotonic: float | None = None
+        self._injection_map_last_success_wall: float | None = None
+        self._injection_map_consecutive_failures = 0
+        self._injection_map_ever_loaded = False
         log.info("credential injector started (stateless header-value replacement)")
         log.info("secret injection allowlist: %s", SECRET_INJECTION_HOSTS)
         if HOST_REWRITES:
@@ -393,19 +357,44 @@ class CredentialInjector:
                 self.wfile.write(json.dumps({"error": "forbidden"}).encode())
                 return False
 
+            def _health_detail(self) -> dict[str, object]:
+                with parent._lock:
+                    cached = sum(1 for v, _ in parent._cache.values() if v is not None)
+                with parent._keys_lock:
+                    known = len(parent._known_keys)
+                with parent._injection_map_lock:
+                    injection_map_hosts = len(parent._injection_map)
+                    last_success = parent._injection_map_last_success_monotonic
+                    last_success_wall = parent._injection_map_last_success_wall
+                    consecutive_failures = parent._injection_map_consecutive_failures
+                    ever_loaded = parent._injection_map_ever_loaded
+                map_age_s = (
+                    round(time.monotonic() - last_success, 3)
+                    if last_success is not None
+                    else None
+                )
+                return {
+                    "status": "ok",
+                    "secrets_cached": cached,
+                    "known_keys": known,
+                    "injection_map_hosts": injection_map_hosts,
+                    "injection_map_loaded": ever_loaded,
+                    "injection_map_age_s": map_age_s,
+                    "injection_map_last_success_unix": last_success_wall,
+                    "injection_map_consecutive_failures": consecutive_failures,
+                }
+
             def do_GET(self) -> None:
                 if self.path == "/health":
-                    with parent._lock:
-                        cached = sum(1 for v, _ in parent._cache.values() if v is not None)
-                    with parent._keys_lock:
-                        known = len(parent._known_keys)
-                    body = json.dumps(
-                        {
-                            "status": "ok",
-                            "secrets_cached": cached,
-                            "known_keys": known,
-                        }
-                    )
+                    body = json.dumps({"status": "ok"})
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body.encode())
+                elif self.path == "/health/detail":
+                    if not self._check_control_auth():
+                        return
+                    body = json.dumps(self._health_detail())
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
@@ -443,6 +432,10 @@ class CredentialInjector:
                             new_map[host_pattern] = set(key_list)
                         with parent._injection_map_lock:
                             parent._injection_map = new_map
+                            parent._injection_map_last_success_monotonic = time.monotonic()
+                            parent._injection_map_last_success_wall = time.time()
+                            parent._injection_map_consecutive_failures = 0
+                            parent._injection_map_ever_loaded = True
                         log.info(
                             "injection_map_pushed",
                             extra={
@@ -516,6 +509,10 @@ class CredentialInjector:
             }
             with self._injection_map_lock:
                 self._injection_map = new_map
+                self._injection_map_last_success_monotonic = time.monotonic()
+                self._injection_map_last_success_wall = time.time()
+                self._injection_map_consecutive_failures = 0
+                self._injection_map_ever_loaded = True
             log.info(
                 "injection_map_pulled",
                 extra={
@@ -525,7 +522,27 @@ class CredentialInjector:
                 },
             )
         except Exception as exc:
-            log.warning("injection_map_pull_failed: %s", exc)
+            with self._injection_map_lock:
+                self._injection_map_consecutive_failures += 1
+                consecutive_failures = self._injection_map_consecutive_failures
+                ever_loaded = self._injection_map_ever_loaded
+                last_success = self._injection_map_last_success_monotonic
+            map_age_s = (
+                round(time.monotonic() - last_success, 3)
+                if last_success is not None
+                else None
+            )
+            log.warning(
+                "injection_map_pull_failed",
+                extra={
+                    "event": "injection_map_pull_failed",
+                    "phase": "steady_state" if ever_loaded else "startup",
+                    "using_previous_map": ever_loaded,
+                    "consecutive_failures": consecutive_failures,
+                    "map_age_s": map_age_s,
+                    "error": str(exc),
+                },
+            )
 
     def _sm_request(self, path: str, timeout: int = 5) -> bytes:
         """Make a request to the secret manager."""
@@ -689,7 +706,7 @@ class CredentialInjector:
             # This prevents substrings of secret key names (e.g. a secret
             # named "json") from being rewritten inside unrelated headers
             # such as Content-Type or Accept.
-            if not _is_credential_header(header_name):
+            if not is_credential_header(header_name):
                 continue
 
             value = flow.request.headers[header_name]
@@ -859,7 +876,7 @@ class CredentialInjector:
                 continue
             # Keep credential-bearing headers (e.g. x-cg-pro-api-key) so the
             # secret-injection step downstream can rewrite the placeholder.
-            if _is_credential_header(header_name):
+            if is_credential_header(header_name):
                 continue
             to_remove.append(header_name)
 
@@ -1153,6 +1170,17 @@ class CredentialInjector:
             and req.timestamp_start
         ):
             duration_ms = round((resp.timestamp_end - req.timestamp_start) * 1000)
+        response_content_type = resp.headers.get("content-type", "") if resp else ""
+        response_text_sample = ""
+        if resp and ("text" in response_content_type.lower() or "json" in response_content_type.lower()):
+            response_text_sample = resp.get_text(strict=False)[:300]
+        error_class = classify_proxy_error(
+            host=host,
+            path=req.path,
+            status=status,
+            response_content_type=response_content_type,
+            response_text_sample=response_text_sample,
+        )
 
         log.info(
             "proxy_audit",
@@ -1168,6 +1196,7 @@ class CredentialInjector:
                 "category": category,
                 "container_ip": source_ip,
                 "duration_ms": duration_ms,
+                "error_class": error_class,
             },
         )
 

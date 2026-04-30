@@ -8,6 +8,7 @@ USER mitmproxy
 
 COPY centaur_sdk /app/centaur_sdk
 COPY services/firewall/addon.py /app/addon.py
+COPY services/firewall/classification.py /app/classification.py
 COPY --chmod=755 services/firewall/entrypoint.sh /entrypoint.sh
 
 EXPOSE 8080 8081
