@@ -765,6 +765,10 @@ async def _stream_stdout(
                     "result": terminal_result,
                     "agent_thread_id": agent_thread_id or "",
                 }
+                for key in ("cwd", "repo_owner", "repo_name", "git_ref", "git_commit"):
+                    value = evt.get(key)
+                    if isinstance(value, str) and value.strip():
+                        turn_done_payload[key] = value.strip()
                 if terminal_error:
                     turn_done_payload["is_error"] = True
                     turn_done_payload["error"] = terminal_error

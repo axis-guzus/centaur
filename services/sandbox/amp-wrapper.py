@@ -14,11 +14,14 @@ import re
 import signal
 import subprocess
 import sys
+from urllib.parse import unquote, urlparse
 
 TID_RE = re.compile(r"T-[a-f0-9-]+")
+GITHUB_REMOTE_RE = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+?)(?:\.git)?$")
 CURRENT_PROC: subprocess.Popen[str] | None = None
 CURRENT_SESSION_ID: str | None = None
 INTERRUPT_REQUESTED = False
+REPO_CONTEXT: dict[str, str] | None = None
 
 
 def _amp_subprocess_env() -> dict[str, str]:
@@ -78,6 +81,105 @@ def extract_handoff_tid(evt: dict) -> str | None:
         return None
     match = TID_RE.search(payload.split("newThreadID", 1)[1])
     return match.group(0) if match else None
+
+
+def _git_stdout(*args: str) -> str:
+    try:
+        completed = subprocess.run(
+            list(args),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return ""
+    return completed.stdout.strip()
+
+
+def _repo_identity(repo_dir: str) -> dict[str, str]:
+    remote = _git_stdout("git", "-C", repo_dir, "config", "--get", "remote.origin.url")
+    match = GITHUB_REMOTE_RE.search(remote)
+    if not match:
+        return {}
+    return {
+        "repo_owner": match.group("owner"),
+        "repo_name": match.group("repo"),
+    }
+
+
+def _repo_root(path: str) -> str:
+    candidate = path
+    if not os.path.isdir(candidate):
+        candidate = os.path.dirname(candidate)
+    return _git_stdout("git", "-C", candidate, "rev-parse", "--show-toplevel")
+
+
+def _repo_candidates(cwd: str | None = None, text: str | None = None) -> list[str]:
+    candidates: list[str] = []
+
+    def add(path: str | None) -> None:
+        if not path:
+            return
+        root = _repo_root(path)
+        if root and root not in candidates:
+            candidates.append(root)
+
+    if text:
+        for raw_url in re.findall(r"file://[^\s)]+", text):
+            parsed = urlparse(raw_url)
+            add(unquote(parsed.path.split("#", 1)[0]))
+
+    add(cwd)
+    add(os.getcwd())
+
+    agent_repo = (os.environ.get("AGENT_REPO") or "").strip()
+    if "/" in agent_repo:
+        add(os.path.join(os.path.expanduser("~"), "github", agent_repo))
+
+    return candidates
+
+
+def _repo_context(cwd: str | None = None, text: str | None = None, *, refresh: bool = False) -> dict[str, str]:
+    global REPO_CONTEXT
+
+    if REPO_CONTEXT is not None and not refresh:
+        return REPO_CONTEXT
+
+    repo_context: dict[str, str] = {}
+    for repo_dir in _repo_candidates(cwd, text):
+        git_ref = _git_stdout("git", "-C", repo_dir, "rev-parse", "--abbrev-ref", "HEAD")
+        git_commit = _git_stdout("git", "-C", repo_dir, "rev-parse", "HEAD")
+        identity = _repo_identity(repo_dir)
+        if identity:
+            repo_context.update(identity)
+        if git_ref and git_ref != "HEAD":
+            repo_context["git_ref"] = git_ref
+        if git_commit:
+            repo_context["git_commit"] = git_commit
+        if repo_context.get("git_commit"):
+            break
+
+    REPO_CONTEXT = repo_context
+    return repo_context
+
+
+def _event_text(evt: dict) -> str:
+    evt_type = evt.get("type")
+    if evt_type == "assistant":
+        content = evt.get("message", {}).get("content", [])
+        texts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
+        return "\n".join(text for text in texts if isinstance(text, str))
+    if evt_type == "result":
+        result = evt.get("result")
+        return result if isinstance(result, str) else ""
+    if evt_type == "error":
+        error = evt.get("error")
+        if isinstance(error, str):
+            return error
+        if isinstance(error, dict):
+            message = error.get("message")
+            return message if isinstance(message, str) else ""
+    return ""
 
 
 class RunResult:
@@ -157,6 +259,14 @@ def run(cmd: list[str], stdin_data: str | None = None) -> RunResult:
         session_id = evt.get("session_id")
         if isinstance(session_id, str) and session_id:
             CURRENT_SESSION_ID = session_id
+
+        if evt_type in {"assistant", "result", "error"}:
+            terminal_like = evt_type in {"result", "error"} or is_end_turn(evt)
+            if terminal_like:
+                cwd = evt.get("cwd") if isinstance(evt.get("cwd"), str) else None
+                for key, value in _repo_context(cwd, _event_text(evt), refresh=True).items():
+                    evt.setdefault(key, value)
+                line = json.dumps(evt, separators=(",", ":"), ensure_ascii=False)
 
         # Keep successful result handling centralized in API _stream_stdout
         # turn.done synthesis. Error results are forwarded so API can persist a

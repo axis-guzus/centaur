@@ -38,6 +38,75 @@ const PROMPT_FLAG_ALIASES = new Map<string, string>([
 ]);
 const STREAM_BOOTSTRAP_TEXT = "\u200b";
 
+type SlackRepoContext = {
+  cwd?: string;
+  repoOwner?: string;
+  repoName?: string;
+  gitRef?: string;
+  gitCommit?: string;
+};
+
+function normalizeRepoContext(raw: unknown): SlackRepoContext {
+  const source = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const context: SlackRepoContext = {};
+  if (typeof source.cwd === "string" && source.cwd.trim()) context.cwd = source.cwd.trim();
+  if (typeof source.repo_owner === "string" && source.repo_owner.trim()) context.repoOwner = source.repo_owner.trim();
+  if (typeof source.repo_name === "string" && source.repo_name.trim()) context.repoName = source.repo_name.trim();
+  if (typeof source.git_ref === "string" && source.git_ref.trim()) context.gitRef = source.git_ref.trim();
+  if (typeof source.git_commit === "string" && source.git_commit.trim()) context.gitCommit = source.git_commit.trim();
+  return context;
+}
+
+function resolveRepoRef(repoContext?: SlackRepoContext): string {
+  return repoContext?.gitCommit?.trim() || repoContext?.gitRef?.trim() || "";
+}
+
+function buildGitHubBlobUrl(
+  owner: string,
+  repo: string,
+  ref: string,
+  relativePath: string,
+  hash: string,
+): string {
+  const encodedPath = relativePath.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/blob/${encodeURIComponent(ref)}/${encodedPath}${hash}`;
+}
+
+function fileUrlToGitHubUrl(href: string, repoContext?: SlackRepoContext): string | null {
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "file:") return null;
+
+  const path = decodeURIComponent(url.pathname);
+  const repoRef = resolveRepoRef(repoContext);
+  const workspaceMatch = path.match(/^\/home\/agent\/workspace\/(.+)$/);
+  if (workspaceMatch) {
+    if (!repoContext?.repoOwner || !repoContext.repoName || !repoRef) return null;
+    return buildGitHubBlobUrl(repoContext.repoOwner, repoContext.repoName, repoRef, workspaceMatch[1], url.hash);
+  }
+
+  const match = path.match(/^\/home\/agent\/(?:github|branches)\/([^/]+)\/([^/]+)\/(.+)$/);
+  if (!match) return null;
+
+  const [, owner, repo, relPath] = match;
+  const ref = repoContext?.repoOwner === owner && repoContext?.repoName === repo && repoRef
+    ? repoRef
+    : "main";
+  return buildGitHubBlobUrl(owner, repo, ref, relPath, url.hash);
+}
+
+export function rewriteSlackFileLinks(markdown: string, repoContext?: SlackRepoContext): string {
+  return markdown.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (full, label: string, href: string) => {
+    const githubUrl = fileUrlToGitHubUrl(href, repoContext);
+    return githubUrl ? `[${label}](${githubUrl})` : full;
+  });
+}
+
 export { splitSlackMessage } from "@/lib/slack/delivery";
 
 type SlackRawMessage = {
@@ -164,6 +233,12 @@ function executionIdFromError(err: unknown): string {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function repoContextFromExecutionRecord(value: unknown): SlackRepoContext {
+  const record = asRecord(value);
+  const metadata = asRecord(record.metadata);
+  return normalizeRepoContext(record.repo_context ?? metadata.repo_context);
 }
 
 function slackAdapterThreadId(threadKey: string): string {
@@ -588,10 +663,14 @@ export class SlackBot {
           || errMsg.includes("cannot_provide_both_markdown_text_and_chunks")
         ) {
           log.warn("slack_stream_fallback", { thread_key: threadKey, error: errMsg, execution_id: executionId });
-          let fallback = convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim());
+          let fallback = rewriteSlackFileLinks(
+            convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim()),
+            tracker.repoContext,
+          );
 
           if (!fallback) {
-            fallback = convertDashboardBlocks(await this.pollForResult(executionId));
+            const polled = await this.pollForResult(executionId);
+            fallback = rewriteSlackFileLinks(convertDashboardBlocks(polled.text), polled.repoContext);
           }
 
           if (fallback) {
@@ -651,12 +730,13 @@ export class SlackBot {
     }
   }
 
-  private async pollForResult(executionId: string): Promise<string> {
+  private async pollForResult(executionId: string): Promise<{ text: string; repoContext?: SlackRepoContext }> {
     const deadline = Date.now() + STREAM_EXPIRED_POLL_MAX_MS;
     while (Date.now() < deadline) {
       try {
         const data = await this.client.getExecution(executionId);
         const status = String(data.status || "");
+        const repoContext = repoContextFromExecutionRecord(data);
         const text = renderTerminalResultCopy({
           status,
           terminalReason: data.terminal_reason,
@@ -664,14 +744,14 @@ export class SlackBot {
           errorText: data.error_text,
         });
         if (text) {
-          return text;
+          return { text, repoContext };
         }
       } catch {
         // best-effort — keep polling
       }
       await new Promise((r) => setTimeout(r, STREAM_EXPIRED_POLL_INTERVAL_MS));
     }
-    return "";
+    return { text: "" };
   }
 
   private async hydrateStoredTerminalResult(
@@ -690,6 +770,7 @@ export class SlackBot {
       const terminalReason = typeof data.terminal_reason === "string"
         ? data.terminal_reason.trim()
         : "";
+      tracker.observeRepoContext(repoContextFromExecutionRecord(data));
       tracker.resultText = renderTerminalResultCopy({
         status,
         terminalReason,
@@ -721,7 +802,10 @@ export class SlackBot {
     // If the text exceeds Slack's 4k char limit, yield only the first chunk here
     // and stash overflow for the caller to post as separate messages.
     // Convert ```dashboard blocks to markdown tables so they render as Slack Block Kit.
-    const finalText = convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim());
+    const finalText = rewriteSlackFileLinks(
+      convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim()),
+      tracker.repoContext,
+    );
     if (finalText) {
       const dur = (Date.now() - t0) / 1000;
       const durStr = dur < 10 ? `${dur.toFixed(1)}s` : `${Math.round(dur)}s`;
@@ -822,6 +906,7 @@ export class SlackBot {
           const eventType = typeof payload.type === "string" ? payload.type : "";
 
           if (eventType === "turn.done") {
+            tracker.observeRepoContext(normalizeRepoContext(payload));
             const result = String(payload.result || "").trim();
             const errorText = String(payload.error || "").trim();
             const rendered = renderTerminalResultCopy({
@@ -836,6 +921,7 @@ export class SlackBot {
 
           if (eventType === "execution.state") {
             const status = String(payload.status || "");
+            tracker.observeRepoContext(normalizeRepoContext(payload.repo_context));
             if (["completed", "failed_permanent", "cancelled"].includes(status)) {
               const rendered = renderTerminalResultCopy({
                 status,
@@ -1126,12 +1212,15 @@ export class SlackBot {
       : "";
     const resultText = typeof finalPayload.result_text === "string" ? finalPayload.result_text.trim() : "";
     const errorText = typeof finalPayload.error_text === "string" ? finalPayload.error_text.trim() : "";
-    const rendered = convertDashboardBlocks(renderTerminalResultCopy({
-      status,
-      terminalReason,
-      resultText,
-      errorText,
-    }));
+    const rendered = rewriteSlackFileLinks(
+      convertDashboardBlocks(renderTerminalResultCopy({
+        status,
+        terminalReason,
+        resultText,
+        errorText,
+      })),
+      normalizeRepoContext(finalPayload.repo_context),
+    );
     const viewerSuffix = this.viewerUrl
       ? `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})`
       : "";

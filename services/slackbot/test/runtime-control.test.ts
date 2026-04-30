@@ -353,6 +353,38 @@ describe("SlackBot runtime control", () => {
     ).toBe(false);
   });
 
+  it("rewrites streamed file links to GitHub blob URLs before posting to Slack", async () => {
+    const client = createImmediateStreamClient();
+    client.streamEvents = vi.fn(() => (async function* () {
+      yield {
+        eventId: 1,
+        eventKind: "amp_raw_event",
+        data: {
+          type: "turn.done",
+          result: "See [bot.ts](file:///home/agent/workspace/services/slackbot/src/lib/bot/bot.ts#L1-L5)",
+          repo_owner: "paradigmxyz",
+          repo_name: "centaur",
+          git_commit: "490cd7aed56fb93efd52e4fa3dd06874d762d88a",
+          git_ref: "centaur/github-permalinks",
+        },
+      };
+    })());
+
+    const bot = new SlackBot(client as any);
+    const runtime = createThread();
+
+    await bot.onSubscribedMessage(runtime.thread, userMessage("follow-up", {
+      id: "1700000000.000004",
+      isMention: true,
+    }));
+
+    const streamedOutput = JSON.stringify(runtime.streamedChunks);
+    expect(streamedOutput).toContain(
+      "https://github.com/paradigmxyz/centaur/blob/490cd7aed56fb93efd52e4fa3dd06874d762d88a/services/slackbot/src/lib/bot/bot.ts#L1-L5",
+    );
+    expect(streamedOutput).not.toContain("file:///home/agent/workspace/");
+  });
+
   it("claims only Slack final deliveries and posts completed results once", async () => {
     const client = createImmediateStreamClient();
     client.claimFinalDeliveries = vi.fn(async () => ({
@@ -423,6 +455,43 @@ describe("SlackBot runtime control", () => {
       { markdown: "workflow result" },
     );
     expect(client.markFinalDelivered).toHaveBeenCalledWith("exe-workflow", expect.any(String));
+  });
+
+  it("rewrites final-delivery file links before posting to Slack", async () => {
+    const client = createImmediateStreamClient();
+    client.claimFinalDeliveries = vi.fn(async () => ({
+      deliveries: [
+        {
+          execution_id: "exe-file-link",
+          thread_key: normalizedThreadKey,
+          delivery: { platform: "slack" },
+          final_payload: {
+            status: "completed",
+            result_text: "See [bot.ts](file:///home/agent/workspace/services/slackbot/src/lib/bot/bot.ts#L1-L5)",
+            repo_context: {
+              repo_owner: "paradigmxyz",
+              repo_name: "centaur",
+              git_commit: "490cd7aed56fb93efd52e4fa3dd06874d762d88a",
+              git_ref: "centaur/github-permalinks",
+            },
+          },
+        },
+      ],
+    }));
+    const slack = createSlackAdapter({
+      postMessage: vi.fn(async () => ({ id: "msg-final" })),
+    });
+    const bot = new SlackBot(client as any, "", slack);
+
+    await (bot as any).drainFinalDeliveriesOnce();
+
+    expect(slack.postMessage).toHaveBeenCalledWith(
+      `slack:${normalizedThreadKey}`,
+      {
+        markdown: "See [bot.ts](https://github.com/paradigmxyz/centaur/blob/490cd7aed56fb93efd52e4fa3dd06874d762d88a/services/slackbot/src/lib/bot/bot.ts#L1-L5)",
+      },
+    );
+    expect(client.markFinalDelivered).toHaveBeenCalledWith("exe-file-link", expect.any(String));
   });
 
   it("posts a friendly cancellation message for the latest cancelled final delivery", async () => {

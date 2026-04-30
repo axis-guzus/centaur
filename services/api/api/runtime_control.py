@@ -154,6 +154,31 @@ def _event_silence_timeout_s(event: dict[str, Any]) -> float:
     return float(EXECUTION_SILENCE_TIMEOUT_S)
 
 
+def _extract_repo_context(source: Any) -> dict[str, str]:
+    payload = source if isinstance(source, dict) else {}
+    repo_context: dict[str, str] = {}
+    for key in ("cwd", "repo_owner", "repo_name", "git_ref", "git_commit"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            repo_context[key] = value.strip()
+    return repo_context
+
+
+async def _merge_execution_repo_context(
+    pool,
+    execution_id: str,
+    repo_context: dict[str, str],
+) -> None:
+    if not repo_context:
+        return
+    await pool.execute(
+        "UPDATE agent_execution_requests SET metadata = metadata || $1::jsonb, updated_at = NOW() "
+        "WHERE execution_id = $2",
+        canonical_json({"repo_context": repo_context}),
+        execution_id,
+    )
+
+
 def _attachment_name_from_source_path(source_path: str | None, attachment_id: str) -> str:
     if not source_path:
         return f"{attachment_id}.bin"
@@ -932,7 +957,7 @@ async def enqueue_execution(
 async def get_execution(pool, execution_id: str) -> dict[str, Any] | None:
     row = await pool.fetchrow(
         "SELECT execution_id, thread_key, assignment_generation, execute_id, status, "
-        "durable_turn_id, terminal_reason, result_text, error_text, created_at, "
+        "durable_turn_id, terminal_reason, result_text, error_text, metadata, created_at, "
         "started_at, completed_at, updated_at "
         "FROM agent_execution_requests WHERE execution_id = $1",
         execution_id,
@@ -949,6 +974,7 @@ async def get_execution(pool, execution_id: str) -> dict[str, Any] | None:
         "terminal_reason": row["terminal_reason"],
         "result_text": row["result_text"],
         "error_text": row["error_text"],
+        "metadata": decode_jsonb(row["metadata"], {}),
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "started_at": row["started_at"].isoformat() if row["started_at"] else None,
         "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
@@ -1181,7 +1207,7 @@ async def _mark_execution_terminal(
         "result_text = $3, error_text = $4, completed_at = $6, "
         "worker_id = NULL, worker_lease_expires_at = NULL, updated_at = NOW() "
         "WHERE execution_id = $5 "
-        "RETURNING started_at, assignment_generation",
+        "RETURNING started_at, assignment_generation, metadata",
         status,
         terminal_reason,
         result_text,
@@ -1194,8 +1220,12 @@ async def _mark_execution_terminal(
     persona_id = None
     prompt_ref = None
     prompt_sha = None
+    repo_context: dict[str, str] = {}
     if row:
         ag = row["assignment_generation"]
+        metadata = decode_jsonb(row["metadata"], {})
+        if isinstance(metadata, dict):
+            repo_context = _extract_repo_context(decode_jsonb(metadata.get("repo_context"), {}))
         assignment_row = await pool.fetchrow(
             "SELECT harness, engine, persona_id, prompt_ref, effective_agents_md_sha256 "
             "FROM agent_runtime_assignments WHERE thread_key = $1 AND assignment_generation = $2",
@@ -1237,6 +1267,7 @@ async def _mark_execution_terminal(
             "terminal_reason": terminal_reason,
             "result_text": result_text,
             **({"error_text": error_text} if error_text else {}),
+            **({"repo_context": repo_context} if repo_context else {}),
         },
     )
     await pool.execute(
@@ -1251,6 +1282,7 @@ async def _mark_execution_terminal(
                 "terminal_reason": terminal_reason,
                 "result_text": result_text,
                 **({"error_text": error_text} if error_text else {}),
+                **({"repo_context": repo_context} if repo_context else {}),
             }
         ),
         next_attempt_at,
@@ -1269,6 +1301,7 @@ async def _mark_execution_terminal(
             "terminal_reason": terminal_reason,
             "result_text": result_text,
             **({"error_text": error_text} if error_text else {}),
+            **({"repo_context": repo_context} if repo_context else {}),
         },
     )
     log.info(
@@ -1912,6 +1945,9 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
         return
 
     result_text = str(turn_done_event.get("result") or "")
+    repo_context = _extract_repo_context(turn_done_event)
+    if repo_context:
+        await _merge_execution_repo_context(pool, execution_id, repo_context)
     error_text = turn_done_event.get("error")
     if not isinstance(error_text, str):
         error_text = ""

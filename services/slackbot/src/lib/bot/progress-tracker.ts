@@ -36,6 +36,14 @@ export class ProgressTracker {
   agentThreadId = "";
   /** Overflow chunks when the final text exceeds Slack's message limit. */
   overflowChunks: string[] = [];
+  /** Repo context for the active workspace checkout. */
+  repoContext: {
+    cwd?: string;
+    repoOwner?: string;
+    repoName?: string;
+    gitRef?: string;
+    gitCommit?: string;
+  } = {};
 
   private activeTools = new Map<string, ActiveTool>();
   private tasks = new Map<string, { title: string; status: TaskStatus }>();
@@ -92,6 +100,24 @@ export class ProgressTracker {
     const title = `Handed off → ${goal}`;
     this.tasks.set(id, { title, status: "complete" });
     yield taskChunk(id, title, "complete");
+  }
+
+  observeRepoContext(source: {
+    cwd?: string;
+    repo_owner?: string;
+    repo_name?: string;
+    git_ref?: string;
+    git_commit?: string;
+    repoOwner?: string;
+    repoName?: string;
+    gitRef?: string;
+    gitCommit?: string;
+  }): void {
+    if (source.cwd) this.repoContext.cwd = source.cwd;
+    if (source.repo_owner || source.repoOwner) this.repoContext.repoOwner = source.repo_owner || source.repoOwner;
+    if (source.repo_name || source.repoName) this.repoContext.repoName = source.repo_name || source.repoName;
+    if (source.git_ref || source.gitRef) this.repoContext.gitRef = source.git_ref || source.gitRef;
+    if (source.git_commit || source.gitCommit) this.repoContext.gitCommit = source.git_commit || source.gitCommit;
   }
 
   // ── Event handlers ─────────────────────────────────────────────────────

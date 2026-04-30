@@ -8,6 +8,7 @@ import {
   parsePromptSelectorFlag,
   extractFlagSelector,
   bareFlagGreeting,
+  rewriteSlackFileLinks,
 } from "../src/lib/bot/bot";
 import { normalizeHarnessEvent, type CanonicalEvent } from "@centaur/harness-events";
 
@@ -905,5 +906,48 @@ describe("splitSlackMessage", () => {
     expect(splitSlackMessage(text)).toEqual([text]);
     const longText = "a".repeat(3901);
     expect(splitSlackMessage(longText).length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("rewriteSlackFileLinks", () => {
+  it("rewrites workspace file links to the checked-out commit permalink", () => {
+    const markdown = "See [bot.ts](file:///home/agent/workspace/services/slackbot/src/lib/bot/bot.ts#L1-L5).";
+
+    expect(rewriteSlackFileLinks(markdown)).toBe(
+      markdown,
+    );
+
+    expect(rewriteSlackFileLinks(markdown, {
+      repoOwner: "paradigmxyz",
+      repoName: "centaur",
+      gitCommit: "490cd7aed56fb93efd52e4fa3dd06874d762d88a",
+    })).toBe(
+      "See [bot.ts](https://github.com/paradigmxyz/centaur/blob/490cd7aed56fb93efd52e4fa3dd06874d762d88a/services/slackbot/src/lib/bot/bot.ts#L1-L5).",
+    );
+  });
+
+  it("rewrites mounted repo links to the checked-out commit when the repo matches", () => {
+    const markdown = "See [bot.ts](file:///home/agent/github/paradigmxyz/centaur/services/slackbot/src/lib/bot/bot.ts#L1-L5).";
+
+    expect(rewriteSlackFileLinks(markdown, {
+      repoOwner: "paradigmxyz",
+      repoName: "centaur",
+      gitCommit: "490cd7aed56fb93efd52e4fa3dd06874d762d88a",
+    })).toBe(
+      "See [bot.ts](https://github.com/paradigmxyz/centaur/blob/490cd7aed56fb93efd52e4fa3dd06874d762d88a/services/slackbot/src/lib/bot/bot.ts#L1-L5).",
+    );
+  });
+
+  it("falls back to main for other mounted repos when no exact ref is available", () => {
+    const markdown = "See [bot.ts](file:///home/agent/github/paradigmxyz/centaur/services/slackbot/src/lib/bot/bot.ts#L1-L5).";
+
+    expect(rewriteSlackFileLinks(markdown)).toBe(
+      "See [bot.ts](https://github.com/paradigmxyz/centaur/blob/main/services/slackbot/src/lib/bot/bot.ts#L1-L5).",
+    );
+  });
+
+  it("leaves non-file links unchanged", () => {
+    const markdown = "Open [Centaur](https://github.com/paradigmxyz/centaur).";
+    expect(rewriteSlackFileLinks(markdown)).toBe(markdown);
   });
 });
