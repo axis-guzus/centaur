@@ -114,7 +114,7 @@ TEAM_EMOJIS = {
     "Communications": "\U0001F4E2", "Legal": "\u2696\uFE0F",
     "Trading": "\U0001F4C8", "Events": "\U0001F389",
     "Engineering": "\U0001F527", "Talent": "\U0001F465",
-    "Operations": "\u2699\uFE0F", "Centaur": "\U0001F916",
+    "Operations": "\u2699\uFE0F", "Centaur Internal": "\U0001F916",
     "Other": "\U0001F4AC",
 }
 
@@ -185,11 +185,17 @@ CURL_RE = re.compile(r"/tools/([a-z][a-z0-9_-]+)/([a-z][a-z0-9_-]+)")
 WINDOWS = {"all": None, "30d": 30, "7d": 7, "1d": 1}
 
 
+def _is_slack_thread(thread_key: str) -> bool:
+    return ":" in thread_key and thread_key.split(":", 1)[0].startswith(("C", "D", "G"))
+
+
 def _session_key(thread_key: str) -> str:
+    if _is_slack_thread(thread_key):
+        return thread_key
     if thread_key.startswith("workflow:wfr_") and thread_key.count(":") >= 2:
         parts = thread_key.split(":", 2)
         return f"{parts[0]}:{parts[1]}"
-    return thread_key
+    return re.sub(r"-\d{10,}$", "", thread_key)
 
 
 def _thread_to_slack_url(thread_key: str) -> str | None:
@@ -213,7 +219,7 @@ def _parse_tool_call(cmd: str) -> tuple[str, str] | None:
 
 def _fmt_user(uid: str, cnt: int) -> str:
     if uid == "unknown":
-        return f"Centaur ({cnt})"
+        return f"Centaur Internal ({cnt})"
     name = USER_MAP.get(uid, (uid,))[0]
     short = name.split()[0] if " " in name else name
     return f"{short} ({cnt})"
@@ -369,9 +375,9 @@ def _aggregate_users(events: list[dict]) -> list[dict]:
     result = []
     for uid in sorted(stats, key=lambda u: stats[u]["count"], reverse=True):
         s = stats[uid]
-        name_handle = USER_MAP.get(uid, ("Centaur", "\u2014") if uid == "unknown" else (uid, uid))
+        name_handle = USER_MAP.get(uid, ("Centaur Internal", "\u2014") if uid == "unknown" else (uid, uid))
         name, handle = name_handle
-        team = TEAM_MAP.get(uid, "Centaur" if uid == "unknown" else "Other")
+        team = TEAM_MAP.get(uid, "Centaur Internal" if uid == "unknown" else "Other")
         top = s["top_tools"].most_common(3)
         result.append({
             "name": name, "handle": handle, "team": team,
