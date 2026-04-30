@@ -207,7 +207,7 @@ services:
       slackbot:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost/healthz"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/healthz"]
       interval: 5s
       timeout: 3s
       retries: 5
