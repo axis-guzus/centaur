@@ -22,7 +22,8 @@ import {
 } from "@/lib/slack/delivery";
 import type { StreamChunk } from "@/lib/slack/types";
 import { ProgressTracker } from "./progress-tracker";
-import { convertDashboardBlocks } from "./dashboard-to-slack";
+import { convertDashboardBlocks, type ChartRenderer, type DashboardFileUpload } from "./dashboard-to-slack";
+import { createChartRenderer } from "./chart-renderer";
 
 const KEEPALIVE_MS = 120_000; // 2 min — Slack expires streaming state after ~5 min
 const STREAM_EXPIRED_POLL_INTERVAL_MS = 3_000;
@@ -275,7 +276,12 @@ export interface BotThread {
   subscribe(): Promise<void>;
   startTyping(status?: string): Promise<void>;
   stopTyping?(): Promise<void>;
-  post(content: AsyncGenerator<StreamChunk> | { markdown: string }, options?: { taskDisplayMode?: "timeline" | "plan" }): Promise<{ id: string; edit(content: { markdown: string }): Promise<void> }>;
+  post(content: AsyncGenerator<StreamChunk> | PostPayload, options?: { taskDisplayMode?: "timeline" | "plan" }): Promise<{ id: string; edit(content: { markdown: string }): Promise<void> }>;
+}
+
+export interface PostPayload {
+  markdown: string;
+  files?: DashboardFileUpload[];
 }
 
 export interface BotMessage {
@@ -299,7 +305,7 @@ export interface SlackAdapter {
   fetchMessage(threadId: string, ts: string): Promise<{ attachments?: BotAttachment[] } | null>;
   fetchMessages(threadId: string, options?: { direction?: "forward" | "backward"; limit?: number }): Promise<{ messages: Array<{ id?: string; text: string; formatted?: Root; raw?: SlackRawMessage; author: { isMe: boolean; isBot: boolean; userId: string }; attachments?: BotAttachment[] }> }>;
   setAssistantTitle(channel: string, threadTs: string, title: string): Promise<void>;
-  postMessage(threadId: string, message: { markdown: string }): Promise<{ id: string }>;
+  postMessage(threadId: string, message: PostPayload): Promise<{ id: string }>;
   getInstallation?(teamId: string): Promise<{ botToken: string } | null>;
   withBotToken?<T>(token: string, fn: () => Promise<T> | T): Promise<T>;
 }
@@ -320,11 +326,15 @@ export class SlackBot {
 
   private readonly deliveryConsumerId = `slackbot:${process.env.HOSTNAME || "local"}`;
 
+  private readonly chartRenderer: ChartRenderer;
+
   constructor(
     readonly client: CentaurClient,
     private viewerUrl = "",
     private slack?: SlackAdapter,
-  ) {}
+  ) {
+    this.chartRenderer = createChartRenderer(client);
+  }
 
   static createFromEnv(slack?: SlackAdapter): SlackBot {
     return new SlackBot(
@@ -664,19 +674,20 @@ export class SlackBot {
           || errMsg.includes("cannot_provide_both_markdown_text_and_chunks")
         ) {
           log.warn("slack_stream_fallback", { thread_key: threadKey, error: errMsg, execution_id: executionId });
-          let fallback = rewriteSlackFileLinks(
-            convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim()),
-            tracker.repoContext,
-          );
+          let converted = await convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim(), { renderChart: this.chartRenderer });
+          let fallback = rewriteSlackFileLinks(converted.markdown, tracker.repoContext);
 
           if (!fallback) {
             const polled = await this.pollForResult(executionId);
-            fallback = rewriteSlackFileLinks(convertDashboardBlocks(polled.text), polled.repoContext);
+            converted = await convertDashboardBlocks(polled.text, { renderChart: this.chartRenderer });
+            fallback = rewriteSlackFileLinks(converted.markdown, polled.repoContext);
           }
 
           if (fallback) {
-            for (const chunk of splitMarkdownForSlackMessages(fallback)) {
-              await thread.post({ markdown: chunk });
+            const chunks = splitMarkdownForSlackMessages(fallback);
+            for (let i = 0; i < chunks.length; i += 1) {
+              const files = i === chunks.length - 1 && converted.files.length ? converted.files : undefined;
+              await thread.post({ markdown: chunks[i], ...(files ? { files } : {}) });
             }
             deliveredToSlack = true;
           } else if (this.viewerUrl) {
@@ -699,20 +710,30 @@ export class SlackBot {
         return;
       }
 
-      // Post any overflow chunks that didn't fit in the streaming message
-      for (const chunk of tracker.overflowChunks) {
+      // Post any overflow chunks that didn't fit in the streaming message.
+      for (let i = 0; i < tracker.overflowChunks.length; i += 1) {
+        const chunk = tracker.overflowChunks[i];
         try {
-          await thread.post({ markdown: chunk });
+          const files = i === tracker.overflowChunks.length - 1 && tracker.pendingFiles.length
+            ? tracker.pendingFiles
+            : undefined;
+          await thread.post({ markdown: chunk, ...(files ? { files } : {}) });
+          if (i === tracker.overflowChunks.length - 1) tracker.pendingFiles = [];
         } catch (err) {
           log.warn("overflow_post_failed", { thread_key: threadKey, error: err instanceof Error ? err.message : String(err) });
         }
+      }
+
+      if (tracker.pendingFiles.length > 0) {
+        await thread.post({ markdown: " ", files: tracker.pendingFiles });
+        tracker.pendingFiles = [];
       }
 
       const finalText = (tracker.resultText || tracker.lastAssistantText).trim();
       log.info("execute_complete", { thread_key: threadKey, duration_s: Math.round((Date.now() - t0) / 100) / 10, result_length: finalText.length, overflow_chunks: tracker.overflowChunks.length });
 
       if (streamedReply) {
-        const streamedMarkdown = this.renderStreamedExecutionMarkdown(threadKey, finalText, tracker.repoContext);
+        const streamedMarkdown = await this.renderStreamedExecutionMarkdown(threadKey, finalText, tracker.repoContext);
         const streamedBlocks = renderMarkdownForSlack(streamedMarkdown).blocks;
         const containsTableBlock = Boolean(streamedBlocks?.some((block) => block.type === "table"));
         if (containsTableBlock && tracker.overflowChunks.length === 0) {
@@ -816,14 +837,11 @@ export class SlackBot {
     // Complete all in-progress steps and set plan title to "Completed"
     yield* tracker.finalize();
 
-    // Emit the final response after a context block with run metadata.
-    // If the text exceeds Slack's 4k char limit, yield only the first chunk here
-    // and stash overflow for the caller to post as separate messages.
-    // Convert ```dashboard blocks to markdown tables so they render as Slack Block Kit.
-    const finalText = rewriteSlackFileLinks(
-      convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim()),
-      tracker.repoContext,
-    );
+    const converted = await convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim(), {
+      renderChart: this.chartRenderer,
+    });
+    const finalText = rewriteSlackFileLinks(converted.markdown, tracker.repoContext);
+    tracker.pendingFiles = converted.files;
     if (finalText) {
       const dur = (Date.now() - t0) / 1000;
       const durStr = dur < 10 ? `${dur.toFixed(1)}s` : `${Math.round(dur)}s`;
@@ -1135,9 +1153,9 @@ export class SlackBot {
       return;
     }
 
-    const markdown = this.renderFinalDeliveryMarkdown(threadKey, finalPayload);
+    const { markdown, files } = await this.renderFinalDeliveryMarkdown(threadKey, finalPayload);
     try {
-      await this.postSlackMarkdown(threadKey, delivery, markdown);
+      await this.postSlackMarkdown(threadKey, delivery, markdown, files);
       await this.ackFinalDelivery(executionId, threadKey);
       await this.setAssistantTitle(threadKey, delivery, markdown);
       log.info("final_delivery_completed", { thread_key: threadKey, execution_id: executionId });
@@ -1151,7 +1169,7 @@ export class SlackBot {
               execution_id: executionId,
               thread_key: threadKey,
             });
-            await this.postSlackMarkdown(threadKey, delivery, fallbackMarkdown);
+            await this.postSlackMarkdown(threadKey, delivery, fallbackMarkdown, files);
             await this.ackFinalDelivery(executionId, threadKey);
             await this.setAssistantTitle(threadKey, delivery, fallbackMarkdown);
             log.info("final_delivery_completed", {
@@ -1227,42 +1245,43 @@ export class SlackBot {
     }
   }
 
-  private renderFinalDeliveryMarkdown(threadKey: string, finalPayload: Record<string, unknown>): string {
+  private async renderFinalDeliveryMarkdown(threadKey: string, finalPayload: Record<string, unknown>): Promise<{ markdown: string; files: DashboardFileUpload[] }> {
     const status = typeof finalPayload.status === "string" ? finalPayload.status : "";
     const terminalReason = typeof finalPayload.terminal_reason === "string"
       ? finalPayload.terminal_reason
       : "";
     const resultText = typeof finalPayload.result_text === "string" ? finalPayload.result_text.trim() : "";
     const errorText = typeof finalPayload.error_text === "string" ? finalPayload.error_text.trim() : "";
-    const rendered = this.renderStreamedExecutionMarkdown(
-      threadKey,
-      renderTerminalResultCopy({
-        status,
-        terminalReason,
-        resultText,
-        errorText,
-      }),
-      normalizeRepoContext(finalPayload.repo_context),
-    );
+    const converted = await convertDashboardBlocks(renderTerminalResultCopy({
+      status,
+      terminalReason,
+      resultText,
+      errorText,
+    }), { renderChart: this.chartRenderer });
+    const rendered = rewriteSlackFileLinks(converted.markdown, normalizeRepoContext(finalPayload.repo_context));
+    const viewerSuffix = this.viewerUrl
+      ? `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})`
+      : "";
 
     if (rendered) {
-      return rendered;
+      return { markdown: `${rendered}${viewerSuffix}`, files: converted.files };
     }
 
     if (this.viewerUrl) {
-      return `Agent completed. [View full output](${this.viewerUrl}/${encodeURIComponent(threadKey)})`;
+      return { markdown: `Agent completed. [View full output](${this.viewerUrl}/${encodeURIComponent(threadKey)})`, files: converted.files };
     }
 
-    return "Agent completed with no output.";
+    return { markdown: "Agent completed with no output.", files: converted.files };
   }
 
-  private renderStreamedExecutionMarkdown(
+  private async renderStreamedExecutionMarkdown(
     threadKey: string,
     text: string,
     repoContext?: SlackRepoContext,
-  ): string {
+  ): Promise<string> {
+    const converted = await convertDashboardBlocks(text.trim());
     const rendered = rewriteSlackFileLinks(
-      convertDashboardBlocks(text.trim()),
+      converted.markdown,
       repoContext,
     );
     if (!rendered) return "";
@@ -1276,11 +1295,17 @@ export class SlackBot {
     threadKey: string,
     delivery: Record<string, unknown>,
     markdown: string,
+    files: DashboardFileUpload[] = [],
   ): Promise<void> {
     const targetThreadId = slackDeliveryThreadId(threadKey, delivery);
     await this.withSlackDeliveryContext(delivery, async () => {
-      for (const chunk of splitMarkdownForSlackMessages(markdown)) {
-        await this.slack!.postMessage(targetThreadId, { markdown: chunk });
+      const chunks = splitMarkdownForSlackMessages(markdown);
+      for (let i = 0; i < chunks.length; i += 1) {
+        const chunkFiles = i === chunks.length - 1 && files.length ? files : undefined;
+        await this.slack!.postMessage(targetThreadId, {
+          markdown: chunks[i],
+          ...(chunkFiles ? { files: chunkFiles } : {}),
+        });
       }
     });
   }

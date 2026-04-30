@@ -529,7 +529,7 @@ describe("execute streams structured progress immediately", () => {
     const { SlackBot } = await import("../src/lib/bot/bot");
     const bot = new SlackBot(mockClient as any);
 
-    vi.spyOn(bot as any, "streamExecution").mockImplementation(async function* (
+    vi.spyOn(bot as any, "streamExecution").mockImplementation((async function* (
       _threadKey: string,
       _executionId: string,
       tracker: { lastAssistantText: string },
@@ -561,7 +561,7 @@ describe("execute streams structured progress immediately", () => {
           },
         ],
       };
-    });
+    }) as any);
     vi.spyOn(bot as any, "ackFinalDelivery").mockResolvedValue(undefined);
     vi.spyOn(bot as any, "setAssistantTitle").mockResolvedValue(undefined);
 

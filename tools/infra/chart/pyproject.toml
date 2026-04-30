@@ -1,10 +1,10 @@
 [project]
 name = "chart"
-description = "Chart generation for crypto market data — line, candlestick/OHLC, comparison, and bar charts. Returns base64 PNG images ready for Slack upload."
+description = "Chart generation for Centaur. Single render_chart method returns base64 PNG images ready for Slack upload."
 version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
-    "cairosvg>=2.7.0",
+    "centaur-charts",
 ]
 
 [tool.ai-v2]

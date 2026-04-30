@@ -1,10 +1,13 @@
 /**
- * Convert ```dashboard fenced blocks into Slack-friendly markdown.
+ * Convert ```dashboard fenced blocks into Slack-friendly markdown + image files.
  *
- * Dashboard blocks are a custom format used by the agent to emit rich
- * interactive tables, KPI cards, and charts. Structured Centaur clients can
- * render these directly; Slack gets a plain markdown fallback so the existing
- * table→Block Kit pipeline can pick them up automatically.
+ * Dashboard blocks are a custom format for tables, KPI cards, and charts.
+ * Structured clients can render them directly; Slack gets:
+ *   - tables → markdown tables (later flattened to bullets if Block Kit rejects)
+ *   - KPI cards → bold-prefixed inline text
+ *   - charts → PNG image files attached to the same Slack message,
+ *     rendered via the chart tool when a renderer is provided.
+ *
  */
 
 import { decode } from "@toon-format/toon";
@@ -282,14 +285,116 @@ function dashboardToSlackMarkdown(spec: DashboardSpec): string {
 // ── Public API ───────────────────────────────────────────────────────────
 
 /**
- * Replace all ```dashboard blocks in markdown with Slack-friendly equivalents.
- * Returns the transformed markdown with dashboard blocks replaced by
- * markdown tables and formatted KPI text.
+ * Renderer that turns a chart component spec into PNG bytes.
+ * Returns `null` to signal "couldn't render" so the caller falls back to
+ * the placeholder string instead of dropping the chart silently.
  */
-export function convertDashboardBlocks(markdown: string): string {
-  return markdown.replace(DASHBOARD_REGEX, (_match, content: string) => {
-    const spec = parseDashboardSpec(content);
-    if (!spec) return _match; // Leave unparseable blocks as-is
-    return dashboardToSlackMarkdown(spec);
+export type ChartRenderer = (chart: ChartProps) => Promise<Buffer | null>;
+
+export interface DashboardFileUpload {
+  data: Buffer;
+  filename: string;
+  mimeType?: string;
+}
+
+export interface DashboardConversion {
+  /** Markdown with dashboard blocks expanded; chart components removed when rendered to files. */
+  markdown: string;
+  /** Image files (typically PNGs) to attach to the same Slack message. */
+  files: DashboardFileUpload[];
+}
+
+function isChartProps(c: DashboardComponent): c is ChartProps {
+  return c.type === "line-chart" || c.type === "bar-chart" || c.type === "pie-chart";
+}
+
+function chartFilenameFromTitle(title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return `${slug || "chart"}.png`;
+}
+
+async function replaceAsync(
+  str: string,
+  regex: RegExp,
+  replacer: (match: string, ...groups: string[]) => Promise<string>,
+): Promise<string> {
+  const promises: Promise<string>[] = [];
+  // Trigger replacer for every match to collect promises in order; throw away
+  // the synchronous return value (the second .replace below uses the awaited
+  // results in match-order).
+  str.replace(regex, (match, ...args) => {
+    const groups = args.slice(0, -2) as string[];
+    promises.push(replacer(match, ...groups));
+    return match;
   });
+  const resolved = await Promise.all(promises);
+  let i = 0;
+  return str.replace(regex, () => resolved[i++]);
+}
+
+/**
+ * Replace all ```dashboard blocks in markdown with Slack-friendly equivalents.
+ *
+ * When `options.renderChart` is provided, chart components are rendered to
+ * PNG and returned in `files`; the markdown is left without a placeholder
+ * for those charts so the same Slack message gets them attached natively.
+ *
+ * When `renderChart` is missing or returns null, charts fall back to the
+ * "_<title> (chart — view in Thread Viewer)_" placeholder so the user at
+ * least sees what was attempted.
+ */
+export async function convertDashboardBlocks(
+  markdown: string,
+  options?: { renderChart?: ChartRenderer },
+): Promise<DashboardConversion> {
+  const files: DashboardFileUpload[] = [];
+
+  const newMarkdown = await replaceAsync(
+    markdown,
+    DASHBOARD_REGEX,
+    async (raw, content) => {
+      const spec = parseDashboardSpec(content);
+      if (!spec) return raw;
+
+      // Render charts to PNGs. Only successful renders are removed from
+      // the dashboard spec; failed renders fall through to the placeholder
+      // path inside componentToSlackMarkdown so the user can see something
+      // was meant to be there.
+      const renderedCharts = new Set<ChartProps>();
+      if (options?.renderChart) {
+        for (const c of spec.components) {
+          if (!isChartProps(c)) continue;
+          try {
+            const buf = await options.renderChart(c);
+            if (buf && buf.length > 0) {
+              files.push({
+                data: buf,
+                filename: chartFilenameFromTitle(c.title),
+                mimeType: "image/png",
+              });
+              renderedCharts.add(c);
+            }
+          } catch {
+            // best-effort; placeholder string is shown instead
+          }
+        }
+      }
+
+      const remainingComponents = spec.components.filter(
+        (c) => !(isChartProps(c) && renderedCharts.has(c)),
+      );
+      if (remainingComponents.length === 0 && renderedCharts.size > 0) {
+        // Charts-only dashboard, all rendered: leave a tiny title anchor so
+        // the file uploads are introduced by the dashboard's heading.
+        return spec.title ? `*${spec.title}*` : "";
+      }
+      return dashboardToSlackMarkdown({ ...spec, components: remainingComponents });
+    },
+  );
+
+  return { markdown: newMarkdown, files };
 }

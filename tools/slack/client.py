@@ -697,7 +697,7 @@ class SlackClient:
 
         Args:
             channel: Channel name (with or without #) or channel ID
-            text: Message text to send (also used as fallback for blocks)
+            text: Message text to send
             thread_ts: Optional thread timestamp to reply in thread
             no_attribution: If True, skip adding requester attribution
             blocks: Optional Slack Block Kit blocks for rich formatting
@@ -744,8 +744,14 @@ class SlackClient:
         thread_ts: str | None = None,
         content_base64: str | None = None,
         filename: str | None = None,
+        alt_text: str | None = None,
     ) -> dict:
-        """Upload a file to a channel. Accepts file_path OR content_base64."""
+        """Upload a file to a channel. Accepts file_path OR content_base64.
+
+        alt_text: accessibility description for screen readers (max 1000 chars).
+            Strongly recommended for chart images so users with visual
+            impairments and indexers can understand what the image shows.
+        """
         if not channel:
             raise ValueError("channel is required")
         channel_id = self._resolve_channel(channel)
@@ -770,6 +776,11 @@ class SlackClient:
                 kwargs["initial_comment"] = comment
             if thread_ts:
                 kwargs["thread_ts"] = thread_ts
+            if alt_text:
+                # Slack's files.completeUploadExternal accepts alt_txt per file.
+                # slack_sdk's files_upload_v2 forwards top-level alt_txt onto the
+                # single-file upload payload.
+                kwargs["alt_txt"] = alt_text[:1000]
 
             response = self._client.files_upload_v2(**kwargs)
             file_info = response.get("file", {})

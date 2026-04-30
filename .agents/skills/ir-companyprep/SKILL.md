@@ -225,6 +225,16 @@ Read relevant notes with `reshift db` to get note text (HTML), strip tags with `
 
 ### Step 7: Key Metrics
 
+Use the format that fits the metric. For a single latest value, keep text. For ≥3 historical periods of the same metric (ARR, revenue, TVL, DAU, volume, retention, margin), use a tiny inline PNG sparkline (60-80 pt wide, 18-24 pt tall) in the Trend column so the reader can see trajectory at a glance. For mixed-unit company metrics, do **not** force a combined chart; use the table plus per-row sparklines where history exists.
+
+Generate each sparkline with the chart tool:
+
+```bash
+call chart render_chart '{"chart_type": "sparkline", "data": [{"period": "<period>", "value": <value>}, ...], "x": "period", "y": "value", "protagonist": "<metric_name>", "title": "<metric_name> trend"}'
+```
+
+Upload the returned PNG bytes and insert via `gsuite drive_upload` + `gsuite docs_insert_inline_image`. Keep a short numeric delta only when it adds decision-useful context (for example, "+18% QoQ").
+
 Key Metrics source depends on `MEMO_TYPE`:
 
 **`equity_only` / `equity_token`** — use StandardMetrics:

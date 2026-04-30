@@ -33,6 +33,7 @@ function createMockThread(id: string) {
     async subscribe() {
       subscribed = true;
     },
+    async startTyping() {},
     async post(content) {
       postCount++;
       if ("markdown" in content) {

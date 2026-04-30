@@ -201,12 +201,19 @@ Use this skill when the user asks to "do the cool thing" or "run cool analysis."
 
 1. Gather the input from the user
 2. Call the websearch tool: `call websearch search '{"query": "..."}'`
-3. Summarize the findings in a table
-4. Post the result back
+3. If the result is a comparison or trend across ≥ 3 items, render a chart
+   image via `call chart render_chart` and upload via
+   `slack upload_file` with `alt_text`. If the user needs exact lookup values,
+   use a compact text/code-block table instead. See the `charting` skill for
+   the brief-first contract.
+4. Beneath the chart, summarize the top 1-2 findings in plain prose
 
 ## Output Format
 
-Always output a markdown table with columns: Name, Score, Link.
+If the data is comparative or has trends, output a chart image (PNG via
+`chart render_chart`). If it's ≤ 5 precise values or a single number, output a
+sentence or KPI tile. **Markdown tables of >2 rows render badly on Slack
+mobile — avoid unless the user explicitly wants a sortable table.**
 ```
 
 ### Skill rules
@@ -215,6 +222,10 @@ Always output a markdown table with columns: Name, Score, Link.
 - `description` should say what it does AND when to use it
 - Keep SKILL.md under 500 lines — split large content into `reference/` files
 - Reference scripts with execution intent: "Run `scripts/validate.py` to check..."
+- **Charts beat tables on Slack mobile.** When your skill compares > 2 items
+  or shows a trend, ship a PNG via `call chart render_chart` (the
+  charting skill handles the brief-first + verify loop). Reserve markdown
+  tables for exact-value lookups where the user has explicitly asked.
 
 ## Building a Workflow
 

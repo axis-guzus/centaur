@@ -24,12 +24,25 @@ class Input:
 
 BRIEF_PROMPT = """SPEED IS CRITICAL. Post to Slack within 3 minutes. Do NOT visit individual stock pages.
 
-STEP 1 - Do exactly 3 searches in parallel:
+STEP 1 - Do exactly 3 searches + 1 chart-data pull in parallel:
 a) "site:finance.yahoo.com top market news today"
 b) "BTC ETH SOL price funding rates ETF flows today"
 c) "MSTR COIN HOOD NVDA MARA stock price today"
+d) call coingecko get_market_chart for BTC, ETH, SOL (24h, vs USD) — needed for the indexed-line chart in step 2.
 
-STEP 2 - Write the brief. RULES:
+STEP 2 - Choose the lead format based on signal. The user reads the brief on Slack mobile.
+
+(2a) If BTC/ETH/SOL have meaningful divergence (>1% spread between leader and laggard) or a clear intraday story, post an indexed-line chart of BTC/ETH/SOL last 24h, rebased to 100 at session open, before the prose. Use the chart tool — it applies the shared Centaur chart theme + brand-aware colours:
+  call chart render_chart '{{"chart_type": "indexed_line", "data": [{{"date": "...", "BTC": 100, "ETH": 98, "SOL": 103}}, ...], "title": "<LEADER> led the majors over 24h", "x": "date", "y": ["BTC", "ETH", "SOL"], "protagonist": "<LEADER>"}}'
+  Then call slack upload_file with title="<LEADER> led the day +Xpts vs <LAGGARD>", alt_text describing the move.
+  If crypto is flat or data is stale, do NOT post this chart. Say "Crypto: range-bound, no material catalysts."
+
+(2b) If there are >=3 meaningful movers across crypto + equities, post a horizontal bar of % moves for the top 6 movers. Sorted descending. Use:
+  call chart render_chart '{{"chart_type": "top", "data": [{{"label": "<asset>", "value": <pct>}}, ...], "title": "Today's biggest movers", "x": "label", "y": "value"}}'
+  Then upload to Slack with alt_text.
+  If there are only 1-2 meaningful movers, skip the bar and use BIG MOVES bullets only.
+
+(2c) THEN write the prose brief. RULES:
 
 SIGNAL OVER COMPLETENESS:
 - Brief must be readable in 90 seconds, not 5 minutes
@@ -39,13 +52,11 @@ SIGNAL OVER COMPLETENESS:
 - Lead with biggest moves
 - NEVER include items just to fill space
 
-CITE SOURCES in [brackets] for every number. Flag stale data.
+CITE SOURCES in [brackets] for every number. Flag stale data. Use charts for comparisons and trends; use compact text/code-block tables only when exact values are the point.
 
 STRUCTURE:
 
 BIG MOVES - 3-5 bullets max. Only items that materially moved or have a clear driver. For each: asset, exact move with source, why it matters in one line.
-
-DASHBOARD - Compact table of ONLY assets that moved >1% or are doing something unusual. Skip flat assets entirely. Format: asset | level [source] | move | one-line read.
 
 CRYPTO - Only if real signal. Otherwise: "Crypto: range-bound, no material catalysts."
 
@@ -64,7 +75,7 @@ BOTTOM LINE (always include - exactly 3 lines):
 
 STYLE: Brutal selection. If in doubt, leave it out. Numbers and levels over adjectives. No throat-clearing.
 
-STEP 3 - Post to Slack channel "morning-brief" using the slack tool send_message method."""
+STEP 3 - Post to Slack channel "morning-brief" using the slack tool send_message method. The chart files from steps 2a/2b should already be in the same thread — write the prose as a follow-up message that references them ("Above: BTC led, ETH lagged. Read:")."""
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:

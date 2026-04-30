@@ -93,7 +93,7 @@ describe("Slack attachment re-fetch", () => {
       // NOTE: no `files` field!
     };
 
-    const attachments = parseEventAttachments(appMentionEvent);
+    const attachments = parseEventAttachments(appMentionEvent as { files?: Array<Record<string, unknown>> });
     expect(attachments).toEqual([]);
   });
 

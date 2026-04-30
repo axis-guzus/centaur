@@ -1,5 +1,6 @@
 import type { CanonicalEvent } from "@centaur/harness-events";
 import type { StreamChunk } from "@/lib/slack/types";
+import type { DashboardFileUpload } from "./dashboard-to-slack";
 
 /**
  * ProgressTracker — converts CanonicalEvents into Slack streaming chunks.
@@ -44,6 +45,7 @@ export class ProgressTracker {
     gitRef?: string;
     gitCommit?: string;
   } = {};
+  pendingFiles: DashboardFileUpload[] = [];
 
   private activeTools = new Map<string, ActiveTool>();
   private tasks = new Map<string, { title: string; status: TaskStatus }>();

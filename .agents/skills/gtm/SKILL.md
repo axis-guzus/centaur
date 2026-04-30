@@ -128,14 +128,22 @@ When the user says **"digest [topic]"**:
 
 Centaur has native tools for market data. Use them directly:
 
+**Charting rule (highest priority):** use the format that matches the job. If the user asks for a chart, comparison, trend, distribution, ranking, drawdown, or market overview, ship a PNG via `chart render_chart` and upload it with `alt_text`. If the user asks for a single current price or exact lookup, answer in text first and offer a chart only if trend/context would add value. If the user needs exact values across many rows, prefer a compact text/code-block table. Do not force charts where the task is really lookup, source citation, or precise tabulation.
+
 When the user says **"price of [token]"** or asks about a token price:
 1. Resolve the CoinGecko ID (e.g. "SOL" -> "solana", "BTC" -> "bitcoin", "ETH" -> "ethereum", "HYPE" -> "hyperliquid")
 2. Get current price:
 ```
 call coingecko get_price '{"ids": "<coingecko_id>", "vs_currencies": "usd", "include_market_cap": true, "include_24hr_vol": true, "include_24hr_change": true}'
 ```
-3. Format: symbol, price, 24h change, volume, market cap
-4. Offer to show a chart
+3. Format the answer in one line: symbol, price, 24h change, volume, market cap.
+4. Only add a chart when the user asks for one, when the 24h/7d move is material, or when you need to explain the move. Then get history and render:
+```
+call coingecko get_market_chart '{"coin_id": "<coingecko_id>", "vs_currency": "usd", "days": 30}'
+call chart render_chart '{"chart_type": "line", "data": <price_history_as_date_price_list>, "title": "<TOKEN> +X% over 30d, $Y", "x": "date", "y": "price", "protagonist": "<TOKEN>"}'
+call slack upload_file '{"channel": "<channel>", "content_base64": "<base64_png>", "filename": "<token>-30d.png", "title": "<TOKEN> price 30d", "alt_text": "<TOKEN> 30d price chart, currently $Y, X% change"}'
+```
+5. Beneath the chart, post one sentence with the key numbers (price, 24h change, market cap, volume).
 
 Common CoinGecko IDs: bitcoin, ethereum, solana, hyperliquid, cardano, polkadot, avalanche-2, chainlink, uniswap, aave, celestia, arbitrum, optimism, sui, sei-network
 
@@ -147,11 +155,16 @@ call websearch search '{"query": "<company> latest news 2026", "num_results": 5,
 2. Summarize the top results with sources and dates
 
 When the user says **"trending"** or asks about trending tokens:
-1. Get trending:
+1. Get trending tokens + their 24h price moves:
 ```
 call coingecko get_trending '{}'
 ```
-2. Show top 10 with name, symbol, rank, price, 24h change
+2. If CoinGecko returns usable 24h % moves, render a horizontal bar of the top 10 (sorted descending). If the response is mostly rank/name without comparable numeric moves, use a compact text list instead.
+```
+call chart render_chart '{"chart_type": "top", "data": [{"label": "<TOKEN>", "value": <24h_pct_change>}, ...], "title": "Top trending tokens by 24h move", "x": "label", "y": "value"}'
+call slack upload_file '{"channel": "<channel>", "content_base64": "<b64>", "filename": "trending-24h.png", "title": "Top trending tokens", "alt_text": "Horizontal bar chart of top 10 trending tokens by 24h % change"}'
+```
+3. Post one sentence beneath the chart/list calling out the top 1-2 movers and their context.
 
 When the user asks for a **chart** or says "chart [token]":
 1. Get price history from CoinGecko:
@@ -160,32 +173,37 @@ call coingecko get_market_chart '{"coin_id": "<coingecko_id>", "vs_currency": "u
 ```
 2. Generate chart using the chart tool (returns base64 PNG):
 ```
-call chart line_chart '{"data": <price_history_as_date_price_list>, "title": "<TOKEN> 30d"}'
+call chart render_chart '{"chart_type": "line", "data": <price_history_as_date_price_list>, "title": "<TOKEN> +X% over 30d, $Y", "x": "date", "y": "price", "protagonist": "<TOKEN>"}'
 ```
 3. Upload the chart image to Slack:
 ```
-call slack upload_file '{"channel": "<channel>", "content_base64": "<base64_png_from_chart>", "filename": "<TOKEN>-30d.png", "title": "<TOKEN> 30d price chart"}'
+call slack upload_file '{"channel": "<channel>", "content_base64": "<base64_png>", "filename": "<TOKEN>-30d.png", "title": "<TOKEN> 30d price chart", "alt_text": "<TOKEN> 30d price line chart, X% change, currently $Y"}'
 ```
 4. Support timeframes: 1d, 7d, 30d, 90d, 365d
-5. For candlestick charts, use `call coingecko get_market_chart` with the same params, then group the price points into daily buckets to derive open/high/low/close per day. Pass the resulting [{date, open, high, low, close}, ...] list to `call chart candlestick_chart`, then upload via `slack upload_file`.
+5. For candlestick charts, use `call coingecko get_market_chart` with the same params, then group the price points into daily buckets to derive open/high/low/close per day. Pass the resulting [{date, open, high, low, close}, ...] list to `call chart render_chart` with `chart_type="candlestick"`, then upload via `slack upload_file`.
 
 When the user asks to **compare** tokens (e.g. "ETH vs SOL"):
-1. Get price history for both tokens via coingecko get_market_chart
-2. Generate comparison chart (returns base64 PNG):
+1. Get price history for both tokens via coingecko get_market_chart (linear scale, NEVER dual-axis)
+2. Generate an indexed comparison chart (rebased to 100 at start; returns base64 PNG):
 ```
-call chart comparison_chart '{"series1": <data1>, "series2": <data2>, "label1": "ETH", "label2": "SOL"}'
+call chart render_chart '{"chart_type": "indexed_line", "data": [{"date": "<date>", "ETH": <price>, "SOL": <price>}, ...], "title": "ETH led SOL by Xpts over 30d", "x": "date", "y": ["ETH", "SOL"], "protagonist": "ETH"}'
 ```
-3. Upload the chart image to Slack:
+3. Upload the chart image to Slack with a sentence-case title that names the leader and gap:
 ```
-call slack upload_file '{"channel": "<channel>", "content_base64": "<base64_png_from_chart>", "filename": "ETH-vs-SOL.png", "title": "ETH vs SOL comparison"}'
+call slack upload_file '{"channel": "<channel>", "content_base64": "<base64_png>", "filename": "eth-vs-sol.png", "title": "ETH led SOL by Xpts over 30d", "alt_text": "Indexed line chart, ETH vs SOL rebased to 100, ETH leads by Xpts"}'
 ```
 
 When the user says **"market"** or asks about market overview:
-1. Get prices for all major tokens in one call:
+1. Get prices + 30d history for all major tokens:
 ```
 call coingecko get_price '{"ids": "bitcoin,ethereum,solana,hyperliquid", "vs_currencies": "usd", "include_market_cap": true, "include_24hr_change": true}'
+call coingecko get_market_chart '{"coin_id": "<each>", "vs_currency": "usd", "days": 30}'
 ```
-2. Show BTC, ETH, SOL, HYPE prices + dominance + total market cap
+2. If the ask is broad ("market", "what moved", "overview"), render an indexed multi-line chart (rebased to 100) for the four tokens. If the ask is exact lookup ("prices of BTC/ETH/SOL/HYPE right now"), use a compact text/code-block table instead.
+```
+call chart render_chart '{"chart_type": "indexed_line", "data": [{"date": "<date>", "BTC": <price>, "ETH": <price>, "SOL": <price>, "HYPE": <price>}, ...], "title": "<LEADER> led the market over 30d", "x": "date", "y": ["BTC", "ETH", "SOL", "HYPE"], "protagonist": "<LEADER>"}'
+```
+3. Beneath the chart, post one line per token: name, current price, 24h change. Cite total market cap once.
 
 For DEX-specific data, wallet analysis, or Dune SQL queries, use the mpp tool:
 ```

@@ -4,7 +4,7 @@ import { WebClient } from "@slack/web-api";
 import { NextRequest, NextResponse } from "next/server";
 
 import { log } from "@/lib/logger";
-import { SlackBot, type BotAttachment, type BotMessage, type BotThread, type SlackAdapter } from "@/lib/bot/bot";
+import { SlackBot, type BotAttachment, type BotMessage, type BotThread, type PostPayload, type SlackAdapter } from "@/lib/bot/bot";
 import {
   markdownToPlainText,
   renderMarkdownForSlack,
@@ -184,18 +184,31 @@ class WebClientSlackAdapter implements SlackAdapter {
     };
   }
 
-  async postMessage(threadId: string, message: { markdown: string }): Promise<{ id: string }> {
+  async postMessage(threadId: string, message: PostPayload): Promise<{ id: string }> {
     const { channel, threadTs } = splitSlackThreadId(threadId);
     const rendered = renderMarkdownForSlack(message.markdown);
-    const response = await this.call<{ ts?: string }>("chat.postMessage", {
-      channel,
-      thread_ts: threadTs,
-      text: rendered.text || STREAM_BOOTSTRAP_TEXT,
-      ...(rendered.blocks ? { blocks: rendered.blocks } : {}),
-      unfurl_links: false,
-      unfurl_media: false,
-    });
-    return { id: String(response.ts || "") };
+    let ts = "";
+    if (message.markdown.trim() || !message.files?.length) {
+      const response = await this.call<{ ts?: string }>("chat.postMessage", {
+        channel,
+        thread_ts: threadTs,
+        text: rendered.text || STREAM_BOOTSTRAP_TEXT,
+        ...(rendered.blocks ? { blocks: rendered.blocks } : {}),
+        unfurl_links: false,
+        unfurl_media: false,
+      });
+      ts = String(response.ts || "");
+    }
+    for (const file of message.files || []) {
+      await this.client.filesUploadV2({
+        channel_id: channel,
+        thread_ts: threadTs,
+        filename: file.filename,
+        title: file.filename,
+        file: Buffer.from(file.data),
+      });
+    }
+    return { id: ts || threadTs };
   }
 
   async updateMessage(threadId: string, messageId: string, message: { markdown: string }): Promise<void> {
@@ -631,7 +644,7 @@ export class BoltSlackApp {
         }
       },
       post: async (
-        content: AsyncGenerator<StreamChunk> | { markdown: string },
+        content: AsyncGenerator<StreamChunk> | PostPayload,
         options?: { taskDisplayMode?: "timeline" | "plan" },
       ) => {
         if ("markdown" in content) {
