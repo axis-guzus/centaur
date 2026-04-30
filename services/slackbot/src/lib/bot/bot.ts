@@ -313,6 +313,7 @@ export interface BotThread {
   id: string;
   subscribe(): Promise<void>;
   startTyping(status?: string): Promise<void>;
+  stopTyping?(): Promise<void>;
   post(content: AsyncGenerator<StreamChunk> | { markdown: string }, options?: { taskDisplayMode?: "timeline" | "plan" }): Promise<{ id: string; edit(content: { markdown: string }): Promise<void> }>;
 }
 
@@ -445,7 +446,7 @@ export class SlackBot {
     await this.backfillThreadHistory(thread.id, promptSelector);
 
     const parts = await this.toParts(agentText, attachments);
-    await this.bufferAndExecute(thread, agentText, parts, {
+    await this.bufferAndExecuteSafely(thread, agentText, parts, {
       messageId: stableSlackMessageId(msg),
       userId: msg.author.userId,
       teamId: slackTeamId(msg),
@@ -471,7 +472,7 @@ export class SlackBot {
       const parts = await this.toParts(agentText || "Shared attachment in thread.", attachments);
       log.info("mention_received", { thread_key: normalizeThreadKey(thread.id), user_id: msg.author.userId, is_new_thread: false });
       thread.startTyping().catch(() => {});
-      await this.bufferAndExecute(thread, agentText, parts, {
+      await this.bufferAndExecuteSafely(thread, agentText, parts, {
         messageId: stableSlackMessageId(msg),
         userId: msg.author.userId,
         teamId: slackTeamId(msg),
@@ -504,6 +505,26 @@ export class SlackBot {
   }
 
   // ── Core ────────────────────────────────────────────────────────────────
+
+  private async bufferAndExecuteSafely(
+    thread: BotThread,
+    text: string,
+    parts: InputContentBlock[],
+    delivery: DeliveryContext,
+    promptSelectorOverride?: string,
+  ) {
+    try {
+      await this.bufferAndExecute(thread, text, parts, delivery, promptSelectorOverride);
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      log.error("execute_start_failed", {
+        thread_key: normalizeThreadKey(thread.id),
+        error,
+      });
+      await thread.stopTyping?.();
+      await thread.post({ markdown: "Agent request failed before execution started. Please retry." });
+    }
+  }
 
   private async bufferAndExecute(
     thread: BotThread,

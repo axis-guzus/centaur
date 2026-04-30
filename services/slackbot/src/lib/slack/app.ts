@@ -268,6 +268,16 @@ class WebClientSlackAdapter implements SlackAdapter {
     });
   }
 
+  async stopTyping(threadId: string): Promise<void> {
+    const { channel, threadTs } = splitSlackThreadId(threadId);
+    await this.call("assistant.threads.setStatus", {
+      channel_id: channel,
+      thread_ts: threadTs,
+      status: "",
+      loading_messages: [],
+    });
+  }
+
   async getInstallation(): Promise<{ botToken: string } | null> {
     return { botToken: this.botToken };
   }
@@ -384,6 +394,8 @@ export class BoltSlackApp {
 
   private readonly seenEvents = new Map<string, number>();
 
+  private readonly seenMessages = new Map<string, number>();
+
   private ready: Promise<void> | null = null;
 
   constructor(
@@ -495,16 +507,18 @@ export class BoltSlackApp {
   ): Promise<void> {
     if (event.type !== "message" && event.type !== "app_mention") return;
     if (isIgnoredMessageSubtype(event.subtype)) return;
+    if (event.bot_id || event.user === this.adapter.getBotUserId()) return;
 
-    const isSubscribed = await this.isSubscribedThread(threadId);
     const isPolicyTouchpoint = Boolean(event.channel === POLICY_TOUCHPOINT_CHANNEL_ID && POLICY_TOUCHPOINT_PATTERN.test(event.text || ""));
     const isDirectMessage = event.channel_type === "im";
     const isMention = event.type === "app_mention"
       || isPolicyTouchpoint
       || isDirectMessage
       || this.messageMentionsBot(event.text || "");
+    const isSubscribed = await this.isSubscribedThread(threadId);
 
     if (!isSubscribed && !isMention) return;
+    if (this.seenMessageRecently(threadId, event)) return;
 
     const thread = this.createThread(threadId, {
       recipientUserId: event.user,
@@ -535,6 +549,16 @@ export class BoltSlackApp {
           await this.adapter.startTyping(threadId, status);
         } catch (error) {
           log.warn("slack_start_typing_failed", {
+            thread_id: threadId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      },
+      stopTyping: async () => {
+        try {
+          await this.adapter.stopTyping(threadId);
+        } catch (error) {
+          log.warn("slack_stop_typing_failed", {
             thread_id: threadId,
             error: error instanceof Error ? error.message : String(error),
           });
@@ -614,6 +638,23 @@ export class BoltSlackApp {
     const expiresAt = this.seenEvents.get(eventId);
     if (expiresAt && expiresAt > now) return true;
     this.seenEvents.set(eventId, now + SEEN_EVENT_TTL_MS);
+    return false;
+  }
+
+  private seenMessageRecently(threadId: string, event: SlackMessageEvent): boolean {
+    if (!event.ts) return false;
+    const key = `${threadId}:${event.ts}`;
+    const now = Date.now();
+    for (const [seenKey, expiresAt] of this.seenMessages) {
+      if (expiresAt <= now) this.seenMessages.delete(seenKey);
+    }
+
+    const expiresAt = this.seenMessages.get(key);
+    if (expiresAt && expiresAt > now) {
+      log.info("slack_duplicate_message_skipped", { thread_id: threadId, message_ts: event.ts });
+      return true;
+    }
+    this.seenMessages.set(key, now + SEEN_EVENT_TTL_MS);
     return false;
   }
 }
