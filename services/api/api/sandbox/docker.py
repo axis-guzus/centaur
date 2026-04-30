@@ -103,6 +103,10 @@ _HARNESS_STUB_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AMP_API_KEY", "GIT
 _AGENT_USER = "1001:1001"
 
 
+def _amp_mode() -> str:
+    return (os.getenv("AMP_MODE") or "deep").strip() or "deep"
+
+
 def _build_harness_cmd(engine: str, model: str | None = None) -> list[str]:
     """Build the container CMD for a given harness engine."""
     if engine == "amp":
@@ -136,7 +140,7 @@ def _container_env(
         f"CENTAUR_API_URL={api_url}",
         f"CENTAUR_API_KEY={api_key}",
         f"CENTAUR_THREAD_KEY={thread_key}",
-        "AMP_MODE=deep",
+        f"AMP_MODE={_amp_mode()}",
     ]
     if resume_thread_id:
         env.append(f"AMP_CONTINUE_THREAD_ID={resume_thread_id}")

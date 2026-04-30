@@ -372,6 +372,21 @@ class TestBuildHarnessCmd:
         cmd = _build_harness_cmd("pi-mono")
         assert cmd == ["sleep", "infinity"]
 
+    def test_container_env_honors_amp_mode_override(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from api.sandbox.docker import _container_env
+
+        monkeypatch.delenv("AGENT_LOCAL_DEV", raising=False)
+        monkeypatch.setenv("AGENT_API_URL", "http://api.internal:8000")
+        monkeypatch.setenv("FIREWALL_HOST", "firewall.internal")
+        monkeypatch.setenv("AMP_MODE", "smart")
+
+        env = _container_env("thread-key", "sandbox-id")
+
+        assert "AMP_MODE=smart" in env
+
 
 class TestSpawnAndMessageAlias:
     @pytest.mark.asyncio
