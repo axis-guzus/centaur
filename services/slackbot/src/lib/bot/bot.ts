@@ -267,9 +267,15 @@ function executionIdFromError(err: unknown): string {
   return typeof executionId === "string" ? executionId : "";
 }
 
+function conflictCode(err: unknown): string | undefined {
+  const resp = (err as { response?: { status?: number; data?: { code?: string; detail?: { code?: string } } } })?.response;
+  if (resp?.status !== 409) return undefined;
+  return resp?.data?.code ?? resp?.data?.detail?.code ?? "UNKNOWN_409";
+}
+
 function isIdempotencyMismatch(err: unknown): boolean {
-  const resp = (err as { response?: { status?: number; data?: { code?: string } } })?.response;
-  return resp?.status === 409 || resp?.data?.code === "IDEMPOTENCY_PAYLOAD_MISMATCH";
+  const code = conflictCode(err);
+  return code === "IDEMPOTENCY_PAYLOAD_MISMATCH";
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -525,10 +531,12 @@ export class SlackBot {
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       const executionId = executionIdFromError(err);
+      const code = conflictCode(err);
       log.error("execute_start_failed", {
         thread_key: normalizeThreadKey(thread.id),
         error,
         execution_id: executionId || undefined,
+        conflict_code: code,
       });
       await thread.stopTyping?.();
 

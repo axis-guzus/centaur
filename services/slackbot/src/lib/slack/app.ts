@@ -15,7 +15,10 @@ import { classifySlackError, SlackApiCallError } from "./errors";
 import type { StreamChunk } from "./types";
 
 const PENDING_SUBSCRIPTION_TTL_MS = 2 * 60_000;
-const SEEN_EVENT_TTL_MS = 10 * 60_000;
+// Must exceed the execution hard timeout (default 60 min) to prevent
+// duplicate Slack events (app_mention + message) from being re-processed
+// when the first event's handler runs longer than the dedup window.
+const SEEN_EVENT_TTL_MS = 65 * 60_000;
 const DISPATCH_RETRY_DELAYS_MS = [500, 1500];
 const STREAM_BOOTSTRAP_TEXT = "\u200b";
 const POLICY_TOUCHPOINT_CHANNEL_ID = "C0AM0TR8N91";
