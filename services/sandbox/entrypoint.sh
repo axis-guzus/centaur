@@ -8,7 +8,8 @@ FIREWALL_HOSTNAME="${FIREWALL_HOST:-firewall}"
 cat > "$HOME_DIR/.config/amp/settings.json" <<EOF
 {
   "amp.experimental.compaction": 95,
-  "amp.proxy": "http://${FIREWALL_HOSTNAME}:8080"
+  "amp.proxy": "http://${FIREWALL_HOSTNAME}:8080",
+  "amp.git.commit.coauthor.enabled": false
 }
 EOF
 
