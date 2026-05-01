@@ -34,6 +34,55 @@ Inside code blocks:
 
 If you catch yourself typing ** or ## or | pipes |, STOP and rewrite.
 
+## Follow-Up Corrections And Deliverables
+
+Treat an explicit complaint about formatting, readability, structure, or
+completeness as a hard correction signal. Do not defend the first draft or keep
+using the default TLDR layout just because it is the default.
+
+Do not trigger correction mode on generic mentions of format, structure, or
+layout when the user is just asking for information. The user must be clearly
+criticizing the current output or asking for a rerender, rewrite, or alternate
+presentation.
+
+Examples that should trigger correction mode:
+- "formatting is sub-par"
+- "this is hard to read"
+- "do it like the other thread"
+- "rerender this as a cleaner memo"
+- "also make a cleaner memo version"
+
+When correction mode is triggered:
+- Stop using the monolithic default TLDR template for the next turn.
+- If the user supplied an Amp thread URL or thread ID as a reference, call
+  `read_thread` and extract only the reusable output structure, formatting
+  choices, and ordering. Do not copy facts, names, quotes, conclusions, or any
+  other content from the reference thread into the current brief — the
+  reference thread is for layout shape only, never for substance.
+- If no reference thread is available, rerender in the simplest structure that
+  addresses the complaint: fewer sections, tighter grouping, clearer labels, and
+  only the content the user is asking to see now.
+- Deliver the corrected artifact first. Do not spend the turn explaining why the
+  first format existed.
+
+Track requested outputs as explicit deliverables for the whole task, not just
+for the current reply. If the user asks for a second briefing artifact after
+the brief already exists (for example a memo variant, alternate template, or
+companion summary), add it to the deliverables list immediately and treat it
+as required work. This skill is for company-brief artifacts only — if the user
+asks for unrelated engineering work like a separate PR or code diff, that is
+outside this skill's scope; either hand off or say so.
+
+Before ending any turn after a correction or follow-up request, run this
+completion check:
+- Have I delivered the corrected brief in the requested structure?
+- Have I completed every separately requested artifact?
+- If something is still pending, did I say that plainly instead of implying it
+  was done?
+
+Never say or imply that a separate requested artifact is complete when it is
+still outstanding.
+
 ## Input Handling
 
 The user will provide ONE of:
@@ -265,6 +314,11 @@ Start with a 1-line plain text summary, then present the full briefing inside a 
 
 Do NOT include inline source citations like [S1][S3] anywhere in the body.
 
+On a correction turn, the referenced thread structure or the user's requested
+structure overrides the default TLDR template below. The default template is for
+first-pass delivery, not for stubbornly reusing after the user asks for a better
+format.
+
 ### Template for NON-PORTFOLIO companies:
 
 ```
@@ -431,6 +485,9 @@ SOURCES
 - SOURCES: max 3 entries. Deduplicate by domain — if you used tempo.xyz/blog/mainnet and tempo.xyz/blog/enterprise, just list "tempo.xyz" once. Pick the 3 domains/publications that contributed the most to the brief.
 - Company name in the TLDR header should be ALL CAPS
 - If the company is clearly not crypto-related, omit Token/On-chain rows and adjust Portfolio Connections to focus on infrastructure/AI overlap
+- On correction turns, optimize for the user's requested structure over visual
+  consistency with the first draft. A cleaner rerender beats a faithful rerun of
+  the old layout.
 
 ## Error Handling
 
@@ -444,3 +501,6 @@ SOURCES
 - If SensorTower returns no apps, note "No mobile app found" in Traction
 - If Shift notes, Granola, and Slack all return no results, show "First touch — no prior Paradigm context"
 - Never say "I couldn't find information" without trying at least 3 different search queries
+- If the user adds a second deliverable after the first brief, do not stop after
+  the rerender. Finish both deliverables or explicitly say which one remains and
+  why.
