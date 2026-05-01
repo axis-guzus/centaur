@@ -574,6 +574,14 @@ let answers = {}
 let notes = {}   // freewrite notes keyed by question id
 let currentQ = 0
 
+const APP_BASE_PATH = window.location.pathname.startsWith('/apps/venue-scout')
+  ? '/apps/venue-scout'
+  : ''
+
+function appApiPath(path) {
+  return `${APP_BASE_PATH}${path}`
+}
+
 const QUESTIONS = [
   {
     id: 'event_type',
@@ -959,7 +967,7 @@ async function runScout() {
   const brief = buildBrief()
 
   try {
-    const res = await fetch('/api/scout', {
+    const res = await fetch(appApiPath('/api/scout'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
