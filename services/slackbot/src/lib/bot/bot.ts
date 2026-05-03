@@ -312,6 +312,18 @@ function slackLink(url: string, label: string): string {
   return `<${url}|${label}>`;
 }
 
+function buildResponseFooter(
+  ampThreadId: string | undefined,
+  commitSha: string | undefined,
+): string {
+  const parts: string[] = [];
+  if (ampThreadId) {
+    parts.push(slackLink(`https://ampcode.com/threads/${ampThreadId}`, "View in Amp"));
+  }
+  if (commitSha) parts.push(`\`${commitSha.slice(0, 8)}\``);
+  return parts.length ? `\n\n${parts.join(" · ")}` : "";
+}
+
 type SlackBlocks = Extract<StreamChunk, { type: "blocks" }>["blocks"];
 
 function splitSlackBlocks(blocks: SlackBlocks): SlackBlocks[] {
@@ -920,7 +932,7 @@ export class SlackBot {
       const harness = tracker.agentThreadId
         ? slackLink(`https://ampcode.com/threads/${tracker.agentThreadId}`, "agent")
         : "agent";
-      const suffix = this.viewerUrl ? `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})` : "";
+      const suffix = buildResponseFooter(tracker.agentThreadId, tracker.repoContext?.gitCommit);
       const fullMd = `${finalText}${suffix}`;
       yield {
         type: "blocks",
@@ -1330,10 +1342,9 @@ export class SlackBot {
       resultText,
       errorText,
     }), { renderChart: this.chartRenderer });
-    const rendered = rewriteSlackFileLinks(converted.markdown, normalizeRepoContext(finalPayload.repo_context));
-    const viewerSuffix = this.viewerUrl
-      ? `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})`
-      : "";
+    const repoCtx = normalizeRepoContext(finalPayload.repo_context);
+    const rendered = rewriteSlackFileLinks(converted.markdown, repoCtx);
+    const viewerSuffix = buildResponseFooter(finalPayload.agent_thread_id as string | undefined, repoCtx.gitCommit);
 
     if (rendered) {
       return { markdown: `${rendered}${viewerSuffix}`, files: converted.files };
@@ -1357,9 +1368,7 @@ export class SlackBot {
       repoContext,
     );
     if (!rendered) return "";
-    const viewerSuffix = this.viewerUrl
-      ? `\n\n[Thread Viewer](${this.viewerUrl}/${encodeURIComponent(threadKey)})`
-      : "";
+    const viewerSuffix = buildResponseFooter(undefined, repoContext?.gitCommit);
     return `${rendered}${viewerSuffix}`;
   }
 
