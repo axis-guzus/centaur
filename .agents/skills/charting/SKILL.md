@@ -1,6 +1,6 @@
 ---
 name: charting
-description: "Chart generation for Centaur. Use when the user asks for a chart, graph, plot, dashboard, sparkline, candlestick, comparison, distribution, ranking, correlation, drawdown, or any data visualization that should be rendered as an image. The skill picks the right chart type, calls the chart.render_chart tool, uploads the returned PNG via slack upload_file, and verifies the result. Triggers on: chart, plot, graph, visualize, draw, render, sparkline, candle, dashboard, comparison, distribution, ranking, correlation, drawdown, treemap. Do not use for simple exact lookups or small tables where text is clearer."
+description: "Chart generation for Centaur. Use when the user asks for a chart, graph, plot, dashboard, sparkline, candlestick, comparison, distribution, ranking, correlation, drawdown, or any data visualization that should be rendered as an image. The skill picks the right chart type, calls the chart.render_chart tool, visually reviews the rendered PNG, uploads only the final accepted PNG once via slack upload_file, and verifies the result. Triggers on: chart, plot, graph, visualize, draw, render, sparkline, candle, dashboard, comparison, distribution, ranking, correlation, drawdown, treemap. Do not use for simple exact lookups or small tables where text is clearer."
 ---
 
 # Charting
@@ -112,13 +112,7 @@ Render through the chart tool:
 call chart render_chart '{"chart_type": "indexed_line", "data": [{"date": "2026-04-01", "BTC": 100, "ETH": 100}, {"date": "2026-04-30", "BTC": 112, "ETH": 130}], "title": "ETH outperformed BTC over 30d", "subtitle": "Indexed price, 1 Apr 2026 = 100", "source": "CoinGecko · 30 Apr 2026", "x": "date", "y": ["BTC", "ETH"], "protagonist": "ETH"}'
 ```
 
-The result is a base64 PNG string.
-
-Then upload via the slack tool:
-
-```bash
-call slack upload_file '{"channel": "<CHANNEL>", "content_base64": "<base64_png_from_chart>", "filename": "chart.png", "title": "<takeaway_title>", "alt_text": "<plain English chart description>", "thread_ts": "<THREAD_TS>"}'
-```
+The result is a base64 PNG string. Do not upload it yet. First run the Phase 5 visual quality review, re-render if needed, and accept one final PNG. Only the final accepted PNG is uploaded, and it is uploaded once.
 
 **Always pass `alt_text`** so screen-readers and Slack search can index the chart. The router gives you a sensible default; override for accessibility-critical contexts.
 
@@ -126,7 +120,7 @@ The Centaur visual signature is applied automatically by the router (light edito
 
 ### Phase 5 — Verify
 
-After every render, walk this checklist before delivering. **Hard cap: 3 visual rounds.** If issues remain after round 3, hand to the user — don't iterate further.
+After every render, walk this checklist before delivering. **Hard cap: 3 visual rounds.** If issues remain after round 3, accept the best PNG and disclose the remaining issues in plain prose alongside the chart. Delivery failures are different: after the final accepted PNG has one failed upload attempt or one failed permalink verification, exit the image path and ship the degraded response immediately.
 
 #### Code compliance scan (before running)
 
@@ -134,11 +128,11 @@ After every render, walk this checklist before delivering. **Hard cap: 3 visual 
 2. Data comes from a tool call. **Never hardcode values.**
 3. The `title` is a **sentence** with a verb, not a noun phrase.
 4. The `source` is set when known.
-5. The returned base64 PNG is uploaded via `slack upload_file` with `alt_text`.
+5. The returned base64 PNG is held for visual review before any Slack upload attempt.
 
 #### Visual quality review (read the rendered PNG)
 
-Use the harness's image-reading capability to look at the PNG. Then walk these in order — **enumerate before evaluating**.
+Use the harness's image-reading capability to look at the PNG before uploading it. Then walk these in order — **enumerate before evaluating**.
 
 1. **Enumerate visible elements**: title text, subtitle, axis labels, legend entries (if any), data encoding (line / bar / scatter), annotations, source line. Note anything expected but absent.
 2. **Semantic fidelity** — does the chart show what the user asked for? If you asked for "ETH vs BTC", are both there?
@@ -158,7 +152,22 @@ Use the harness's image-reading capability to look at the PNG. Then walk these i
 7. **Mobile readability** — would tick text remain legible if the PNG were downsampled to 360 px wide?
 8. **Name one improvement** — even if minor. Then decide whether to apply it now or note it for the user.
 
-If round 1 surfaces issues, fix and re-render (round 2). One more pass max (round 3). After that, ship and disclose remaining issues in plain prose alongside the chart.
+If round 1 surfaces issues, fix and re-render (round 2). One more pass max (round 3). After that, accept the best PNG and disclose remaining issues in plain prose alongside the chart. Do not upload any earlier rejected render.
+
+#### Final delivery gate (after visual review)
+
+Upload only the final accepted PNG via the slack tool:
+
+```bash
+call slack upload_file '{"channel": "<CHANNEL>", "content_base64": "<base64_png_from_final_accepted_chart>", "filename": "chart.png", "title": "<takeaway_title>", "alt_text": "<plain English chart description>", "thread_ts": "<THREAD_TS>"}'
+```
+
+1. Attempt `slack upload_file` once, after visual review is complete, and verify the returned permalink once.
+2. If the upload call fails, stop the PNG path immediately. Do not retry uploads in the same turn. Lead the fallback reply with: "The PNG upload failed, so this is a partial text fallback." Include the specific upload cause if the tool returned one.
+3. If the upload call succeeds but permalink verification cannot confirm the artifact, stop the PNG path immediately. Do not retry uploads in the same turn. Lead the fallback reply with: "The PNG upload could not be verified in Slack, so this is a partial text fallback."
+4. Then provide the numeric takeaway and a compact source-data table or bullet list so the user still gets the answer.
+5. If the final upload and permalink verification both succeeded, deliver the reply with the attached chart and no partial-fallback wording.
+6. Explicitly avoid phrasing that implies the PNG artifact was delivered unless the final upload and permalink verification both succeeded.
 
 ## Non-negotiables (the Centaur visual signature)
 
