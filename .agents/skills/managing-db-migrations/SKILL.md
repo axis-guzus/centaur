@@ -23,7 +23,7 @@ Manage Centaur database migrations through `./scripts/dbmate`, the core `service
 3. For a new migration, run `./scripts/dbmate new <short_name>` for core work or `./scripts/dbmate --set overlay new <short_name>` for overlay work.
 4. Before writing SQL for follow-up overlay work, compare the planned tables, columns, indexes, and naming against the previously established schema surface. Call out any intentional divergence before coding instead of silently drifting to a new shape.
 5. Edit the generated SQL file and keep both `-- migrate:up` and `-- migrate:down` sections.
-6. For runtime checks, prefer `./scripts/dbmate status`, `./scripts/dbmate up`, or `./scripts/dbmate rollback` instead of invoking `dbmate` directly. Use `--set overlay` with these commands only when the user wants to inspect or apply the overlay migration set in isolation; otherwise the wrapper runs every available migration set for commands such as `status` and `up`.
+6. For runtime checks, prefer `./scripts/dbmate status`, `./scripts/dbmate up`, or `./scripts/dbmate rollback` instead of invoking `dbmate` directly. Use `--set overlay` when the user wants to inspect or apply the overlay migration set in isolation. Without `--set`, commands such as `status` and `up` run every available migration set, while `rollback` targets the core set.
 7. If the change affects runtime behavior, run the highest-value local verification the environment supports and report any blocked checks clearly.
 
 ## Rules
@@ -43,7 +43,8 @@ Manage Centaur database migrations through `./scripts/dbmate`, the core `service
 - `./scripts/dbmate new add_agent_leases` creates the next numbered file in `services/api/db/migrations`.
 - `./scripts/dbmate --set overlay new add_crm_tables` creates the next numbered overlay migration file when the overlay migration directory exists.
 - `./scripts/dbmate status` runs `dbmate` inside the `api` container.
-- Commands such as `status`, `up`, and `rollback` run all available migration sets by default; pass `--set core` or `--set overlay` to operate on one set only.
+- Commands such as `status` and `up` run all available migration sets by default; pass `--set core` or `--set overlay` to operate on one set only.
+- `./scripts/dbmate rollback` targets the core migration set by default; use `./scripts/dbmate --set overlay rollback` only when intentionally rolling back overlay migrations.
 - If `DATABASE_URL` is not set in the host shell, the wrapper reads it from the running `api` container.
 - The repo mounts `services/api/db` into `/app/db`, so new migration files are visible to the `api` container without rebuilding the image.
 
@@ -56,6 +57,7 @@ Manage Centaur database migrations through `./scripts/dbmate`, the core `service
 ./scripts/dbmate --set overlay status
 ./scripts/dbmate up
 ./scripts/dbmate rollback
+./scripts/dbmate --set overlay rollback
 ```
 
 ## If Docker Is Unavailable
