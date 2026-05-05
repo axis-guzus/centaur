@@ -7,7 +7,12 @@
 #   ./integration-slackbot.sh                          # defaults: slackbot at localhost:3001
 #   SLACKBOT_URL=http://slackbot:3001 ./integration-slackbot.sh  # inside docker network
 #   SMOKE_CHART_UPLOAD=1 ./integration-slackbot.sh      # opt into live LLM/tool chart smoke
-#   SMOKE_GENERATED_MEDIA_UPLOAD=1 ./integration-slackbot.sh  # opt into sandbox-local media upload smoke
+#   SMOKE_GENERATED_MEDIA_UPLOAD=1 ./integration-slackbot.sh  # opt into live generated MP4 smoke
+#
+# Live upload smokes are skipped by default. They require live Slack credentials,
+# a bot-accessible Slack channel, and a local stack that can run sandbox turns.
+# The generated-media smoke additionally needs a freshly built sandbox image with
+# ffmpeg and the slack-upload helper installed.
 #
 # Requires:  SLACK_SIGNING_SECRET in env (or sourced from .env).
 #            A bot-accessible Slack channel for live smoke replies.
@@ -28,7 +33,7 @@ SMOKE_POLL_ATTEMPTS="${SMOKE_POLL_ATTEMPTS:-30}"
 SMOKE_POLL_SLEEP_SECONDS="${SMOKE_POLL_SLEEP_SECONDS:-2}"
 EVENT_STREAM_TIMEOUT_SECONDS="${EVENT_STREAM_TIMEOUT_SECONDS:-120}"
 SMOKE_CHART_UPLOAD="${SMOKE_CHART_UPLOAD:-0}"
-SMOKE_GENERATED_MEDIA_UPLOAD="${SMOKE_GENERATED_MEDIA_UPLOAD:-${SMOKE_CHART_UPLOAD}}"
+SMOKE_GENERATED_MEDIA_UPLOAD="${SMOKE_GENERATED_MEDIA_UPLOAD:-0}"
 
 # ── Load .env values when present ────────────────────────────────────────────
 
@@ -373,8 +378,41 @@ capture_execution_events() {
   fi
 }
 
-assert_execution_upload_succeeded() {
+sse_data_json() {
+  local events_file="$1"
+  jq -Rrc '
+    select(startswith("data:"))
+    | sub("^data:[[:space:]]*"; "")
+    | fromjson?
+    | select(type == "object")
+  ' "$events_file"
+}
+
+execution_terminal_text() {
+  local events_file="$1"
+  sse_data_json "$events_file" | jq -s -r '
+    [
+      .[]
+      | if .type == "turn.done" then
+          (.result?, .error?)
+        elif .type == "execution.state" then
+          (.result_text?, .error_text?)
+        elif .type == "result" then
+          (.result?, .text?)
+        elif .type == "assistant" and (.message.content? | type) == "array" then
+          (.message.content[]? | select(.type == "text") | .text?)
+        else
+          empty
+        end
+      | strings
+    ]
+    | join("\n")
+  '
+}
+
+assert_execution_upload_stream() {
   local thread_key="$1"
+  local require_permalink="${2:-1}"
 
   local execution_id
   execution_id=$(wait_for_execution_id "$thread_key") || return 1
@@ -387,22 +425,37 @@ assert_execution_upload_succeeded() {
     return 1
   }
 
-  if grep -Fq 'HTTP Error 401: Unauthorized' "$events_file"; then
-    echo "    execution stream recorded a 401 Unauthorized during slack.upload_file"
+  local auth_error
+  auth_error=$(sse_data_json "$events_file" | jq -s -r '
+    [
+      .[]
+      | .. | strings
+      | select(test("HTTP Error 401: Unauthorized|Unauthorized Check your access token\\."; "i"))
+    ][0] // empty
+  ')
+  if [[ -n "$auth_error" ]]; then
+    echo "    execution stream recorded an auth error during slack.upload_file: ${auth_error}"
     rm -f "$events_file"
     return 1
   fi
 
-  if grep -Fq 'file:///' "$events_file"; then
-    echo "    execution stream fell back to file:/// output instead of a Slack upload"
+  local terminal_text
+  terminal_text=$(execution_terminal_text "$events_file")
+  if jq -en --arg text "$terminal_text" '$text | test("file:///")' >/dev/null; then
+    echo "    terminal assistant output fell back to file:/// output instead of a Slack upload"
     rm -f "$events_file"
     return 1
   fi
 
-  if ! grep -Eq '"permalink":"https://slack.com/' "$events_file"; then
-    echo "    execution stream never recorded a successful Slack upload permalink"
-    rm -f "$events_file"
-    return 1
+  if [[ "$require_permalink" == "1" ]]; then
+    if ! sse_data_json "$events_file" | jq -es --arg terminal_text "$terminal_text" '
+      any(.[]; [.. | strings | select(test("https://slack\\.com/"))] | length > 0)
+      or ($terminal_text | test("https://slack\\.com/"))
+    ' >/dev/null; then
+      echo "    execution stream never recorded a successful Slack upload permalink"
+      rm -f "$events_file"
+      return 1
+    fi
   fi
 
   rm -f "$events_file"
@@ -524,7 +577,7 @@ smoke_chart_case() {
 
   wait_for_thread_reply "$channel" "$thread_ts" >/dev/null || return 1
 
-  assert_execution_upload_succeeded "$thread_key" || return 1
+  assert_execution_upload_stream "$thread_key" 1 || return 1
 
   wait_for_uploaded_reply "$channel" "$thread_ts" >/dev/null
 }
@@ -550,7 +603,7 @@ smoke_generated_media_case() {
 
   wait_for_thread_reply "$channel" "$thread_ts" >/dev/null || return 1
 
-  assert_execution_upload_succeeded "$thread_key" || return 1
+  assert_execution_upload_stream "$thread_key" 0 || return 1
 
   wait_for_uploaded_reply "$channel" "$thread_ts" '^generated-media-smoke\.mp4$' '^video/mp4$' >/dev/null
 }
