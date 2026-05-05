@@ -428,6 +428,21 @@ Or use the bundled helper: `scripts/centaur-run.sh "Add a tool called hackernews
 3. `git commit` → `git push` → `gh pr create` → `gh pr merge`
 4. Hot-reload picks it up — live in seconds
 
+### Explicit PR / deploy follow-ups
+
+If the user follows up with "open the PR", "ship it", "merge this", "deploy it", or "set that up as a PR and deploy", treat that as a request to execute the next shipping step, not as a request to restate the build work.
+
+1. Start with the current ship status: say whether a branch, commit, PR, merge, or deploy already exists.
+2. Inspect the repo state before acting. If the work only exists in a read-only checkout, run `git-branch paradigmxyz/centaur`; if there is no diff to commit, say that explicitly.
+3. Commit the pending change, push it, and open the PR. Report the PR URL once it exists.
+4. If the user also asked to deploy, do the deploy step that matches the artifact:
+   - tool / skill / workflow: merge the PR so `main` hot-reloads it
+   - web app: create or restart the app and report the resulting URL or status
+5. If any step is blocked, stop at that exact step and name the blocker plainly: no writable clone, no diff to commit, missing GitHub permission, missing deploy credential, or unsupported deploy surface.
+6. Do not answer a shipping follow-up by summarizing the implementation that already happened.
+
+Treat only explicit ship-now requests as execution requests. If the user asks "how do I deploy this?", "what would the PR look like?", or "can you explain the rollout?", answer with guidance instead of taking action.
+
 ### Deploy checklist
 
 - [ ] Tool has `client.py` with `_client()` factory and `pyproject.toml` with `[tool.ai-v2]`
