@@ -206,6 +206,7 @@ Choose a lane first.
 
 - For Lane A, execute the public-source workflow below and add private enrichment only if it is available without blocking.
 - For Lane B, execute all batches in order. Steps are organized into parallel batches — run all calls within a batch concurrently, then move to the next batch.
+- Product depth is required for Lane B. If the company has named products, platforms, APIs, hardware, software, docs, or developer surfaces, read those surfaces directly and explain what each product does.
 
 ### LANE A — External question / public-source-first workflow
 
@@ -252,6 +253,10 @@ call websearch search '{"query": "<company> what they do product overview 2026",
 1b. If a URL was provided, also fetch the company site:
 ```
 call websearch search '{"query": "site:<domain> about", "num_results": 3}'
+```
+Also discover product/docs surfaces on the company site:
+```
+call websearch search '{"query": "site:<domain> product OR platform OR solutions OR docs OR API OR developer", "num_results": 5}'
 ```
 
 1c. Harmonic company enrichment (for team data):
@@ -311,6 +316,8 @@ call paradigmdb db_organizations '{"limit": 200}'
 
 From Batch 1, extract:
 - One-line description, sector, founded year, HQ, key products
+- Flagship products/platforms, including named hardware, software, APIs, modules, and developer surfaces
+- For each flagship product: what it is, who uses it, deployment model, maturity, and key differentiator
 - Domain name (for later queries)
 - Team members from Harmonic (names, titles, LinkedIn URLs)
 - Funding data from Crunchbase
@@ -340,12 +347,22 @@ call websearch search '{"query": "<company> founders CEO CTO team leadership", "
 ```
 For any founder found via web search whose LinkedIn URL you can identify, still run enrich_person.
 
-2b. Funding deep dive:
+2b. Product deep dive:
+```
+call websearch search '{"query": "<company> flagship product platform software hardware API docs how it works", "num_results": 5, "synthesize": true}'
+```
+If a domain is known, also search product/docs surfaces directly:
+```
+call websearch search '{"query": "site:<domain> docs OR API OR developer OR product OR platform OR solutions", "num_results": 5}'
+```
+Extract product name, category, primary user or buyer, where it sits in the workflow or stack, key differentiator, and maturity. Prefer product pages, docs, demos, technical posts, and engineering pages over investor copy. If the company has both hardware and software, cover both.
+
+2c. Funding deep dive:
 ```
 call websearch search '{"query": "<company> funding round valuation investors 2025 2026", "num_results": 5, "synthesize": true}'
 ```
 
-2c. If SensorTower found an app in Batch 1, get details and downloads:
+2d. If SensorTower found an app in Batch 1, get details and downloads:
 ```
 call sensortower get_app_info '{"app_id": "<app_id>", "platform": "ios"}'
 ```
@@ -357,7 +374,7 @@ If iOS returned nothing, try Android:
 call sensortower search_apps '{"query": "<company name>", "platform": "android"}'
 ```
 
-2d. News and developments:
+2e. News and developments:
 ```
 call websearch search '{"query": "<company> latest news announcement partnership launch 2026", "num_results": 5, "max_age_hours": 720, "synthesize": true}'
 ```
@@ -368,7 +385,7 @@ call newsapi search '{"q": "<company>", "page_size": 5, "sort_by": "publishedAt"
 call twitter search_tweets '{"query": "<company>", "max_results": 10}'
 ```
 
-2e. Market context (for crypto/DeFi companies only):
+2f. Market context (for crypto/DeFi companies only):
 ```
 call coingecko search '{"query": "<company or token name>"}'
 ```
@@ -380,12 +397,12 @@ call coingecko get_price '{"ids": "<coingecko_id>", "vs_currencies": "usd", "inc
 call defillama get_protocol '{"protocol": "<protocol_slug>"}'
 ```
 
-2f. Slack search for key founders (from Batch 1 team results):
+2g. Slack search for key founders (from Batch 1 team results):
 ```
 call slack search_messages '{"query": "<founder name>", "max_results": 5}'
 ```
 
-2g. Competitive landscape:
+2h. Competitive landscape:
 ```
 call websearch search '{"query": "<company> competitors alternatives vs comparison", "num_results": 5, "synthesize": true}'
 ```
@@ -424,6 +441,7 @@ When any web search returns zero or very low-quality results, do NOT give up. Tr
 3. Try the founder's name: "<founder name> startup" or "<founder name> company" often surfaces early-stage companies that don't have much press
 4. Alternative names: Try the parent company, the protocol name, or the token name if different from the company name (e.g., "Divine" vs "Credit" vs "credit.cash")
 5. Broaden the source: If websearch fails, try newsapi or Twitter for the same query — different indexes surface different results
+6. Hunt product surfaces directly: search `site:<domain> product`, `site:<domain> platform`, `site:<domain> docs`, `site:<domain> API`, `site:<domain> developer`, or search the named product directly
 
 Apply these retries to ANY search step that comes back empty, not just Step 1. You should make at least 3 distinct query attempts before marking a section as "Not found."
 
@@ -475,6 +493,13 @@ WHAT THEY DO
 Sector: <sector>  |  Founded: <year>  |  HQ: <location>
 Stage: <stage>  |  Raised: <total>  |  Last: <amount>, <date>, led by <lead>
 Key Investors: <names>
+
+PRODUCT STACK
+──────────────────────────────────────────────────────────────────────────────────────
+<product 1> — <what it is>; <primary user>; <key differentiator>
+<product 2> — <what it is>; <where it sits in workflow>; <maturity>
+<product 3> — <what it is>; <buyer/deployment>; <why it matters>
+──────────────────────────────────────────────────────────────────────────────────────
 
 CORE TEAM
 ──────────────────────────────────────────────────────────────────────────────────────
@@ -557,6 +582,13 @@ Sector: <sector>  |  Founded: <year>  |  HQ: <location>
 Stage: <stage>  |  Raised: <total>  |  Last: <amount>, <date>, led by <lead>
 Key Investors: <names>
 
+PRODUCT STACK
+──────────────────────────────────────────────────────────────────────────────────────
+<product 1> — <what it is>; <primary user>; <key differentiator>
+<product 2> — <what it is>; <where it sits in workflow>; <maturity>
+<product 3> — <what it is>; <buyer/deployment>; <why it matters>
+──────────────────────────────────────────────────────────────────────────────────────
+
 CORE TEAM
 ──────────────────────────────────────────────────────────────────────────────────────
 <Name> — <Title>; prev <company> (<outcome>); <relevant experience>; <school if notable>
@@ -620,6 +652,7 @@ SOURCES
 - Keep lines under 90 chars inside the code block — NO wrapping onto second lines within a section row
 - BLUF: one sentence framed from Paradigm's perspective. Not a description — why it matters to us. For portfolio companies, ground it in the latest Shift notes (PORTCO_UPDATE/PORTCO_REVIEW).
 - WHAT THEY DO: combine metadata onto fewer lines using " | " separators
+- PRODUCT STACK: include whenever public materials reveal named products, platforms, APIs, hardware, software, docs, or developer surfaces. Use 2-4 lines max. Explain what each product is, who uses it, and what is differentiated or notable. If the company has both hardware and software, include both.
 - CORE TEAM: max 4-5 people. Each person is ONE line, must fit in 90 chars. Use semicolons to separate fields.
 - PRIOR PARADIGM CONTEXT: search Shift notes (paradigmdb notes_search), Granola, AND Slack. Shift notes are the PRIMARY source — they contain investment process notes, portco reviews, and updates that Granola/Slack may not have. Always include this section — "First touch" is valuable info. For portfolio companies, the entire brief should be informed by Shift notes, not just this section.
 - TRACTION & MARKET DATA: single combined section. Right-aligned numbers. Omit Token/On-chain rows if not applicable.
@@ -645,6 +678,7 @@ SOURCES
 - If Harmonic enrich_company fails or returns empty, try search_companies_natural_language before falling back to web search
 - If SimilarWeb returns no data (domain too new or too small), note "Not tracked by SimilarWeb" in Traction
 - If SensorTower returns no apps, note "No mobile app found" in Traction
+- If product detail is thin, search the company site for product, platform, docs, API, developer, or engineering pages before giving up
 - If Shift notes, Granola, and Slack all return no results, show "First touch — no prior Paradigm context"
 - Never say "I couldn't find information" without trying at least 3 different search queries
 - If the user adds a second deliverable after the first brief, do not stop after
