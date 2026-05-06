@@ -1,0 +1,26 @@
+secretManager:
+  backend: onepassword
+  envPrefix: ""
+  existingSecretName: centaur-infra-env
+
+firewall:
+  existingCaSecretName: centaur-firewall-ca
+  existingCaKeySecretName: centaur-firewall-ca-key
+
+postgres:
+  auth:
+    existingSecretName: centaur-infra-env
+    existingSecretKey: POSTGRES_PASSWORD
+
+slackbot:
+  enabled: false
+
+api:
+  runtimeCredentialGuardEnabled: false
+  executionWorkerEnabled: true
+  egressDiscovery:
+    enabled: false
+
+ironProxy:
+  manager:
+    secretSource: onepassword

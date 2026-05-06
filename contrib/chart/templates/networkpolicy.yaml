@@ -75,12 +75,15 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "firewall") | nindent 14 }}
-{{- if .Values.ironProxy.enabled }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+{{- if .Values.slackbot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
+{{- end }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-proxy") | nindent 14 }}
-{{- end }}
       ports:
         - protocol: TCP
           port: 8100
@@ -130,13 +133,6 @@ spec:
 {{- else }}
     - {}
 {{- end }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "firewall") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.firewall.service.controlPort }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -160,12 +156,7 @@ spec:
 {{- end }}
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "firewall") | nindent 14 }}
-{{- if eq .Values.api.sandboxBackend "kubernetes" }}
-        - podSelector:
-            matchLabels:
               centaur.ai/managed: "true"
-{{- end }}
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
@@ -189,17 +180,22 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "firewall") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "secrets") | nindent 14 }}
       ports:
         - protocol: TCP
-          port: {{ .Values.firewall.service.proxyPort }}
+          port: 8100
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-proxy") | nindent 14 }}
+      ports:
         - protocol: TCP
-          port: {{ .Values.firewall.service.controlPort }}
-{{- if eq .Values.api.sandboxBackend "kubernetes" }}
+          port: {{ .Values.ironProxy.service.proxyPort }}
+        - protocol: TCP
+          port: {{ .Values.ironProxy.manager.service.controlPort }}
     - ports:
         - protocol: TCP
           port: 443
-{{- end }}
 ---
 {{- if .Values.slackbot.enabled }}
 apiVersion: networking.k8s.io/v1
@@ -243,70 +239,25 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "firewall") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "secrets") | nindent 14 }}
       ports:
         - protocol: TCP
-          port: {{ .Values.firewall.service.proxyPort }}
+          port: 8100
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-proxy") | nindent 14 }}
+      ports:
         - protocol: TCP
-          port: {{ .Values.firewall.service.controlPort }}
+          port: {{ .Values.ironProxy.service.proxyPort }}
+        - protocol: TCP
+          port: {{ .Values.ironProxy.manager.service.controlPort }}
     # Slack bootstrap and message delivery need direct HTTPS egress.
     - ports:
         - protocol: TCP
           port: 443
 ---
 {{- end }}
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "firewall") }}
-  labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "firewall") | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "firewall") | nindent 6 }}
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
-{{- if .Values.slackbot.enabled }}
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
-{{- end }}
-        - podSelector:
-            matchLabels:
-              centaur.ai/managed: "true"
-{{- range .Values.runnerAccess.allowedCidrs }}
-        - ipBlock:
-            cidr: {{ . | quote }}
-{{- end }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.firewall.service.proxyPort }}
-    - from:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
-{{- if .Values.slackbot.enabled }}
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
-{{- end }}
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "pgbouncer") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.firewall.service.controlPort }}
-  egress:
-    - {}
----
-{{- if .Values.ironProxy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -357,7 +308,6 @@ spec:
           port: 8100
     - {}
 ---
-{{- end }}
 {{- if .Values.repoCache.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -379,7 +329,6 @@ spec:
 {{- end }}
 ---
 {{- end }}
-{{- if eq .Values.api.sandboxBackend "kubernetes" }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -403,9 +352,8 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "firewall") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-proxy") | nindent 14 }}
       ports:
         - protocol: TCP
-          port: {{ .Values.firewall.service.proxyPort }}
-{{- end }}
+          port: {{ .Values.ironProxy.service.proxyPort }}
 {{- end }}

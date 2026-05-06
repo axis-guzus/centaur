@@ -40,19 +40,15 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{- define "centaur.secretEnvName" -}}
-{{- if .Values.secretManager.existingSecretName -}}
-{{- .Values.secretManager.existingSecretName | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- printf "%s-secret-env" (include "centaur.fullname" .) | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
+{{- required "secretManager.existingSecretName is required" .Values.secretManager.existingSecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "centaur.trustedCaSecretName" -}}
-{{- if .Values.firewall.existingCaSecretName -}}
-{{- .Values.firewall.existingCaSecretName | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- printf "%s-firewall-ca" (include "centaur.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- required "firewall.existingCaSecretName is required" .Values.firewall.existingCaSecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+
+{{- define "centaur.trustedCaKeySecretName" -}}
+{{- required "firewall.existingCaKeySecretName is required" .Values.firewall.existingCaKeySecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "centaur.apiServiceAccountName" -}}
@@ -86,4 +82,53 @@ app.kubernetes.io/component: {{ .component }}
 {{- else -}}
 {{- printf "postgresql://%s:%s@%s:5432/%s" .Values.postgres.auth.username .Values.postgres.auth.password (include "centaur.componentName" (dict "root" . "component" "postgres")) .Values.postgres.auth.database -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "centaur.secretResourceVersion" -}}
+{{- $secret := lookup "v1" "Secret" .root.Release.Namespace .name -}}
+{{- if $secret -}}
+{{- $secret.metadata.resourceVersion -}}
+{{- else -}}
+{{- .name -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "centaur.infraSecretsChecksum" -}}
+{{- $envName := include "centaur.secretEnvName" . -}}
+{{- $caName := include "centaur.trustedCaSecretName" . -}}
+{{- $caKeyName := include "centaur.trustedCaKeySecretName" . -}}
+{{- $payload := dict "env" (include "centaur.secretResourceVersion" (dict "root" . "name" $envName)) "ca" (include "centaur.secretResourceVersion" (dict "root" . "name" $caName)) "caKey" (include "centaur.secretResourceVersion" (dict "root" . "name" $caKeyName)) -}}
+{{- toJson $payload | sha256sum -}}
+{{- end -}}
+
+{{- define "centaur.firewallControlHost" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "firewall-manager") -}}
+{{- end -}}
+
+{{- define "centaur.firewallControlPort" -}}
+{{- .Values.ironProxy.manager.service.controlPort -}}
+{{- end -}}
+
+{{- define "centaur.firewallControlUrl" -}}
+{{- printf "http://%s:%v" (include "centaur.firewallControlHost" .) (include "centaur.firewallControlPort" .) -}}
+{{- end -}}
+
+{{- define "centaur.secretManagerUrl" -}}
+{{- printf "http://%s:8100" (include "centaur.componentName" (dict "root" . "component" "secrets")) -}}
+{{- end -}}
+
+{{- define "centaur.firewallProxyHost" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "iron-proxy") -}}
+{{- end -}}
+
+{{- define "centaur.firewallProxyPort" -}}
+{{- .Values.ironProxy.service.proxyPort -}}
+{{- end -}}
+
+{{- define "centaur.firewallProxyUrl" -}}
+{{- printf "http://%s:%v" (include "centaur.firewallProxyHost" .) (include "centaur.firewallProxyPort" .) -}}
+{{- end -}}
+
+{{- define "centaur.firewallNoProxyHosts" -}}
+{{- printf "%s,%s" (include "centaur.firewallProxyHost" .) (include "centaur.firewallControlHost" .) -}}
 {{- end -}}

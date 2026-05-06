@@ -193,17 +193,11 @@ def get_sandbox_claims(request: Request) -> dict[str, str] | None:
 
 
 def sandbox_thread_in_scope(allowed_thread_key: str | None, requested_thread_key: str) -> bool:
-    """Return whether a sandbox token may access the requested thread.
-
-    App containers are scoped to `app:<name>` and may open child threads under
-    that namespace so public web apps can isolate individual requests.
-    """
+    """Return whether a sandbox token may access the requested thread."""
     if not allowed_thread_key:
         return True
     if allowed_thread_key == requested_thread_key:
         return True
-    if allowed_thread_key.startswith("app:"):
-        return requested_thread_key.startswith(f"{allowed_thread_key}:")
     return False
 
 

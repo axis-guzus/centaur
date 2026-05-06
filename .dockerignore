@@ -29,10 +29,6 @@ logs/
 # Docker
 .dockerignore
 
-# Monitoring / infrastructure configs (not needed in app builds)
-services/grafana
-services/prometheus
-services/promtail
 # Docs / non-runtime
 *.md
 !centaur_sdk/README.md

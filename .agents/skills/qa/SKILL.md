@@ -10,8 +10,8 @@ Test the Centaur stack in three progressive layers — same core operations at e
 ## Layers
 
 ```
-Layer 1: Internal API     docker exec → API directly. Proves core works.
-Layer 2: Nginx             curl from host → nginx → API. Proves routing + auth.
+Layer 1: Internal API     kubectl exec → API directly. Proves core works.
+Layer 2: External route    curl from host → API route. Proves routing + auth.
 Layer 3: User Interfaces   Slackbot webhooks + Thread Viewer UI. Proves E2E UX.
 ```
 
@@ -51,7 +51,7 @@ Use the **Task** tool to run layers 2, 3a, and 3b as parallel subagents once lay
 **Getting the API key:** `API_SECRET_KEY` is NOT in `.env` — it's in the secrets manager. Fetch it:
 
 ```bash
-API_KEY=$(docker exec centaur-api-1 curl -s http://firewall:8081/secrets/API_SECRET_KEY | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")
+API_KEY=$(kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s http://firewall:8081/secrets/API_SECRET_KEY | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")
 ```
 
 Use `$API_KEY` (not `$API_SECRET_KEY`) in all curl commands below.
@@ -62,18 +62,18 @@ If the user says "QA", "QA the stack", or "health check", start immediately with
 
 ## Layer 1: Internal API
 
-All calls via `docker exec centaur-api-1 curl -s http://localhost:8000/...` — bypasses nginx, no auth needed.
+All calls via `kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s http://localhost:8000/...` — bypasses external auth, no key needed.
 
 ### 1a. Services & Health
 
 ```bash
-docker compose ps -a --format '{{.Name}}\t{{.Status}}'
+kubectl get pods -n centaur
 ```
 
-All must be Up (healthy where applicable): postgres, pgbouncer, secrets, firewall, api, docker-socket-proxy, nginx, auth, alloy, victorialogs, victoriametrics, fluentbit, grafana, slackbot, web.
+All required local deployments must be Ready: postgres, pgbouncer, secrets, iron-proxy/firewall-manager, and api. Slackbot is disabled in the default dev overlay.
 
 ```bash
-docker exec centaur-api-1 curl -s http://localhost:8000/health/ready
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s http://localhost:8000/health/ready
 # → {"status":"ok"}
 ```
 
@@ -121,7 +121,7 @@ The API uses a two-wire protocol: `/agent/connect` opens a persistent SSE stream
 **Step 1: Open connect wire** (run in background, write to file):
 
 ```bash
-docker exec centaur-api-1 bash -c "curl -s -N -X POST http://localhost:8000/agent/connect \
+kubectl exec -n centaur deploy/centaur-centaur-api -- bash -c "curl -s -N -X POST http://localhost:8000/agent/connect \
   -H 'Content-Type: application/json' \
   -d '{\"thread_key\": \"test:qa-execute\", \"harness\": \"amp\"}' \
   > /tmp/sse_qa.txt 2>&1" &
@@ -131,7 +131,7 @@ sleep 5
 **Step 2: Execute a message:**
 
 ```bash
-docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/execute \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
   -H "Content-Type: application/json" \
   -d '{"thread_key":"test:qa-execute","message":"Say hello and nothing else","harness":"amp"}'
 # → {"ok": true, "injected": true, "turn_id": 1}
@@ -140,7 +140,7 @@ docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/execute \
 Wait ~10s, then check the SSE output:
 
 ```bash
-docker exec centaur-api-1 cat /tmp/sse_qa.txt
+kubectl exec -n centaur deploy/centaur-centaur-api -- cat /tmp/sse_qa.txt
 ```
 
 **Verify:** SSE output contains `wire.ready`, `system.init`, `assistant` with response text, and exactly one `turn.done` per turn with non-empty `result`.
@@ -148,7 +148,7 @@ docker exec centaur-api-1 cat /tmp/sse_qa.txt
 **Step 3: Back-to-back follow-up** (same thread, same container):
 
 ```bash
-docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/execute \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
   -H "Content-Type: application/json" \
   -d '{"thread_key":"test:qa-execute","message":"Now say goodbye"}'
 ```
@@ -160,7 +160,7 @@ docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/execute \
 Handoffs are transparent — the amp-wrapper detects handoff tool calls, suppresses handoff noise, kills amp, and chains into the new thread. The API sees one continuous stream.
 
 ```bash
-docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/execute \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
   -H "Content-Type: application/json" \
   -d '{"thread_key":"test:qa-execute","message":"handoff and say hi 3 times"}'
 ```
@@ -194,13 +194,13 @@ Clean up: `POST /agent/stop` with `{"thread_key":"test:qa-execute"}`.
 Check loaded personas:
 
 ```bash
-docker compose logs api --tail 50 | grep persona_loaded
+kubectl logs -n centaur deploy/centaur-centaur-api --tail 50 | grep persona_loaded
 ```
 
 For each persona (typically eng, legal, invest, events):
 
 ```bash
-docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/execute \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
   -H "Content-Type: application/json" \
   -d '{
     "thread_key": "test:qa-persona-{NAME}",
@@ -219,19 +219,19 @@ Clean up all `test:qa-persona-*` containers.
 
 ```bash
 # All services present in VictoriaLogs?
-docker exec centaur-api-1 curl -s "http://victorialogs:9428/select/logsql/query" \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://victorialogs:9428/select/logsql/query" \
   --data-urlencode "query=* | uniq_values(service) limit 1000" --data-urlencode "limit=1"
 
 # _msg field populated (not "missing _msg field")?
-docker exec centaur-api-1 curl -s "http://victorialogs:9428/select/logsql/query" \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://victorialogs:9428/select/logsql/query" \
   --data-urlencode 'query=service:"api"' --data-urlencode "limit=3"
 
 # Structured fields (level, event) searchable?
-docker exec centaur-api-1 curl -s "http://victorialogs:9428/select/logsql/query" \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://victorialogs:9428/select/logsql/query" \
   --data-urlencode 'query=service:"api" AND level:"info" AND event:*' --data-urlencode "limit=3"
 
 # Sandbox container logs collected?
-docker exec centaur-api-1 curl -s "http://victorialogs:9428/select/logsql/query" \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://victorialogs:9428/select/logsql/query" \
   --data-urlencode 'query=container:"pipe-"' --data-urlencode "limit=2"
 ```
 
@@ -244,7 +244,7 @@ Test the attachment pipeline: inline extraction, upload endpoint, and sandbox do
 ```bash
 # Buffer a message with inline base64 image
 B64=$(echo -n "FAKE_PNG_BYTES_FOR_QA_TEST" | base64)
-docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/messages \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/messages \
   -H "Content-Type: application/json" \
   -d "{
     \"thread_key\": \"test:qa-att-inline\",
@@ -259,12 +259,12 @@ docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/messages \
 # → {"ok": true, "inserted": 1}
 
 # List attachments — should have 1 entry
-docker exec centaur-api-1 curl -s "http://localhost:8000/agent/attachments?thread_key=test:qa-att-inline"
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://localhost:8000/agent/attachments?thread_key=test:qa-att-inline"
 # → [{"id":"att-...","name":"image.png","mime_type":"image/png",...}]
 
 # Download and verify bytes
-ATT_ID=$(docker exec centaur-api-1 curl -s "http://localhost:8000/agent/attachments?thread_key=test:qa-att-inline" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
-docker exec centaur-api-1 curl -s "http://localhost:8000/agent/attachments/$ATT_ID/download" | base64 | head -c 40
+ATT_ID=$(kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://localhost:8000/agent/attachments?thread_key=test:qa-att-inline" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://localhost:8000/agent/attachments/$ATT_ID/download" | base64 | head -c 40
 ```
 
 **Verify:** List returns 1 attachment with `mime_type: image/png`. Download returns non-empty bytes. Original message parts in `chat_messages` contain `attachment_ref`, not base64 blob.
@@ -273,7 +273,7 @@ docker exec centaur-api-1 curl -s "http://localhost:8000/agent/attachments/$ATT_
 
 ```bash
 B64=$(echo -n "UPLOAD_TEST_CONTENT" | base64)
-docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/attachments/upload \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/attachments/upload \
   -H "Content-Type: application/json" \
   -d "{
     \"thread_key\": \"test:qa-att-upload\",
@@ -284,10 +284,10 @@ docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/attachment
 # → {"id":"att-...","name":"test-upload.txt","download_url":"/agent/attachments/att-.../download"}
 
 # Download and verify
-ATT_ID=$(docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/attachments/upload \
+ATT_ID=$(kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/attachments/upload \
   -H "Content-Type: application/json" \
   -d "{\"thread_key\":\"test:qa-att-upload2\",\"name\":\"verify.txt\",\"mime_type\":\"text/plain\",\"data\":\"$(echo -n hello | base64)\"}" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-docker exec centaur-api-1 curl -s "http://localhost:8000/agent/attachments/$ATT_ID/download"
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://localhost:8000/agent/attachments/$ATT_ID/download"
 # → hello
 ```
 
@@ -297,13 +297,13 @@ docker exec centaur-api-1 curl -s "http://localhost:8000/agent/attachments/$ATT_
 
 ```bash
 # Missing fields → 422
-docker exec centaur-api-1 curl -s -X POST http://localhost:8000/agent/attachments/upload \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/attachments/upload \
   -H "Content-Type: application/json" \
   -d '{"thread_key":"test:qa-att-bad"}'
 # → 422
 
 # Nonexistent attachment → 404
-docker exec centaur-api-1 curl -s -o /dev/null -w "%{http_code}" \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -o /dev/null -w "%{http_code}" \
   http://localhost:8000/agent/attachments/att-doesnotexist/download
 # → 404
 ```
@@ -348,7 +348,7 @@ curl -s --max-time 120 -X POST http://localhost:8000/agent/execute \
 
 **Verify:** SSE stream arrives (not 502). `turn.done` event has non-empty `result`.
 
-**Known issue (fixed):** The `/agent/` nginx location needs `proxy_buffering off`, `proxy_cache off`, and `proxy_read_timeout 300s` for SSE streaming. Without these, nginx returns 502. If you see 502 on agent execute through nginx but it works via `docker exec`, check `services/nginx/nginx.conf` for missing SSE directives on the `/agent/` location.
+**Known issue (fixed):** The `/agent/` route needs SSE-friendly buffering and timeout settings. Without these, the external route can return 502 while the internal API path works.
 
 ### 2d. Agent Execute — Personas via Nginx
 
@@ -373,7 +373,7 @@ done
 After agent execute, verify both user AND assistant messages are in postgres:
 
 ```bash
-docker exec centaur-postgres-1 psql -U tempo -d ai_v2 -c \
+kubectl exec -n centaur statefulset/centaur-centaur-postgres -- psql -U tempo -d ai_v2 -c \
   "SELECT role, substring(parts::text,1,150) FROM chat_messages WHERE thread_key='test:qa-nginx' ORDER BY created_at;"
 ```
 
@@ -421,10 +421,10 @@ curl -s --max-time 300 -X POST http://localhost:8000/agent/execute \
 3. eng agent presents the result
 
 **If `call agent execute` returns "Tool 'agent' not found":** The sandbox container has an old `call.sh` without the `agent` case. Fix:
-1. Rebuild sandbox image: `docker build -t agent2:latest services/sandbox/`
-2. Drain old warm pool: `docker ps --filter label=ai2.warm=true -q | xargs -r docker rm -f`
-3. Restart API to replenish pool: `docker compose restart api`
-4. Wait ~15s for new warm containers, then retry
+1. Rebuild sandbox image: `just build-one agent`
+2. Delete stale sandbox pods: `kubectl delete pod -n centaur -l centaur-agent=true --ignore-not-found`
+3. Redeploy API: `just deploy`
+4. Wait for rollout, then retry
 
 ### 2g. Auth Gate
 
@@ -449,10 +449,10 @@ source .env
 {SKILL_DIR}/scripts/integration-slackbot.sh
 ```
 
-Set `SLACKBOT_URL` if the slackbot is only reachable inside Docker:
+Set `SLACKBOT_URL` if the slackbot is only reachable inside the cluster:
 
 ```bash
-docker exec centaur-api-1 bash -c 'SLACKBOT_URL=http://slackbot:3001 SLACK_SIGNING_SECRET=<secret> /path/to/integration-slackbot.sh'
+kubectl exec -n centaur deploy/centaur-centaur-api -- bash -c 'SLACKBOT_URL=http://slackbot:3001 SLACK_SIGNING_SECRET=<secret> /path/to/integration-slackbot.sh'
 ```
 
 ### 3a-i. URL Verification (signed)
@@ -474,10 +474,10 @@ curl -s -X POST http://localhost:3001/api/slack/events \
 # → {"challenge":"test-challenge-qa"}
 ```
 
-Note: If slackbot isn't port-mapped, use `docker exec` to reach it on the internal network:
+Note: If slackbot is enabled without an external route, use `kubectl exec` to reach it on the internal network:
 
 ```bash
-docker exec centaur-api-1 curl -s -X POST http://slackbot:3001/api/slack/events \
+kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://slackbot:3001/api/slack/events \
   -H "Content-Type: application/json" \
   -H "x-slack-signature: $SIGNATURE" \
   -H "x-slack-request-timestamp: $TIMESTAMP" \
@@ -542,29 +542,28 @@ cp {SKILL_DIR}/templates/tool-qa-report-template.md {OUTPUT_DIR}/report.md
 
 | Symptom | Root Cause | Fix |
 |---------|-----------|-----|
-| PgBouncer unhealthy on startup | `pg_isready` healthcheck defaults to user `postgres` but pgbouncer only knows `tempo` | Add `-U tempo` to healthcheck in `docker-compose.yml` |
-| 502 on `/agent/execute` via nginx | Missing SSE directives (`proxy_buffering off`, `proxy_read_timeout`) | Add SSE config to `/agent/` location in `nginx.conf` |
+| PgBouncer unhealthy on startup | Postgres credentials mismatch | Check `POSTGRES_PASSWORD` in `centaur-infra-env` and rerun `just bootstrap-secrets --force` only if PVC data can be reset |
+| 502 on `/agent/execute` via ingress | Missing SSE directives (`proxy_buffering off`, `proxy_read_timeout`) | Add SSE config to the ingress/route handling `/agent/` |
 | Assistant messages missing from `chat_messages` | `stream_exec` result extraction expected dict, got string | Fix in `services/api/api/agent.py` — handle both string and dict `result` |
 | `API_SECRET_KEY` empty from `.env` | Key is in secrets manager, not `.env` | Fetch via `curl http://firewall:8081/secrets/API_SECRET_KEY` |
-| Port 3001 already allocated (OrbStack) | Ghost binding from previous container survives OrbStack restart | Remove host port mapping for `web` (nginx proxies internally) |
-| vlogs tool fails with DNS error | VictoriaLogs is on `obs_net`, not reachable from API's network | Expected — tool needs network config or internal proxy |
-| Slackbot port not mapped to host | `web` service removed host port binding | Use `docker exec` to reach slackbot internally at `slackbot:3001` |
-| `call agent execute` returns "Tool 'agent' not found" | Warm pool containers have old `call.sh` without `agent` case | Rebuild sandbox image, drain warm pool (`docker rm -f` warm containers), restart API |
-| Warm pool containers stale after sandbox rebuild | `docker build -t agent2:latest` doesn't update running containers | Drain: `docker ps --filter label=ai2.warm=true -q \| xargs -r docker rm -f` then `docker compose restart api` |
+| vlogs tool fails with DNS error | VictoriaLogs is not part of the default local Helm stack | Expected unless observability is installed separately |
+| Slackbot is not running locally | Default dev values disable slackbot | Enable it in values only when testing Slack-specific flows |
+| `call agent execute` returns "Tool 'agent' not found" | Sandbox pods have old `call.sh` without `agent` case | Rebuild sandbox image, delete stale sandbox pods, redeploy API |
+| Sandbox pods stale after sandbox rebuild | `just build-one agent` doesn't update already-running pods | Delete sandbox pods with `kubectl delete pod -n centaur -l centaur-agent=true --ignore-not-found` |
 | Duplicate `turn.done` per turn | `is_turn_done` fires on both `end_turn` and `result` events | The amp-wrapper suppresses `result` events — only `end_turn` triggers `turn.done`. If you see doubles, the sandbox has an old wrapper |
 | Handoff output invisible / missing | amp-wrapper suppresses handoff tool events and chains transparently | Expected behavior — check for a new `system.init` with a different `session_id` in the stream |
-| Agent says "handoffs are disabled" | Sandbox has old SYSTEM_PROMPT.md baked in | Rebuild sandbox: `docker compose build sandbox`, drain warm pool |
+| Agent says "handoffs are disabled" | Sandbox has old SYSTEM_PROMPT.md baked in | Rebuild sandbox: `just build-one agent`, delete stale sandbox pods |
 
 ## Issue Investigation
 
 When something fails:
 
-1. **Service crash** — `docker compose logs {service} --tail 30`
+1. **Service crash** — `kubectl logs -n centaur deploy/centaur-centaur-{component} --tail 30`
 2. **Schema mismatch** — Check DB/API schema vs tool code
-3. **Missing credentials** — `docker exec centaur-api-1 curl -s http://firewall:8081/secrets/{KEY}` (NOT `http://secrets:8100` — API can't reach secrets directly, use firewall proxy)
+3. **Missing credentials** — `kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s http://centaur-centaur-firewall-manager:8081/secrets/{KEY}` (NOT direct 1Password access)
 4. **Connection failure** — Check upstream, tunnel, firewall
-5. **Routing issue** — Compare nginx config with expected path
-6. **Postgres persistence** — Check `chat_messages` table: `docker exec centaur-postgres-1 psql -U tempo -d ai_v2 -c "SELECT role, parts FROM chat_messages WHERE thread_key='...'"`
+5. **Routing issue** — Compare ingress/HTTPRoute config with expected path
+6. **Postgres persistence** — Check `chat_messages` table: `kubectl exec -n centaur statefulset/centaur-centaur-postgres -- psql -U tempo -d ai_v2 -c "SELECT role, parts FROM chat_messages WHERE thread_key='...'"` 
 
 Note root cause and suggested fix for each failure.
 
@@ -572,7 +571,7 @@ Note root cause and suggested fix for each failure.
 
 1. Fix the bug in the relevant service/tool code
 2. Tools: commit + push (hot-reload, no restart)
-3. Services: `docker compose up -d --build {service}`
+3. Services: `just build-one {service} && just deploy`
 4. Re-test, update report from FAIL → PASS (fixed)
 
 ## References

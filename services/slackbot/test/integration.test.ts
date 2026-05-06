@@ -2,8 +2,7 @@
  * Integration tests for SlackBot against a running Centaur API.
  *
  * Prerequisites:
- *   docker compose up -d postgres api
- *   docker compose build sandbox
+ *   just up
  *   source .env
  *
  * Run:

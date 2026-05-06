@@ -2,15 +2,12 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# API container entrypoint — bootstrap secrets then exec the command.
-#
-# The secrets container shares this Dockerfile but overrides entrypoint in
-# docker-compose.yml so it never runs this script.
+# API container entrypoint — validate required infra env, then exec the command.
 # ---------------------------------------------------------------------------
 
-source /app/scripts/bootstrap-secrets.sh
-
-bootstrap_required_secrets DATABASE_URL SLACK_SIGNING_SECRET
+: "${DATABASE_URL:?DATABASE_URL is required}"
+: "${SLACK_SIGNING_SECRET:?SLACK_SIGNING_SECRET is required}"
+: "${SLACKBOT_API_KEY:?SLACKBOT_API_KEY is required}"
 
 # Install dependencies from bind-mounted overlay tool directories.
 # These aren't baked into the image — install at startup so tool loading doesn't fail.
@@ -38,10 +35,8 @@ fi
 
 # Bootstrap optional gcloud credentials for deployments that use gcloud-backed SSH tunneling.
 if [[ "${CENTAUR_ENABLE_GCLOUD_BOOTSTRAP:-0}" =~ ^(1|true|yes)$ ]]; then
-  _gcp_cred="${GCP_GCLOUD_CREDENTIAL:-}"
-  if [[ -z "$_gcp_cred" && -n "${SECRET_MANAGER_URL:-}" ]]; then
-    _gcp_cred="$(_fetch_secret GCP_GCLOUD_CREDENTIAL 2>/dev/null || true)"
-  fi
+  : "${GCP_GCLOUD_CREDENTIAL:?GCP_GCLOUD_CREDENTIAL is required when CENTAUR_ENABLE_GCLOUD_BOOTSTRAP is enabled}"
+  _gcp_cred="${GCP_GCLOUD_CREDENTIAL}"
   if [[ -n "$_gcp_cred" ]]; then
     _gcloud_dir="${HOME}/.config/gcloud"
     mkdir -p "$_gcloud_dir"

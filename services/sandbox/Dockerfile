@@ -39,7 +39,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
       | tee /etc/apt/sources.list.d/docker.list > /dev/null \
-    && apt-get update && apt-get install -y gh nodejs docker-ce-cli docker-compose-plugin
+    && apt-get update && apt-get install -y gh nodejs docker-ce-cli
 
 # ── Non-root agent user ─────────────────────────────────────────────────────
 RUN useradd -m -s /bin/bash -u 1001 agent \
@@ -137,6 +137,5 @@ COPY --link --chown=1001:1001 .agents/skills/ /home/agent/.agents/skills/
 COPY --link --chown=1001:1001 services/sandbox/SYSTEM_PROMPT.md /home/agent/AGENTS.md
 
 ENTRYPOINT ["/entrypoint.sh"]
-# Default CMD uses amp-wrapper which handles follow-handoff chaining;
-# docker.py overrides via command= for other engines.
+# Default CMD uses amp-wrapper which handles follow-handoff chaining.
 CMD ["amp-wrapper"]

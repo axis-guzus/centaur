@@ -6,7 +6,7 @@ runtime state (stream handles, turn bookkeeping) stays in-memory keyed
 by sandbox_id.
 
 Streaming architecture (2 layers, 0 queues, 0 threads):
-  Docker stdout (async iterator via aiodocker)
+  sandbox stdout (async iterator from the active backend)
     → stream_connect (persistent SSE wire: DB ops + turn detection + yields SSE dicts)
       → EventSourceResponse (SSE formatting + keepalive via sse-starlette)
   stdin written via inject_stdin (flush pending messages + write, returns JSON).
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import datetime as dt
 import json
 import os
 import time
@@ -72,7 +71,6 @@ _REUSABLE_DB_STATES = {"running", "idle", "delivering", "error", "suspended"}
 
 IDLE_TTL_S = int(os.getenv("IDLE_TTL_S", "86400"))  # 24 hours
 SUSPENDED_RETENTION_S = int(os.getenv("SUSPENDED_RETENTION_S", str(7 * 24 * 60 * 60)))
-EXITED_SANDBOX_RETENTION_S = int(os.getenv("EXITED_SANDBOX_RETENTION_S", "3600"))
 STREAM_EOF_REATTACH_MAX = int(os.getenv("STREAM_EOF_REATTACH_MAX", "6"))
 STREAM_EOF_REATTACH_BACKOFF_S = float(os.getenv("STREAM_EOF_REATTACH_BACKOFF_S", "1.0"))
 
@@ -182,7 +180,7 @@ async def _db_get_session(thread_key: str) -> SandboxSession | None:
         harness=row["harness"],
         engine=row["engine"],
         started_at=row["started_at"].timestamp() if row["started_at"] else 0.0,
-        backend_name="docker",
+        backend_name="kubernetes",
         db_state=row["state"],
         agent_thread_id=row["agent_thread_id"] or "",
         last_delivered_id=row["last_delivered_id"] or "",
@@ -1237,7 +1235,7 @@ async def supervise_wires() -> None:
 async def _release_stale_runtime_assignments(pool, backend, *, limit: int = 500) -> int:
     """Release active assignment rows whose runtime is gone and no execution is live.
 
-    This is intentionally conservative: a transient Docker/API lookup failure
+    This is intentionally conservative: a transient backend/API lookup failure
     skips the row, and assignments with non-terminal executions are left alone
     for the execution watchdog to handle.
     """
@@ -1311,22 +1309,8 @@ async def _release_stale_runtime_assignments(pool, backend, *, limit: int = 500)
     return released
 
 
-def _container_age_s(container: dict[str, Any]) -> float | None:
-    """Return container age in seconds from Docker/Kubernetes metadata."""
-    created = str(container.get("created") or "").strip()
-    if not created:
-        return None
-    try:
-        created_at = dt.datetime.fromisoformat(created.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=dt.UTC)
-    return max((dt.datetime.now(dt.UTC) - created_at).total_seconds(), 0.0)
-
-
 async def reconcile_tick() -> None:
-    """Periodic reconciliation: check DB vs Docker, enforce idle TTL, clean orphans.
+    """Periodic reconciliation: check DB vs backend, enforce idle TTL, clean orphans.
 
     Runs every 60s from app lifespan. Replaces supervise_wires().
     """
@@ -1360,7 +1344,7 @@ async def reconcile_tick() -> None:
                     thread_key,
                 )
 
-        # Step A: Reconcile DB sessions against Docker
+        # Step A: Reconcile DB sessions against the active sandbox backend.
         rows = await pool.fetch(
             "SELECT thread_key, sandbox_id, state "
             "FROM sandbox_sessions "
@@ -1374,7 +1358,7 @@ async def reconcile_tick() -> None:
                 try:
                     st = await backend.status_by_id(sandbox_id)
                 except Exception:
-                    continue  # transient Docker error — skip, don't destroy
+                    continue  # transient backend error -- skip, don't destroy
                 if st not in ("running", "created"):
                     log.info(
                         "reconcile_session_gone",
@@ -1533,71 +1517,7 @@ async def reconcile_tick() -> None:
             float(SUSPENDED_RETENTION_S),
         )
 
-        # Step F: Clean orphan DinD sidecars
-        try:
-            dind_containers = await backend.list_containers({"ai2.dind": "true"})
-            sandbox_containers = await backend.list_containers(
-                {"centaur-agent": "true", "ai2.pipe": "true"}
-            )
-            live_sandbox_names = {
-                c["name"] for c in sandbox_containers if c["status"] == "running"
-            }
-            for dind in dind_containers:
-                # Derive expected sandbox name from DinD name
-                dind_name = dind["name"]
-                expected_sandbox = dind_name.replace(
-                    "centaur-dind-", "centaur-sandbox-", 1
-                )
-                if expected_sandbox not in live_sandbox_names:
-                    # Check age — only kill DinDs older than 5 minutes
-                    import datetime
-
-                    try:
-                        created = datetime.datetime.fromisoformat(
-                            dind["created"].replace("Z", "+00:00")
-                        )
-                        age_s = (
-                            datetime.datetime.now(datetime.timezone.utc) - created
-                        ).total_seconds()
-                    except Exception:
-                        age_s = 9999
-                    if age_s > 300:
-                        log.info(
-                            "reconcile_orphan_dind", dind=dind_name, age_s=round(age_s)
-                        )
-                        with contextlib.suppress(Exception):
-                            await backend.stop_by_id(dind["id"])
-        except Exception:
-            log.warning("reconcile_dind_scan_failed", exc_info=True)
-
-        # Step G: Clean old exited agent containers. These are not DinD sidecars
-        # and otherwise accumulate forever after normal exits.
-        try:
-            agent_containers = await backend.list_containers(
-                {"centaur-agent": "true", "ai2.pipe": "true"}
-            )
-            for container in agent_containers:
-                status = str(container.get("status") or "")
-                if status in {"running", "created"}:
-                    continue
-                age_s = _container_age_s(container)
-                if age_s is None or age_s <= EXITED_SANDBOX_RETENTION_S:
-                    continue
-                name = str(container.get("name") or "")
-                cid = str(container.get("id") or "")
-                log.info(
-                    "sandbox_container_pruned",
-                    sandbox=cid[:12],
-                    name=name,
-                    status=status,
-                    age_s=round(age_s),
-                )
-                with contextlib.suppress(Exception):
-                    await backend.stop_by_id(cid)
-        except Exception:
-            log.warning("reconcile_sandbox_container_prune_failed", exc_info=True)
-
-        # Step H: Release active assignment rows whose runtime has disappeared.
+        # Step E: Release active assignment rows whose runtime has disappeared.
         # This keeps spawn gating and operator views from being poisoned by
         # historical assignment rows while leaving live executions to the
         # execution watchdog.

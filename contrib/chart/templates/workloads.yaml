@@ -39,11 +39,8 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.auth.existingSecretName | quote }}
-                  key: {{ .Values.postgres.auth.existingSecretKey | quote }}
-{{- else }}
-            - name: POSTGRES_PASSWORD
-              value: {{ .Values.postgres.auth.password | quote }}
+                  name: {{ required "postgres.auth.existingSecretName is required when postgres.enabled=true" .Values.postgres.auth.existingSecretName | quote }}
+                  key: {{ required "postgres.auth.existingSecretKey is required when postgres.enabled=true" .Values.postgres.auth.existingSecretKey | quote }}
 {{- end }}
           ports:
             - containerPort: 5432
@@ -91,6 +88,7 @@ spec:
     metadata:
       annotations:
         checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "firewallCa" .Values.firewall.ca "database" .Values.database "postgresAuth" .Values.postgres.auth) | sha256sum }}
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "secrets") | nindent 8 }}
     spec:
@@ -108,18 +106,21 @@ spec:
               value: {{ .Values.secretManager.backend | quote }}
             - name: SECRET_ENV_PREFIX
               value: {{ .Values.secretManager.envPrefix | quote }}
+            - name: SECRETS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSECRETS_AUTH_TOKEN" .Values.secretManager.envPrefix }}
 {{- range $name, $value := .Values.secrets.extraEnv }}
             - name: {{ $name }}
               value: {{ $value | quote }}
 {{- end }}
-{{- if or .Values.secrets.bootstrapSecretName .Values.secretManager.existingSecretName .Values.secretManager.generatedSecret.enabled }}
           envFrom:
             - secretRef:
 {{- if .Values.secrets.bootstrapSecretName }}
                 name: {{ .Values.secrets.bootstrapSecretName | quote }}
 {{- else }}
                 name: {{ include "centaur.secretEnvName" . }}
-{{- end }}
 {{- end }}
           ports:
             - containerPort: 8100
@@ -138,120 +139,6 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "firewall") }}
-  labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "firewall") | nindent 4 }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "firewall") | nindent 6 }}
-  template:
-    metadata:
-      annotations:
-        checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "firewallCa" .Values.firewall.ca) | sha256sum }}
-      labels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "firewall") | nindent 8 }}
-    spec:
-      automountServiceAccountToken: false
-      {{- with .Values.global.imagePullSecrets }}
-      imagePullSecrets:
-{{ toYaml . | nindent 8 }}
-      {{- end }}
-      initContainers:
-        - name: firewall-ca-bootstrap
-          image: {{ printf "%s:%s" .Values.firewall.image.repository .Values.firewall.image.tag | quote }}
-          imagePullPolicy: {{ .Values.firewall.image.pullPolicy }}
-          env:
-            - name: FIREWALL_CA_CERT
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sFIREWALL_CA_CERT" .Values.secretManager.envPrefix }}
-            - name: FIREWALL_CA_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sFIREWALL_CA_KEY" .Values.secretManager.envPrefix }}
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              printf '%s\n%s\n' "$FIREWALL_CA_KEY" "$FIREWALL_CA_CERT" > /home/mitmproxy/.mitmproxy/mitmproxy-ca.pem
-          volumeMounts:
-            - name: firewall-mitmproxy-config
-              mountPath: /home/mitmproxy/.mitmproxy
-          securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
-      containers:
-        - name: firewall
-          image: {{ printf "%s:%s" .Values.firewall.image.repository .Values.firewall.image.tag | quote }}
-          imagePullPolicy: {{ .Values.firewall.image.pullPolicy }}
-{{- $defaultTrustedInternalHosts := printf "%s,%s.%s.svc.cluster.local,api" (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "api")) .Release.Namespace }}
-          env:
-            - name: FIREWALL_CONTROL_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sFIREWALL_CONTROL_TOKEN" .Values.secretManager.envPrefix }}
-            - name: API_URL
-              value: {{ printf "http://%s:8000" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
-            - name: SECRET_MANAGER_URL
-              value: {{ printf "http://%s:8100" (include "centaur.componentName" (dict "root" . "component" "secrets")) | quote }}
-            - name: FIREWALL_TRUSTED_INTERNAL_HOSTS
-              value: {{ if .Values.firewall.trustedInternalHosts }}{{ printf "%s,%s" $defaultTrustedInternalHosts .Values.firewall.trustedInternalHosts | quote }}{{ else }}{{ $defaultTrustedInternalHosts | quote }}{{ end }}
-{{- range $name, $value := .Values.firewall.extraEnv }}
-            - name: {{ $name }}
-              value: {{ $value | quote }}
-{{- end }}
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/sh
-                  - -ec
-                  - |
-                    for _ in $(seq 1 30); do
-                      if curl -fsS http://127.0.0.1:{{ .Values.firewall.service.controlPort }}/health >/dev/null; then
-                        break
-                      fi
-                      sleep 1
-                    done
-                    if injection_map="$(curl -fsS http://{{ include "centaur.componentName" (dict "root" . "component" "api") }}:8000/internal/injection-map 2>/dev/null)"; then
-                      curl -fsS \
-                        -X POST \
-                        -H "Authorization: Bearer ${FIREWALL_CONTROL_TOKEN}" \
-                        -H 'Content-Type: application/json' \
-                        --data "$injection_map" \
-                        http://127.0.0.1:{{ .Values.firewall.service.controlPort }}/injection-map >/dev/null
-                    fi
-          ports:
-            - containerPort: {{ .Values.firewall.service.proxyPort }}
-              name: proxy
-            - containerPort: {{ .Values.firewall.service.controlPort }}
-              name: control
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: {{ .Values.firewall.service.controlPort }}
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: {{ .Values.firewall.service.controlPort }}
-          securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
-          volumeMounts:
-            - name: firewall-mitmproxy-config
-              mountPath: /home/mitmproxy/.mitmproxy
-              readOnly: false
-      volumes:
-        - name: firewall-mitmproxy-config
-          emptyDir: {}
----
-{{- if .Values.ironProxy.enabled }}
-apiVersion: apps/v1
-kind: Deployment
-metadata:
   name: {{ include "centaur.componentName" (dict "root" . "component" "iron-proxy") }}
   labels:
 {{ include "centaur.componentLabels" (dict "root" . "component" "iron-proxy") | nindent 4 }}
@@ -264,6 +151,7 @@ spec:
     metadata:
       annotations:
         checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "ironProxy" .Values.ironProxy) | sha256sum }}
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-proxy") | nindent 8 }}
     spec:
@@ -277,8 +165,6 @@ spec:
           image: {{ printf "%s:%s" .Values.ironProxy.image.repository .Values.ironProxy.image.tag | quote }}
           imagePullPolicy: {{ .Values.ironProxy.image.pullPolicy }}
           env:
-            - name: SECRET_MANAGER_URL
-              value: {{ printf "http://%s:8100" (include "centaur.componentName" (dict "root" . "component" "secrets")) | quote }}
             - name: IRON_MANAGEMENT_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -288,17 +174,24 @@ spec:
             - name: {{ $name }}
               value: {{ $value | quote }}
 {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "centaur.secretEnvName" . }}
           ports:
             - containerPort: {{ .Values.ironProxy.service.proxyPort }}
               name: proxy
             - containerPort: {{ .Values.ironProxy.service.managementPort }}
               name: management
+            - containerPort: {{ .Values.ironProxy.service.healthPort }}
+              name: health
           readinessProbe:
-            tcpSocket:
-              port: {{ .Values.ironProxy.service.proxyPort }}
+            httpGet:
+              path: /healthz
+              port: {{ .Values.ironProxy.service.healthPort }}
           livenessProbe:
-            tcpSocket:
-              port: {{ .Values.ironProxy.service.proxyPort }}
+            httpGet:
+              path: /healthz
+              port: {{ .Values.ironProxy.service.healthPort }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts:
@@ -306,6 +199,9 @@ spec:
               mountPath: /etc/iron-proxy
             - name: iron-proxy-certs
               mountPath: /certs
+            - name: iron-proxy-ca
+              mountPath: /etc/iron-proxy-ca
+              readOnly: true
         - name: firewall-manager
           image: {{ printf "%s:%s" .Values.ironProxy.manager.image.repository .Values.ironProxy.manager.image.tag | quote }}
           imagePullPolicy: {{ .Values.ironProxy.manager.image.pullPolicy }}
@@ -315,6 +211,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sFIREWALL_CONTROL_TOKEN" .Values.secretManager.envPrefix }}
+            - name: SECRETS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSECRETS_AUTH_TOKEN" .Values.secretManager.envPrefix }}
             - name: IRON_MANAGEMENT_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -332,6 +233,9 @@ spec:
               value: {{ .Values.ironProxy.manager.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL
               value: {{ .Values.ironProxy.manager.secretTtl | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ include "centaur.secretEnvName" . }}
           ports:
             - containerPort: {{ .Values.ironProxy.manager.service.controlPort }}
               name: control
@@ -353,8 +257,10 @@ spec:
           emptyDir: {}
         - name: iron-proxy-certs
           emptyDir: {}
+        - name: iron-proxy-ca
+          secret:
+            secretName: {{ include "centaur.trustedCaKeySecretName" . }}
 ---
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -370,6 +276,7 @@ spec:
     metadata:
       annotations:
         checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "database" .Values.database "postgresAuth" .Values.postgres.auth) | sha256sum }}
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "pgbouncer") | nindent 8 }}
     spec:
@@ -383,13 +290,17 @@ spec:
           image: {{ printf "%s:%s" .Values.pgbouncer.image.repository .Values.pgbouncer.image.tag | quote }}
           imagePullPolicy: {{ .Values.pgbouncer.image.pullPolicy }}
           env:
-            - name: FIREWALL_CONTROL_TOKEN
+            - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sFIREWALL_CONTROL_TOKEN" .Values.secretManager.envPrefix }}
-            - name: SECRET_MANAGER_URL
-              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "firewall")) .Values.firewall.service.controlPort | quote }}
+                  name: {{ required "postgres.auth.existingSecretName is required" .Values.postgres.auth.existingSecretName | quote }}
+                  key: {{ required "postgres.auth.existingSecretKey is required" .Values.postgres.auth.existingSecretKey | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.auth.username | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.auth.database | quote }}
+            - name: POSTGRES_HOST
+              value: {{ include "centaur.componentName" (dict "root" . "component" "postgres") | quote }}
             - name: AUTH_TYPE
               value: {{ .Values.pgbouncer.authType | quote }}
             - name: POOL_MODE
@@ -428,14 +339,13 @@ spec:
       annotations:
         checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "database" .Values.database "firewallCa" .Values.firewall.ca) | sha256sum }}
         checksum/firewall-ca: {{ toJson .Values.firewall.ca | sha256sum }}
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
         checksum/overlay: {{ toJson .Values.overlay | sha256sum }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 8 }}
     spec:
-      automountServiceAccountToken: {{ ternary "true" "false" (eq .Values.api.sandboxBackend "kubernetes") }}
-      {{- if eq .Values.api.sandboxBackend "kubernetes" }}
+      automountServiceAccountToken: true
       serviceAccountName: {{ include "centaur.apiServiceAccountName" . }}
-      {{- end }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
@@ -469,42 +379,45 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
-            - name: SANDBOX_SIGNING_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sSANDBOX_SIGNING_KEY" .Values.secretManager.envPrefix }}
             - name: SLACK_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSLACK_SIGNING_SECRET" .Values.secretManager.envPrefix }}
-{{- if .Values.slackbot.enabled }}
             - name: SLACKBOT_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSLACKBOT_API_KEY" .Values.secretManager.envPrefix }}
-{{- end }}
+            - name: SANDBOX_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSANDBOX_SIGNING_KEY" .Values.secretManager.envPrefix }}
             - name: FIREWALL_CONTROL_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sFIREWALL_CONTROL_TOKEN" .Values.secretManager.envPrefix }}
+            - name: SECRETS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSECRETS_AUTH_TOKEN" .Values.secretManager.envPrefix }}
             - name: SECRET_MANAGER_URL
-              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "firewall")) .Values.firewall.service.controlPort | quote }}
+              value: {{ include "centaur.secretManagerUrl" . | quote }}
             - name: FIREWALL_HEALTH_URL
-              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "firewall")) .Values.firewall.service.controlPort | quote }}
+              value: {{ include "centaur.firewallControlUrl" . | quote }}
             - name: HTTPS_PROXY
-              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "firewall")) .Values.firewall.service.proxyPort | quote }}
+              value: {{ include "centaur.firewallProxyUrl" . | quote }}
             - name: REQUESTS_CA_BUNDLE
               value: /firewall-certs/ca-cert.pem
             - name: SSL_CERT_FILE
               value: /firewall-certs/ca-cert.pem
             - name: NO_PROXY
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "firewall")) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "secrets")) (include "centaur.firewallNoProxyHosts" .) | quote }}
             - name: no_proxy
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "firewall")) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "secrets")) (include "centaur.firewallNoProxyHosts" .) | quote }}
             - name: CENTAUR_LOG_LEVEL
               value: info
             - name: TOOL_DIRS
@@ -534,9 +447,7 @@ spec:
             - name: AGENT_API_URL
               value: {{ printf "http://%s:8000" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
             - name: FIREWALL_HOST
-              value: {{ include "centaur.componentName" (dict "root" . "component" "firewall") | quote }}
-            - name: SANDBOX_BACKEND
-              value: {{ .Values.api.sandboxBackend | quote }}
+              value: {{ include "centaur.firewallProxyHost" . | quote }}
             - name: KUBERNETES_EGRESS_DISCOVERY_ENABLED
               value: {{ ternary "1" "0" .Values.api.egressDiscovery.enabled | quote }}
             - name: KUBERNETES_EGRESS_SERVICE_NAMESPACE
@@ -600,10 +511,6 @@ spec:
 {{- if .Values.slackbot.enabled }}
             - name: SLACKBOT_URL
               value: {{ printf "http://%s:3001" (include "centaur.componentName" (dict "root" . "component" "slackbot")) | quote }}
-{{- end }}
-{{- if .Values.api.dockerHost }}
-            - name: DOCKER_HOST
-              value: {{ .Values.api.dockerHost | quote }}
 {{- end }}
 {{- range $name, $value := .Values.api.extraEnv }}
             - name: {{ $name }}
@@ -670,6 +577,7 @@ spec:
       annotations:
         checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "database" .Values.database "firewallCa" .Values.firewall.ca) | sha256sum }}
         checksum/firewall-ca: {{ toJson .Values.firewall.ca | sha256sum }}
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 8 }}
     spec:
@@ -683,23 +591,43 @@ spec:
           image: {{ printf "%s:%s" .Values.slackbot.image.repository .Values.slackbot.image.tag | quote }}
           imagePullPolicy: {{ .Values.slackbot.image.pullPolicy }}
           env:
-            - name: FIREWALL_CONTROL_TOKEN
+            - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sFIREWALL_CONTROL_TOKEN" .Values.secretManager.envPrefix }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" .Values.secretManager.envPrefix }}
+            - name: SLACK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACK_SIGNING_SECRET" .Values.secretManager.envPrefix }}
+            - name: SLACKBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACKBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: SECRETS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSECRETS_AUTH_TOKEN" .Values.secretManager.envPrefix }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:8000" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
             - name: SECRET_MANAGER_URL
-              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "firewall")) .Values.firewall.service.controlPort | quote }}
+              value: {{ include "centaur.secretManagerUrl" . | quote }}
             - name: HTTPS_PROXY
-              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "firewall")) .Values.firewall.service.proxyPort | quote }}
+              value: {{ include "centaur.firewallProxyUrl" . | quote }}
             - name: NODE_EXTRA_CA_CERTS
               value: /firewall-certs/ca-cert.pem
             - name: NO_PROXY
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "firewall")) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "secrets")) (include "centaur.firewallNoProxyHosts" .) | quote }}
             - name: no_proxy
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "firewall")) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "secrets")) (include "centaur.firewallNoProxyHosts" .) | quote }}
 {{- range $name, $value := .Values.slackbot.extraEnv }}
             - name: {{ $name }}
               value: {{ $value | quote }}

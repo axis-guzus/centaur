@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 from api.sandbox.base import SandboxBackend
 
 _backend: SandboxBackend | None = None
@@ -24,14 +22,7 @@ def configure(backend: SandboxBackend) -> None:
 
 
 def auto_configure() -> SandboxBackend:
-    """Auto-detect which backend to use based on environment."""
-    backend_name = os.getenv("SANDBOX_BACKEND", "docker")
-    if backend_name == "docker":
-        from api.sandbox.docker import DockerSandboxBackend
+    """Configure the Kubernetes sandbox backend."""
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
 
-        return DockerSandboxBackend()
-    if backend_name == "kubernetes":
-        from api.sandbox.kubernetes import KubernetesExecutorBackend
-
-        return KubernetesExecutorBackend()
-    raise ValueError(f"Unknown sandbox backend: {backend_name}")
+    return KubernetesExecutorBackend()

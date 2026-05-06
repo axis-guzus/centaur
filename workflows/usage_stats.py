@@ -1,26 +1,20 @@
 """Workflow: regenerate usage stats for the Centaur usage dashboard.
 
-Queries agent_execution_events (Postgres) for tool/skill/user/team data
-and nginx access logs (VictoriaLogs) for app traffic. Writes aggregated
-stats to the usage_stats table as a single JSONB blob, with separate
-aggregations per time window (all, 30d, 7d, 1d).
+Queries agent_execution_events (Postgres) for tool/skill/user/team data.
+Writes aggregated stats to the usage_stats table as a single JSONB blob,
+with separate aggregations per time window (all, 30d, 7d, 1d).
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
-import logging
 import re
 from collections import Counter
 from decimal import Decimal
 from typing import Any
 
-import httpx
-
 from api.workflow_engine import WorkflowContext
-
-log = logging.getLogger(__name__)
 
 WORKFLOW_NAME = "usage_stats"
 SCHEDULE = {"interval_seconds": 300, "no_delivery": True}
@@ -135,15 +129,6 @@ SKILL_EMOJIS = {
     "venue-scout": "\U0001F4CD",
 }
 
-APP_EMOJIS = {
-    "docs": "\U0001F4D6", "usage": "\U0001F4CA",
-    "hello-react": "\u269B\uFE0F", "tool-dashboard": "\U0001F4CA",
-    "paradigm-sentiment-tracker": "\U0001F4C8",
-    "block-metrics": "\u26D3\uFE0F", "dashboard": "\U0001F4CA",
-    "test": "\U0001F9EA", "shift-timeline": "\U0001F4C5",
-    "touchpoint-bot": "\U0001F916",
-}
-
 WORKFLOW_EMOJIS = {
     "slack_thread_turn": "\U0001F4AC",
     "policy_news_monitor": "\U0001F4F0",
@@ -172,11 +157,6 @@ INTERNAL_TOOLS = frozenset({
     "research", "events", "termsheet", "social-monitor", "demo", "unit410",
     "infra", "crypto", "archiver", "media", "vmetrics", "metadata",
     "productivity", "comms", "nano-banana", "read_web_page",
-})
-
-STATIC_EXTS = frozenset({
-    "css", "js", "png", "ico", "json", "svg", "jpg",
-    "woff", "woff2", "map", "webp",
 })
 
 CALL_RE = re.compile(r"call\s+([a-z][a-z0-9_-]*)\s+([a-z][a-z0-9_-]*)")
@@ -526,86 +506,6 @@ def _aggregate_workflows(events: list[dict]) -> list[dict]:
     return result
 
 
-# ── VictoriaLogs (app traffic) ───────────────────────────────────
-
-
-async def _vlogs_stats(client: httpx.AsyncClient, query: str) -> dict[str, int]:
-    resp = await client.get(
-        "http://victorialogs:9428/select/logsql/stats_query",
-        params={"query": query},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    result: dict[str, int] = {}
-    for item in data.get("data", {}).get("result", []):
-        metric = item.get("metric", {})
-        label = ""
-        for k, v in metric.items():
-            if k != "__name__":
-                label = v
-                break
-        value = int(item.get("value", [0, "0"])[1])
-        if label and " " not in label and "?" not in label and '"' not in label:
-            result[label] = result.get(label, 0) + value
-    return result
-
-
-async def _extract_apps(pool, window_label: str) -> list[dict]:
-    app_rows = await pool.fetch("SELECT name, status FROM apps ORDER BY name")
-    app_status = {r["name"]: r["status"] for r in app_rows}
-
-    time_filter = "_time:1y" if window_label == "all" else f"_time:{window_label}"
-    views: dict[str, int] = {}
-    requests: dict[str, int] = {}
-    visitors: dict[str, int] = {}
-    errors: dict[str, int] = {}
-
-    static_filter = " AND NOT _msg:.css AND NOT _msg:.js AND NOT _msg:.png AND NOT _msg:.ico AND NOT _msg:.json AND NOT _msg:.svg AND NOT _msg:.woff AND NOT _msg:.map AND NOT _msg:.webp"
-    base = f'{time_filter} AND _msg:/apps/ AND _msg:"HTTP/1.1" AND NOT _msg:INFO'
-    extract_app = '| extract "GET /apps/<app>/" from _msg'
-    extract_app_any = '| extract "/apps/<app>/" from _msg'
-    extract_ip = '| extract "\\"<ip>\\"" from _msg'
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            views = await _vlogs_stats(
-                client,
-                f'{base} AND _msg:"GET /apps/" AND _msg:" 200 "{static_filter} {extract_app} | stats by (app) count() as views',
-            )
-            requests = await _vlogs_stats(
-                client,
-                f"{base} {extract_app_any} | stats by (app) count() as requests",
-            )
-            visitors = await _vlogs_stats(
-                client,
-                f"{base} {extract_app_any} {extract_ip} | stats by (app) count_uniq(ip) as visitors",
-            )
-            errors = await _vlogs_stats(
-                client,
-                f'{base} AND _msg:" 5" {extract_app_any} | stats by (app) count() as errors',
-            )
-    except Exception:
-        log.warning("failed to query VictoriaLogs for app traffic", exc_info=True)
-
-    all_apps = set(views) | set(requests) | set(visitors)
-    result = []
-    for app in sorted(all_apps, key=lambda a: views.get(a, 0), reverse=True):
-        v = views.get(app, 0)
-        r = requests.get(app, 0)
-        if v == 0 and r < 3:
-            continue
-        result.append({
-            "app": app,
-            "views": v, "requests": r,
-            "visitors": visitors.get(app, 0),
-            "errors": errors.get(app, 0),
-            "error_rate": round(errors.get(app, 0) / r * 100, 1) if r > 0 else 0,
-            "status": app_status.get(app, "?"),
-            "emoji": APP_EMOJIS.get(app, "\U0001F4E6"),
-        })
-    return result
-
-
 # ── Window filtering ─────────────────────────────────────────────
 
 
@@ -687,14 +587,6 @@ async def handler(_inp: dict[str, Any], ctx: WorkflowContext) -> dict[str, Any]:
             step_kind="transform",
         )
 
-    # Apps use VictoriaLogs with its own time filter
-    for label in WINDOWS:
-        windowed[label]["apps"] = await ctx.step(
-            f"extract_apps_{label}",
-            lambda lbl=label: _extract_apps(pool, lbl),
-            step_kind="gather",
-        )
-
     data = {"windows": windowed}
 
     await ctx.step(
@@ -715,7 +607,6 @@ async def handler(_inp: dict[str, Any], ctx: WorkflowContext) -> dict[str, Any]:
         skills=len(all_w.get("skills", [])),
         users=len(all_w.get("users", [])),
         teams=len(all_w.get("teams", [])),
-        apps=len(all_w.get("apps", [])),
         workflows=len(all_w.get("workflows", [])),
     )
 

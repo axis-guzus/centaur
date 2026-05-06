@@ -10,7 +10,7 @@ on:
       - centaur_sdk/**
       - packages/**
       - tools/**
-      - scripts/bootstrap-secrets.sh
+      - scripts/bootstrap-k8s-secrets.sh
       - package.json
       - pnpm-lock.yaml
       - pnpm-workspace.yaml
@@ -40,10 +40,6 @@ jobs:
           - service: slackbot
             image: centaur-slackbot
             dockerfile: services/slackbot/Dockerfile
-            target: ""
-          - service: firewall
-            image: centaur-firewall
-            dockerfile: services/firewall/Dockerfile
             target: ""
           - service: secrets
             image: centaur-secrets

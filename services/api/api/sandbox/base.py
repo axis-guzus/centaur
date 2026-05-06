@@ -12,13 +12,13 @@ from typing import Any
 class RuntimeState:
     """Process-local ephemeral state for a running sandbox.
 
-    Keyed by sandbox_id in agent._runtime. Contains the aiodocker Stream
-    handle and turn bookkeeping. Fully async — no threads or queues.
+    Keyed by sandbox_id in agent._runtime. Contains backend stream handles
+    and turn bookkeeping. Fully async -- no threads or queues.
     """
 
     turn_counter: int = 0
-    stdout_stream: Any = None  # aiodocker Stream for reading stdout
-    stdin_stream: Any = None  # aiodocker Stream for writing stdin
+    stdout_stream: Any = None  # backend stream for reading stdout
+    stdin_stream: Any = None  # backend stream for writing stdin
     attach_context: Any = None  # backend-specific context manager for attach sessions
     prefetched_stdout: list[str] | None = None  # buffered lines loaded before live attach
     last_result: str | None = None
@@ -26,14 +26,14 @@ class RuntimeState:
 
 @dataclass
 class SandboxSession:
-    """Represents a running sandbox (container or VM)."""
+    """Represents a running sandbox."""
 
-    sandbox_id: str  # backend-specific ID (container ID, VM ID, etc.)
+    sandbox_id: str  # backend-specific ID, such as a Kubernetes Pod name
     thread_key: str
     harness: str
     engine: str
     started_at: float = 0.0
-    backend_name: str = ""  # "docker", "iron", etc.
+    backend_name: str = ""  # "kubernetes", etc.
     db_state: str = ""
     agent_thread_id: str = ""
     last_delivered_id: str = ""
@@ -49,7 +49,7 @@ class SandboxBackend(abc.ABC):
     @property
     @abc.abstractmethod
     def name(self) -> str:
-        """Short identifier for this backend (e.g. 'docker', 'iron')."""
+        """Short identifier for this backend, for example 'kubernetes'."""
 
     @property
     def supports_warm_pool(self) -> bool:
@@ -110,15 +110,15 @@ class SandboxBackend(abc.ABC):
     async def exec_run(
         self, sandbox_id: str, cmd: list[str], *, environment: dict | None = None, user: str = ""
     ) -> tuple[int, bytes]:
-        """Run a command inside a container and return (exit_code, output)."""
+        """Run a command inside a sandbox and return (exit_code, output)."""
         raise NotImplementedError
 
     async def status_by_id(self, sandbox_id: str) -> str:
-        """Check container status by ID (no session needed)."""
+        """Check sandbox status by ID (no session needed)."""
         raise NotImplementedError
 
     async def stop_by_id(self, sandbox_id: str) -> None:
-        """Stop and remove a container by ID (no session needed)."""
+        """Stop and remove a sandbox by ID (no session needed)."""
         raise NotImplementedError
 
     async def interrupt_by_id(self, sandbox_id: str) -> None:
@@ -126,11 +126,11 @@ class SandboxBackend(abc.ABC):
         raise NotImplementedError
 
     async def rename_by_id(self, sandbox_id: str, new_name: str) -> None:
-        """Rename a container by ID."""
+        """Rename a sandbox by ID."""
         raise NotImplementedError
 
     async def refresh_token_by_id(self, sandbox_id: str, new_token: str) -> None:
-        """Write a fresh API token into a running container."""
+        """Write a fresh API token into a running sandbox."""
         raise NotImplementedError
 
     async def recover_warm(self, pool_harness: str) -> list[SandboxSession]:

@@ -48,9 +48,8 @@ COPY tools/ tools/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --inexact
 
-COPY services/api/bootstrap-secrets.sh /app/scripts/bootstrap-secrets.sh
 COPY services/api/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh /app/scripts/bootstrap-secrets.sh
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 8000
 

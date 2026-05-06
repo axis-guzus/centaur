@@ -26,7 +26,7 @@ from kubernetes_asyncio.stream.ws_client import (
 import structlog
 
 from api.sandbox.base import SandboxBackend, SandboxSession
-from api.sandbox.docker import _build_harness_cmd, _container_env, _image
+from api.sandbox.config import build_harness_cmd, container_env, image, runtime_for_session
 
 log = structlog.get_logger()
 
@@ -39,9 +39,7 @@ _SANDBOX_OVERLAY_DIR = f"{_SANDBOX_OVERLAY_ROOT}/org"
 
 
 def _get_rt(session: SandboxSession):
-    from api.agent import _get_runtime
-
-    return _get_runtime(session.sandbox_id)
+    return runtime_for_session(session)
 
 
 def _repo_root() -> Path:
@@ -376,7 +374,7 @@ class KubernetesExecutorBackend(SandboxBackend):
 
         pod_name = _resource_name("centaur-sandbox", thread_key)
         secret_name = _prompt_secret_name(pod_name)
-        env = _container_env(thread_key, pod_name, resume_thread_id=resume_thread_id)
+        env = container_env(thread_key, pod_name, resume_thread_id=resume_thread_id)
         overlay_image = _overlay_image()
         if overlay_image:
             env.append(f"CENTAUR_OVERLAY_DIR={_SANDBOX_OVERLAY_DIR}")
@@ -482,7 +480,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                 }
             )
 
-        cmd = _build_harness_cmd(engine, model)
+        cmd = build_harness_cmd(engine, model)
 
         pod_spec: dict[str, Any] = {
             "apiVersion": "v1",
@@ -503,7 +501,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                 "containers": [
                     {
                         "name": _CONTAINER_NAME,
-                        "image": _image(),
+                        "image": image(),
                         "imagePullPolicy": _image_pull_policy(),
                         "args": cmd,
                         "stdin": True,

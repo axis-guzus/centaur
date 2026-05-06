@@ -30,7 +30,7 @@ Most agent runtimes handle a single request-response turn. Centaur's [durable wo
 
 ### The agent never sees your secrets
 
-Each conversation runs in an isolated Docker container on an internal-only network. A [MITM proxy](services/firewall/) injects real credentials at the network boundary — the agent never holds them directly. It can make authenticated API calls through the proxy, but it can't extract keys, reach internal services, or operate undetected. Every outbound request is audit-logged. Response bodies are scanned for leaked secrets and redacted in real-time.
+Each conversation runs in an isolated Kubernetes Pod governed by NetworkPolicies. A [MITM proxy](services/firewall/) injects real credentials at the network boundary -- the agent never holds them directly. It can make authenticated API calls through the proxy, but it can't extract keys, reach internal services, or operate undetected. Every outbound request is audit-logged. Response bodies are scanned for leaked secrets and redacted in real-time.
 
 ### Bring any agent runtime
 
@@ -65,19 +65,17 @@ Centaur's entire security-critical core is **~5,400 lines of Python**: the [API]
         │ workflow engine (checkpoint/replay)            │
         └───────────────┬───────────────┬───────────────┘
                         │               │
-                        │ DB pool       │ Docker API
+                        │ DB pool       │ Kubernetes API
                         v               v
               ┌────────────────┐   ┌──────────────────────┐
-              │ pgbouncer      │   │ docker-socket-proxy  │
-              └──────┬─────────┘   └──────────┬───────────┘
-                     │                        │
-                     v                        v
-              ┌────────────────┐     ┌────────────────────┐
-              │ Postgres       │     │ sandbox            │
-              │ durable state  │<--->│ centaur-agent      │
-              └────────────────┘     └─────────┬──────────┘
-                                               │ tool calls + HTTPS proxy
-                                               v
+              │ pgbouncer      │   │ sandbox Pods         │
+              └──────┬─────────┘   │ centaur-agent        │
+                     │             └──────────┬───────────┘
+                     v                        │ tool calls + HTTPS proxy
+              ┌────────────────┐              v
+              │ Postgres       │
+              │ durable state  │
+              └────────────────┘
               ┌────────────────┐     ┌────────────────────┐
               │ secrets        │────>│ firewall           │────> external LLMs
               │ 1Password/env  │     │ mitmproxy          │      + external APIs
@@ -112,9 +110,9 @@ See the [Developer Guide](AGENTS.md#durable-workflows) for full API reference, b
 
 | | Centaur | OpenClaw | IronClaw |
 |---|---|---|---|
-| **Process model** | 1 conversation = 1 isolated Docker container | Single Node.js process, full system access | WASM sandbox per tool |
+| **Process model** | 1 conversation = 1 isolated Kubernetes Pod | Single Node.js process, full system access | WASM sandbox per tool |
 | **Secrets** | MITM proxy injection — agent can't extract keys, but can make calls through the proxy | `~/.openclaw/credentials/` with file perms | Host boundary injection (WASM only) |
-| **Blast radius** | Container on internal-only network, method-filtered, rate-limited | Agent has shell, filesystem, browser, credentials | WASM sandbox, limited to declared capabilities |
+| **Blast radius** | Pod isolated by NetworkPolicy, method-filtered, rate-limited | Agent has shell, filesystem, browser, credentials | WASM sandbox, limited to declared capabilities |
 | **Audit logging** | Every outbound request audit-logged via firewall; all container logs auto-collected into VictoriaLogs | None built-in | None built-in |
 | **Agent runtime** | Harness-agnostic (Amp, Claude Code, Codex, any CLI) | Locked to OpenClaw's runtime | Locked to IronClaw's runtime |
 | **Real engineering** | Full Linux sandbox — `git clone`, `cargo build`, run tests | Yes (but with full host access) | WASM — can't run arbitrary code |
@@ -126,13 +124,13 @@ Centaur's security is defense in depth — no single layer is a silver bullet, b
 
 ### What an attacker cannot do
 
-- **Extract credentials**: The agent never holds real API keys. Credentials exist only in the secrets manager on an isolated network (`secrets_net`) that only the firewall can reach. The firewall injects real secret values into HTTP headers in-flight. Sandbox containers see only key _names_ as placeholder values (e.g. `OPENAI_API_KEY=OPENAI_API_KEY` in the environment) — the real secret values never appear in the container's environment, filesystem, or memory.
+- **Extract credentials**: The agent never holds real API keys. Credentials exist only in the secrets manager and are only delivered in-flight by the firewall. Sandbox Pods see only key _names_ as placeholder values (e.g. `OPENAI_API_KEY=OPENAI_API_KEY` in the environment) -- the real secret values never appear in the Pod's environment, filesystem, or memory.
 
-- **Move laterally**: Sandbox containers live on `agent_net`, an internal Docker network. SSRF protection blocks requests to private IPs by resolving hostnames before forwarding. The database, secrets manager, and observability stack are on separate networks the sandbox cannot reach. Redirect responses to internal IPs are also blocked.
+- **Move laterally**: Sandbox Pods are isolated by Kubernetes NetworkPolicies. SSRF protection blocks requests to private IPs by resolving hostnames before forwarding. The database, secrets manager, and observability stack are not reachable from sandboxes except through explicitly allowed service paths. Redirect responses to internal IPs are also blocked.
 
 - **Use credentials on the wrong host**: Tools declare which API hosts and secret keys they need in their `pyproject.toml`. The API builds a host→keys injection map and pushes it to the firewall. A Slack tool's token can't be injected into an Etherscan request — the firewall strips unmatched key placeholders and logs the violation.
 
-- **Escalate privileges**: Each container gets an HMAC-SHA256 signed token (`sbx1.*`) bound to its thread and container ID, time-limited to 2 hours, with scopes restricted to `agent` and `tools:*` only. No admin access, no secrets endpoints, no key management. Database-backed API keys enforce fine-grained scopes (`admin`, `agent:execute`, `tools:<name>`, `threads:read`).
+- **Escalate privileges**: Each sandbox gets an HMAC-SHA256 signed token (`sbx1.*`) bound to its thread and sandbox ID, time-limited to 2 hours, with scopes restricted to `agent` and `tools:*` only. No admin access, no secrets endpoints, no key management. Database-backed API keys enforce fine-grained scopes (`admin`, `agent:execute`, `tools:<name>`, `threads:read`).
 
 - **Smuggle key names past the firewall**: The firewall applies NFKC unicode normalization, strips zero-width characters, and maps Cyrillic/Greek homoglyphs before scanning for key name placeholders. Header values that don't match the outbound allowlist are stripped entirely. User-Agent is forced to a fixed value.
 
@@ -146,7 +144,7 @@ Centaur's security is defense in depth — no single layer is a silver bullet, b
 
 - **Read data returned by API calls and tools**: The agent sees full responses from LLM APIs and tools it invokes. Response scanning redacts known secret values, but the agent sees all other data.
 
-- **Potentially root the container**: The sandbox is a Docker container, not a VM. Container escapes are a known risk class. Centaur mitigates with resource limits (4GB memory, 2 CPUs), read-only host mounts, and a proxied Docker socket that only allows container/network/exec operations. The Docker socket proxy is on a separate network that sandboxes cannot reach.
+- **Potentially root the sandbox**: The sandbox is a Kubernetes Pod, not a VM. Container escapes are a known risk class. Centaur mitigates with resource limits, read-only host mounts where used, least-privilege service accounts, and NetworkPolicies that keep sandboxes away from internal control-plane services.
 
 ### Architecture decisions that enforce this
 
@@ -154,9 +152,9 @@ Centaur's security is defense in depth — no single layer is a silver bullet, b
 
 - **Per-host injection maps**: Built from tool manifests, pushed to the firewall on startup and on every hot-reload. Wildcard host patterns (`*.domain.com`) are supported. Catch-all domains and raw IPs are rejected.
 
-- **8 isolated Docker networks**: `default` (host-facing nginx plus internal app traffic), `secrets_net` (firewall→secrets only), `secrets_egress` (secrets→1Password), `agent_net` (sandbox↔firewall↔API), `agent_egress` (sandbox direct egress for Amp DTW), `backend_net` (postgres/slackbot/api backplane), `control_net` (api↔pgbouncer↔firewall), and `obs_net` (monitoring).
+- **Kubernetes NetworkPolicies**: The chart denies traffic by default and then explicitly allows API, pgbouncer, Postgres, secrets, firewall, Slackbot, DNS, and sandbox egress paths needed for the local deployment.
 
-- **Warm pool**: Pre-spawned containers eliminate ~15s cold-start latency. The pool auto-replenishes, recovers on API restart, and mints fresh scoped tokens on claim.
+- **Warm pool**: Pre-spawned sandbox Pods eliminate cold-start latency. The pool auto-replenishes, recovers on API restart, and mints fresh scoped tokens on claim.
 
 - **Tool REST API**: Tools auto-generate endpoints at `/tools/{name}/{method}` with scope-checked access and method introspection. The API serves as a hosted tool server — sandboxes call it via `curl`, no MCP protocol needed.
 
@@ -167,9 +165,10 @@ See the [Developer Guide](./AGENTS.md) for full setup instructions, architecture
 ```sh
 git clone <repo-url>
 cd centaur
-cp .env.example .env          # configure secrets
-docker compose up -d           # start the stack
-docker compose build sandbox
+brew install just              # if needed
+export OP_SERVICE_ACCOUNT_TOKEN=... OP_VAULT=...
+export SLACK_BOT_TOKEN=... SLACK_SIGNING_SECRET=... SLACKBOT_API_KEY=...
+just up
 ```
 
 ## Database Migrations
@@ -191,7 +190,7 @@ Centaur builds on excellent open-source infrastructure:
 - [Amp](https://ampcode.com): The primary AI coding agent harness used inside the sandbox.
 - [mitmproxy](https://mitmproxy.org/): Powers the firewall's credential injection via HTTPS interception.
 - [FastAPI](https://fastapi.tiangolo.com/): The API server framework.
-- [Docker](https://www.docker.com/): Container isolation for the agent sandbox.
+- [Kubernetes](https://kubernetes.io/): Pod orchestration and NetworkPolicy isolation for agent sandboxes.
 
 ## Links
 

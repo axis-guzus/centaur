@@ -5,6 +5,9 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+_TOK = "test-secrets-token"
+_AUTH_HEADERS = {"Authorization": f"Bearer {_TOK}"}
+
 
 class _FakeResponse:
     def __init__(self, status_code: int, payload: dict[str, object]):
@@ -68,7 +71,7 @@ async def test_check_runtime_credentials_skipped_when_guard_disabled() -> None:
 async def test_check_runtime_credentials_ok_when_key_present() -> None:
     from api.runtime_guardrails import check_runtime_credentials
 
-    base = "http://firewall:8081"
+    base = "http://secrets:8100"
     url = f"{base}/secrets/AMP_API_KEY"
     fake_client = _FakeClient({url: _FakeResponse(200, {"value": "abc123"})})
 
@@ -76,11 +79,11 @@ async def test_check_runtime_credentials_ok_when_key_present() -> None:
         patch.dict(
             "os.environ",
             {
-                "FIREWALL_CONTROL_TOKEN": "control-token",
                 "RUNTIME_CREDENTIAL_GUARD_ENABLED": "1",
+                "SECRETS_AUTH_TOKEN": _TOK,
                 "REQUIRED_RUNTIME_SECRET_KEYS": "AMP_API_KEY",
                 "OPENAI_API_KEY": "ambient-provider-env-is-not-probed",
-                "FIREWALL_HEALTH_URL": base,
+                "SECRET_MANAGER_URL": base,
             },
             clear=True,
         ),
@@ -97,17 +100,16 @@ async def test_check_runtime_credentials_ok_when_key_present() -> None:
     assert report["probe_keys"] == []
     assert report["invalid_keys"] == []
     assert report["key_lengths"] == {"AMP_API_KEY": 6}
-    assert fake_client.calls == [(url, {"Authorization": "Bearer control-token"})]
+    assert fake_client.calls == [(url, _AUTH_HEADERS)]
 
 
 @pytest.mark.asyncio
-async def test_check_runtime_credentials_sends_bearer_when_token_set() -> None:
-    """Verify the firewall control token is sent as Authorization: Bearer."""
+async def test_check_runtime_credentials_sends_secrets_auth_token() -> None:
     from api.runtime_guardrails import check_runtime_credentials
 
-    base = "http://firewall:8081"
+    base = "http://secrets:8100"
     url = f"{base}/secrets/AMP_API_KEY"
-    fake = _FakeClient({url: _FakeResponse(200, {"value": "abc"})})
+    fake_client = _FakeClient({url: _FakeResponse(200, {"value": "abc123"})})
 
     with (
         patch.dict(
@@ -115,26 +117,27 @@ async def test_check_runtime_credentials_sends_bearer_when_token_set() -> None:
             {
                 "RUNTIME_CREDENTIAL_GUARD_ENABLED": "1",
                 "REQUIRED_RUNTIME_SECRET_KEYS": "AMP_API_KEY",
-                "FIREWALL_HEALTH_URL": base,
-                "FIREWALL_CONTROL_TOKEN": "test-token-xyz",
+                "SECRET_MANAGER_URL": base,
+                "SECRETS_AUTH_TOKEN": "tok-abc",
             },
             clear=True,
         ),
         patch(
             "api.runtime_guardrails.httpx.AsyncClient",
-            return_value=fake,
+            return_value=fake_client,
         ),
     ):
-        await check_runtime_credentials()
+        report = await check_runtime_credentials()
 
-    assert fake.calls == [(url, {"Authorization": "Bearer test-token-xyz"})]
+    assert report["status"] == "ok"
+    assert fake_client.calls == [(url, {"Authorization": "Bearer tok-abc"})]
 
 
 @pytest.mark.asyncio
 async def test_check_runtime_credentials_marks_openai_key_invalid_on_401() -> None:
     from api.runtime_guardrails import check_runtime_credentials
 
-    base = "http://firewall:8081"
+    base = "http://secrets:8100"
     secret_url = f"{base}/secrets/OPENAI_API_KEY"
     probe_url = "https://api.openai.com/v1/models"
     fake_client = _FakeClient(
@@ -149,8 +152,9 @@ async def test_check_runtime_credentials_marks_openai_key_invalid_on_401() -> No
             "os.environ",
             {
                 "RUNTIME_CREDENTIAL_GUARD_ENABLED": "1",
+                "SECRETS_AUTH_TOKEN": _TOK,
                 "REQUIRED_RUNTIME_SECRET_KEYS": "OPENAI_API_KEY",
-                "FIREWALL_HEALTH_URL": base,
+                "SECRET_MANAGER_URL": base,
             },
             clear=True,
         ),
@@ -173,7 +177,7 @@ async def test_check_runtime_credentials_marks_openai_key_invalid_on_401() -> No
         "probe_http_status": 401,
     }
     assert fake_client.calls == [
-        (secret_url, {}),
+        (secret_url, _AUTH_HEADERS),
         (probe_url, {"Authorization": "Bearer sk-live-valid-format"}),
     ]
 
@@ -182,7 +186,7 @@ async def test_check_runtime_credentials_marks_openai_key_invalid_on_401() -> No
 async def test_check_runtime_credentials_marks_anthropic_key_invalid_on_403() -> None:
     from api.runtime_guardrails import check_runtime_credentials
 
-    base = "http://firewall:8081"
+    base = "http://secrets:8100"
     secret_url = f"{base}/secrets/ANTHROPIC_API_KEY"
     probe_url = "https://api.anthropic.com/v1/models"
     fake_client = _FakeClient(
@@ -197,8 +201,9 @@ async def test_check_runtime_credentials_marks_anthropic_key_invalid_on_403() ->
             "os.environ",
             {
                 "RUNTIME_CREDENTIAL_GUARD_ENABLED": "1",
+                "SECRETS_AUTH_TOKEN": _TOK,
                 "REQUIRED_RUNTIME_SECRET_KEYS": "ANTHROPIC_API_KEY",
-                "FIREWALL_HEALTH_URL": base,
+                "SECRET_MANAGER_URL": base,
             },
             clear=True,
         ),
@@ -219,7 +224,7 @@ async def test_check_runtime_credentials_marks_anthropic_key_invalid_on_403() ->
         "probe_http_status": 403,
     }
     assert fake_client.calls == [
-        (secret_url, {}),
+        (secret_url, _AUTH_HEADERS),
         (
             probe_url,
             {
@@ -235,7 +240,7 @@ async def test_check_runtime_credentials_marks_anthropic_key_invalid_on_403() ->
 async def test_check_runtime_credentials_degrades_on_transient_provider_error() -> None:
     from api.runtime_guardrails import check_runtime_credentials
 
-    base = "http://firewall:8081"
+    base = "http://secrets:8100"
     secret = "sk-live-secret-value"
     secret_url = f"{base}/secrets/OPENAI_API_KEY"
     probe_url = "https://api.openai.com/v1/models"
@@ -251,8 +256,9 @@ async def test_check_runtime_credentials_degrades_on_transient_provider_error() 
             "os.environ",
             {
                 "RUNTIME_CREDENTIAL_GUARD_ENABLED": "1",
+                "SECRETS_AUTH_TOKEN": _TOK,
                 "REQUIRED_RUNTIME_SECRET_KEYS": "OPENAI_API_KEY",
-                "FIREWALL_HEALTH_URL": base,
+                "SECRET_MANAGER_URL": base,
             },
             clear=True,
         ),
@@ -275,7 +281,7 @@ async def test_check_runtime_credentials_degrades_on_transient_provider_error() 
 async def test_check_runtime_credentials_uses_cache_for_provider_probe() -> None:
     from api.runtime_guardrails import check_runtime_credentials
 
-    base = "http://firewall:8081"
+    base = "http://secrets:8100"
     secret_url = f"{base}/secrets/OPENAI_API_KEY"
     probe_url = "https://api.openai.com/v1/models"
     fake_client = _FakeClient(
@@ -290,9 +296,10 @@ async def test_check_runtime_credentials_uses_cache_for_provider_probe() -> None
             "os.environ",
             {
                 "RUNTIME_CREDENTIAL_GUARD_ENABLED": "1",
+                "SECRETS_AUTH_TOKEN": _TOK,
                 "REQUIRED_RUNTIME_SECRET_KEYS": "OPENAI_API_KEY",
                 "RUNTIME_CREDENTIAL_CHECK_CACHE_SECONDS": "60",
-                "FIREWALL_HEALTH_URL": base,
+                "SECRET_MANAGER_URL": base,
             },
             clear=True,
         ),
@@ -306,7 +313,7 @@ async def test_check_runtime_credentials_uses_cache_for_provider_probe() -> None
 
     assert first == second
     assert fake_client.calls == [
-        (secret_url, {}),
+        (secret_url, _AUTH_HEADERS),
         (probe_url, {"Authorization": "Bearer sk-live-valid-format"}),
     ]
 
@@ -315,7 +322,7 @@ async def test_check_runtime_credentials_uses_cache_for_provider_probe() -> None
 async def test_assert_runtime_credentials_ready_allows_transient_provider_error() -> None:
     from api.runtime_guardrails import assert_runtime_credentials_ready
 
-    base = "http://firewall:8081"
+    base = "http://secrets:8100"
     secret_url = f"{base}/secrets/OPENAI_API_KEY"
     probe_url = "https://api.openai.com/v1/models"
     fake_client = _FakeClient(
@@ -330,8 +337,9 @@ async def test_assert_runtime_credentials_ready_allows_transient_provider_error(
             "os.environ",
             {
                 "RUNTIME_CREDENTIAL_GUARD_ENABLED": "1",
+                "SECRETS_AUTH_TOKEN": _TOK,
                 "REQUIRED_RUNTIME_SECRET_KEYS": "OPENAI_API_KEY",
-                "FIREWALL_HEALTH_URL": base,
+                "SECRET_MANAGER_URL": base,
             },
             clear=True,
         ),
@@ -347,7 +355,7 @@ async def test_assert_runtime_credentials_ready_allows_transient_provider_error(
 async def test_assert_runtime_credentials_ready_raises_when_missing() -> None:
     from api.runtime_guardrails import assert_runtime_credentials_ready
 
-    base = "http://firewall:8081"
+    base = "http://secrets:8100"
     url = f"{base}/secrets/AMP_API_KEY"
 
     with (
@@ -355,8 +363,9 @@ async def test_assert_runtime_credentials_ready_raises_when_missing() -> None:
             "os.environ",
             {
                 "RUNTIME_CREDENTIAL_GUARD_ENABLED": "1",
+                "SECRETS_AUTH_TOKEN": _TOK,
                 "REQUIRED_RUNTIME_SECRET_KEYS": "AMP_API_KEY",
-                "FIREWALL_HEALTH_URL": base,
+                "SECRET_MANAGER_URL": base,
             },
             clear=True,
         ),
@@ -373,7 +382,7 @@ async def test_assert_runtime_credentials_ready_raises_when_missing() -> None:
 async def test_assert_runtime_credentials_ready_raises_when_provider_key_invalid() -> None:
     from api.runtime_guardrails import assert_runtime_credentials_ready
 
-    base = "http://firewall:8081"
+    base = "http://secrets:8100"
     secret_url = f"{base}/secrets/OPENAI_API_KEY"
     probe_url = "https://api.openai.com/v1/models"
     fake_client = _FakeClient(
@@ -388,8 +397,9 @@ async def test_assert_runtime_credentials_ready_raises_when_provider_key_invalid
             "os.environ",
             {
                 "RUNTIME_CREDENTIAL_GUARD_ENABLED": "1",
+                "SECRETS_AUTH_TOKEN": _TOK,
                 "REQUIRED_RUNTIME_SECRET_KEYS": "OPENAI_API_KEY",
-                "FIREWALL_HEALTH_URL": base,
+                "SECRET_MANAGER_URL": base,
             },
             clear=True,
         ),

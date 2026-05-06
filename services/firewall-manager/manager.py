@@ -34,6 +34,12 @@ import yaml
 CONTROL_TOKEN = os.environ.get("FIREWALL_CONTROL_TOKEN", "").strip()
 HEALTH_PORT = int(os.environ.get("FIREWALL_MANAGER_PORT", "8081"))
 SECRET_MANAGER_URL = os.environ.get("SECRET_MANAGER_URL", "http://secrets:8100").rstrip("/")
+SECRETS_AUTH_TOKEN = os.environ.get("SECRETS_AUTH_TOKEN", "").strip()
+if not SECRETS_AUTH_TOKEN:
+    raise SystemExit(
+        "SECRETS_AUTH_TOKEN is not set. Refusing to start: the secrets service "
+        "requires bearer auth on /secrets/{key}/ref lookups."
+    )
 IRON_PROXY_CONFIG_PATH = Path(os.environ.get("IRON_PROXY_CONFIG_PATH", "/etc/iron-proxy/proxy.yaml"))
 IRON_PROXY_MANAGEMENT_URL = os.environ.get("IRON_PROXY_MANAGEMENT_URL", "http://iron-proxy:9092").rstrip("/")
 IRON_MANAGEMENT_API_KEY = os.environ.get("IRON_MANAGEMENT_API_KEY", "").strip()
@@ -42,9 +48,7 @@ SECRET_TTL = os.environ.get("FIREWALL_MANAGER_SECRET_TTL", "10m").strip()
 
 # Headers iron-proxy will scan for proxy_value placeholders.  Literal
 # strings match a single header name; values wrapped in /.../ are
-# interpreted as regexes.  Together these mirror the explicit set + suffix
-# rule in services/firewall/classification.py (CREDENTIAL_HEADER_NAMES /
-# is_credential_header).
+# interpreted as regexes.
 DEFAULT_MATCH_HEADERS: tuple[str, ...] = (
     "Authorization",
     "Proxy-Authorization",
@@ -66,9 +70,10 @@ def _fetch_secret_ref(key: str) -> str | None:
     no ref metadata for it (env-backed secrets, etc).
     """
     url = f"{SECRET_MANAGER_URL}/secrets/{urllib.parse.quote(key, safe='')}/ref"
+    headers = {"Authorization": f"Bearer {SECRETS_AUTH_TOKEN}"}
     try:
         with httpx.Client(timeout=3.0) as client:
-            resp = client.get(url)
+            resp = client.get(url, headers=headers)
     except httpx.HTTPError as exc:
         log.warning("ref_fetch_error", key=key, error=str(exc))
         return None

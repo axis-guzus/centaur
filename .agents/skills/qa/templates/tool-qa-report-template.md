@@ -11,7 +11,7 @@
 | Layer | Status | Notes |
 |-------|--------|-------|
 | 1. Internal API | ⬜ | |
-| 2. Nginx | ⬜ | |
+| 2. HTTP edge | ⬜ | |
 | 3a. Slackbot | ⬜ | |
 | 3b. Web App | ⬜ | |
 
@@ -28,19 +28,13 @@
 | secrets | ⬜ | |
 | firewall | ⬜ | |
 | api | ⬜ | |
-| docker-socket-proxy | ⬜ | |
-| nginx | ⬜ | |
+| ingress/http-route | ⬜ | |
 | auth | ⬜ | |
-| alloy | ⬜ | |
-| victorialogs | ⬜ | |
-| victoriametrics | ⬜ | |
-| fluentbit | ⬜ | |
-| grafana | ⬜ | |
 | slackbot | ⬜ | |
 | web | ⬜ | |
 
 - **Tools loaded:** {N}
-- **Warm pool:** {N} containers
+- **Warm pool:** {N} pods
 
 ### Tool Testing
 

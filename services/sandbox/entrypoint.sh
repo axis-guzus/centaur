@@ -70,8 +70,8 @@ for SKILLS_SRC in "$BAKED_IN_CENTAUR_SKILLS" "$MOUNTED_CENTAUR_SKILLS" "$CENTAUR
 done
 
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
-# Base prompt: bind-mounted by docker.py as AGENTS_BASE.md, fallback to baked-in AGENTS.md
-# Org/persona overlays are bind-mounted alongside the base prompt when present.
+# Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
+# Org/persona overlays are mounted alongside the base prompt when present.
 TARGET_PROMPT="$HOME_DIR/workspace/AGENTS.md"
 if [ -f "$HOME_DIR/AGENTS_BASE.md" ]; then
     cp "$HOME_DIR/AGENTS_BASE.md" "$TARGET_PROMPT"

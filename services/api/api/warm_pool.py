@@ -27,7 +27,7 @@ log = structlog.get_logger()
 POOL_SIZE = int(os.getenv("WARM_POOL_SIZE", "5"))
 POOL_HARNESS = os.getenv("WARM_POOL_HARNESS", "amp")
 POOL_REPLENISH_INTERVAL = float(os.getenv("WARM_POOL_REPLENISH_INTERVAL", "5.0"))
-POOL_DOCKER_TIMEOUT = float(os.getenv("WARM_POOL_DOCKER_TIMEOUT", "30.0"))
+POOL_BACKEND_TIMEOUT = float(os.getenv("WARM_POOL_BACKEND_TIMEOUT", "30.0"))
 # Recycle existing warm pods on startup instead of adopting them. After an image
 # or overlay bump the API restarts but pre-existing warm pods still run the old
 # refs; evicting them here guarantees the first claim post-deploy uses the
@@ -82,7 +82,7 @@ async def _spawn_warm_container() -> WarmContainer | None:
     try:
         session = await asyncio.wait_for(
             backend.create(placeholder_key, POOL_HARNESS, engine, warm=True),
-            timeout=POOL_DOCKER_TIMEOUT,
+            timeout=POOL_BACKEND_TIMEOUT,
         )
         warm = WarmContainer(
             sandbox_id=session.sandbox_id,
@@ -106,7 +106,7 @@ async def replenish() -> int:
             try:
                 st = await asyncio.wait_for(
                     backend.status_by_id(warm.sandbox_id),
-                    timeout=POOL_DOCKER_TIMEOUT,
+                    timeout=POOL_BACKEND_TIMEOUT,
                 )
                 if st == "running" and (time.time() - warm.created_at) < 3600:
                     alive.append(warm)
@@ -120,7 +120,7 @@ async def replenish() -> int:
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(
                             backend.stop_by_id(warm.sandbox_id),
-                            timeout=POOL_DOCKER_TIMEOUT,
+                            timeout=POOL_BACKEND_TIMEOUT,
                         )
             except Exception:
                 log.info("warm_pool_evicted_error", sandbox=warm.sandbox_id[:12])
@@ -287,14 +287,14 @@ async def claim_container(
     try:
         st = await asyncio.wait_for(
             backend.status_by_id(warm.sandbox_id),
-            timeout=POOL_DOCKER_TIMEOUT,
+            timeout=POOL_BACKEND_TIMEOUT,
         )
     except (asyncio.TimeoutError, Exception):
         log.warning("warm_container_dead_on_claim", sandbox=warm.sandbox_id[:12])
         with contextlib.suppress(Exception):
             await asyncio.wait_for(
                 backend.stop_by_id(warm.sandbox_id),
-                timeout=POOL_DOCKER_TIMEOUT,
+                timeout=POOL_BACKEND_TIMEOUT,
             )
         return None
     if st != "running":
@@ -302,7 +302,7 @@ async def claim_container(
         with contextlib.suppress(Exception):
             await asyncio.wait_for(
                 backend.stop_by_id(warm.sandbox_id),
-                timeout=POOL_DOCKER_TIMEOUT,
+                timeout=POOL_BACKEND_TIMEOUT,
             )
         return None
 
@@ -346,7 +346,7 @@ async def cleanup_pool() -> int:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(
                 backend.stop_by_id(warm.sandbox_id),
-                timeout=POOL_DOCKER_TIMEOUT,
+                timeout=POOL_BACKEND_TIMEOUT,
             )
             cleaned += 1
     return cleaned
@@ -359,7 +359,7 @@ async def _recover_warm(assigned_sandbox_ids: set[str] | None = None) -> int:
     recovered = 0
     sessions = await asyncio.wait_for(
         backend.recover_warm(POOL_HARNESS),
-        timeout=POOL_DOCKER_TIMEOUT * 2,
+        timeout=POOL_BACKEND_TIMEOUT * 2,
     )
     async with _pool_lock:
         for session in sessions:
@@ -386,7 +386,7 @@ async def _evict_existing_warm(assigned_sandbox_ids: set[str] | None = None) -> 
     """Stop every pre-existing unassigned warm sandbox on startup.
 
     Pool members are pre-built with the previous deploy's image + overlay
-    refs. Adopting them after an image bump leaves stale containers in
+    refs. Adopting them after an image bump leaves stale sandboxes in
     rotation; recreating them with the current refs ensures the first
     claim after a deploy uses the just-deployed code paths. Assigned
     sandboxes (still serving live threads) are left alone.
@@ -397,7 +397,7 @@ async def _evict_existing_warm(assigned_sandbox_ids: set[str] | None = None) -> 
     try:
         sessions = await asyncio.wait_for(
             backend.recover_warm(POOL_HARNESS),
-            timeout=POOL_DOCKER_TIMEOUT * 2,
+            timeout=POOL_BACKEND_TIMEOUT * 2,
         )
     except Exception as exc:
         log.warning("warm_pool_evict_list_failed", error=str(exc))
@@ -408,7 +408,7 @@ async def _evict_existing_warm(assigned_sandbox_ids: set[str] | None = None) -> 
         try:
             await asyncio.wait_for(
                 backend.stop_by_id(session.sandbox_id),
-                timeout=POOL_DOCKER_TIMEOUT,
+                timeout=POOL_BACKEND_TIMEOUT,
             )
             evicted += 1
         except Exception as exc:

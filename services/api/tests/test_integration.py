@@ -4,7 +4,7 @@ Covers:
 - Message buffer endpoints (POST/GET /agent/messages)
 - Attachment endpoints (GET /agent/attachments, download)
 - Harness protocol helpers (_flushed_to_messages, messages_to_content_blocks, build_user_input)
-- Harness command builder (_build_harness_cmd)
+- Harness command builder (build_harness_cmd)
 - Session context builder (_build_session_context)
 - Status endpoint (GET /agent/status)
 
@@ -327,63 +327,63 @@ class TestBuildUserInput:
         }
 
 
-# ── Test 5: _build_harness_cmd ───────────────────────────────────────────────
+# ── Test 5: build_harness_cmd ───────────────────────────────────────────────
 
 
 class TestBuildHarnessCmd:
-    """Tests for _build_harness_cmd."""
+    """Tests for build_harness_cmd."""
 
     def test_amp(self):
-        from api.sandbox.docker import _build_harness_cmd
+        from api.sandbox.config import build_harness_cmd
 
-        cmd = _build_harness_cmd("amp")
+        cmd = build_harness_cmd("amp")
         assert cmd[0] == "amp-wrapper"
 
     def test_amp_with_model(self):
-        from api.sandbox.docker import _build_harness_cmd
+        from api.sandbox.config import build_harness_cmd
 
-        cmd = _build_harness_cmd("amp", model="claude-sonnet-4-20250514")
+        cmd = build_harness_cmd("amp", model="claude-sonnet-4-20250514")
         assert cmd[0] == "amp-wrapper"
 
     def test_claude_code(self):
-        from api.sandbox.docker import _build_harness_cmd
+        from api.sandbox.config import build_harness_cmd
 
-        cmd = _build_harness_cmd("claude-code")
+        cmd = build_harness_cmd("claude-code")
         assert cmd[0] == "claude"
         assert "--dangerously-skip-permissions" in cmd
         assert "--output-format" in cmd
 
     def test_claude_code_with_model(self):
-        from api.sandbox.docker import _build_harness_cmd
+        from api.sandbox.config import build_harness_cmd
 
-        cmd = _build_harness_cmd("claude-code", model="opus")
+        cmd = build_harness_cmd("claude-code", model="opus")
         assert "--model" in cmd
         assert "opus" in cmd
 
     def test_codex(self):
-        from api.sandbox.docker import _build_harness_cmd
+        from api.sandbox.config import build_harness_cmd
 
-        cmd = _build_harness_cmd("codex")
+        cmd = build_harness_cmd("codex")
         assert cmd == ["sleep", "infinity"]
 
     def test_unknown_engine(self):
-        from api.sandbox.docker import _build_harness_cmd
+        from api.sandbox.config import build_harness_cmd
 
-        cmd = _build_harness_cmd("pi-mono")
+        cmd = build_harness_cmd("pi-mono")
         assert cmd == ["sleep", "infinity"]
 
     def test_container_env_honors_amp_mode_override(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        from api.sandbox.docker import _container_env
+        from api.sandbox.config import container_env
 
         monkeypatch.delenv("AGENT_LOCAL_DEV", raising=False)
         monkeypatch.setenv("AGENT_API_URL", "http://api.internal:8000")
         monkeypatch.setenv("FIREWALL_HOST", "firewall.internal")
         monkeypatch.setenv("AMP_MODE", "smart")
 
-        env = _container_env("thread-key", "sandbox-id")
+        env = container_env("thread-key", "sandbox-id")
 
         assert "AMP_MODE=smart" in env
 

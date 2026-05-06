@@ -17,7 +17,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 from centaur_sdk.logging import configure_json_logging
 from secret_manager.backend import SecretEntry, SecretManagerBackend
@@ -30,6 +30,18 @@ log = configure_json_logging("secret_manager", uvicorn=True)
 
 _REFRESH_INTERVAL = int(os.environ.get("SECRET_REFRESH_SECONDS", "300"))  # 5 min
 _REFRESH_RETRY_INTERVAL = int(os.environ.get("SECRET_REFRESH_RETRY_SECONDS", "15"))
+_AUTH_TOKEN = (os.environ.get("SECRETS_AUTH_TOKEN") or "").strip()
+if not _AUTH_TOKEN:
+    raise SystemExit(
+        "SECRETS_AUTH_TOKEN is not set. Refusing to start: an empty token would "
+        "leave the secrets service unauthenticated."
+    )
+
+
+def _require_bearer_token(request: Request) -> None:
+    if request.headers.get("authorization", "") == f"Bearer {_AUTH_TOKEN}":
+        return
+    raise HTTPException(status_code=403, detail="forbidden")
 
 # In-memory cache: key → entry (value + optional backend "item/field" path).
 _cache: dict[str, SecretEntry] = {}
@@ -159,20 +171,20 @@ def health() -> dict:
     }
 
 
-@app.get("/keys")
+@app.get("/keys", dependencies=[Depends(_require_bearer_token)])
 def list_keys() -> dict:
     """List all cached key names (values are never exposed)."""
     return {"keys": sorted(_cache.keys()), "count": len(_cache)}
 
 
-@app.post("/reload")
+@app.post("/reload", dependencies=[Depends(_require_bearer_token)])
 async def reload_secrets() -> dict:
     """Force an immediate refresh from the active backend."""
     count = await _load_all()
     return {"status": "ok", "cached_keys": count}
 
 
-@app.get("/secrets/{key}")
+@app.get("/secrets/{key}", dependencies=[Depends(_require_bearer_token)])
 async def get_secret(key: str) -> dict:
     entry = _cache.get(key)
     if entry is None:
@@ -180,7 +192,7 @@ async def get_secret(key: str) -> dict:
     return {"value": entry.value}
 
 
-@app.get("/secrets/{key}/ref")
+@app.get("/secrets/{key}/ref", dependencies=[Depends(_require_bearer_token)])
 async def get_secret_ref(key: str) -> dict:
     """Return a fully-qualified backend reference for this key.
 

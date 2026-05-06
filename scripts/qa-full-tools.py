@@ -17,7 +17,6 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "tool-qa-output"
-COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 STATUS_MARKER = "__CENTAUR_QA_HTTP_STATUS__:"
 DEFAULT_INTERNAL_URL = "http://localhost:8000"
 DEFAULT_EXTERNAL_URL = "http://localhost:8000"
@@ -254,14 +253,14 @@ def parse_args() -> argparse.Namespace:
         help="Per-request timeout in seconds (default: %(default)s)",
     )
     parser.add_argument(
-        "--api-container",
-        default=os.environ.get("QA_FULL_TOOLS_API_CONTAINER", "centaur-api-1"),
-        help="Container name for direct internal API calls (default: %(default)s)",
+        "--namespace",
+        default=os.environ.get("CENTAUR_NAMESPACE", "centaur"),
+        help="Kubernetes namespace for direct internal API calls (default: %(default)s)",
     )
     parser.add_argument(
-        "--api-service",
-        default=os.environ.get("QA_FULL_TOOLS_API_SERVICE", "api"),
-        help="Compose service name used for stack preflight (default: %(default)s)",
+        "--api-deployment",
+        default=os.environ.get("QA_FULL_TOOLS_API_DEPLOYMENT", "centaur-centaur-api"),
+        help="Kubernetes API deployment for internal calls (default: %(default)s)",
     )
     parser.add_argument(
         "--internal-url",
@@ -276,29 +275,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def require_running_service(api_service: str) -> None:
+def require_running_service(namespace: str, api_deployment: str) -> None:
     proc = run_command(
         [
-            "docker",
-            "compose",
-            "-f",
-            str(COMPOSE_FILE),
-            "ps",
-            "--services",
-            "--status",
-            "running",
+            "kubectl",
+            "-n",
+            namespace,
+            "rollout",
+            "status",
+            f"deploy/{api_deployment}",
+            "--timeout=1s",
         ]
     )
     if proc.returncode != 0:
-        raise SystemExit(proc.stderr.strip() or proc.stdout.strip() or "docker compose ps failed")
-    services = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
-    if api_service not in services:
         raise SystemExit(
             textwrap.dedent(
                 f"""
-                {api_service} service is not running.
-                Start the compose stack first, for example:
-                docker compose up -d secrets firewall postgres pgbouncer docker-socket-proxy api slackbot
+                {api_deployment} deployment is not ready in namespace {namespace}.
+                Start the local stack first:
+                just up
                 """
             ).strip()
         )
@@ -336,15 +331,16 @@ def curl_request(
     headers: dict[str, str] | None = None,
     payload: Any | None = None,
     via_container: str | None = None,
+    namespace: str = "centaur",
     timeout_s: float,
 ) -> HttpResponse:
     data = json.dumps(payload) if payload is not None else None
     cmd: list[str] = []
     if via_container:
-        cmd.extend(["docker", "exec"])
+        cmd.extend(["kubectl", "-n", namespace, "exec"])
         if data is not None:
             cmd.append("-i")
-        cmd.append(via_container)
+        cmd.extend([f"deploy/{via_container}", "--"])
     cmd.extend(
         [
             "curl",
@@ -390,20 +386,23 @@ def curl_request(
     return HttpResponse(http_status=status, body=parsed, body_text=sanitize_text(body_text))
 
 
-def get_services_snapshot() -> list[dict[str, str]]:
-    proc = run_command(["docker", "compose", "-f", str(COMPOSE_FILE), "ps", "-a", "--format", "json"])
+def get_services_snapshot(namespace: str) -> list[dict[str, str]]:
+    proc = run_command(["kubectl", "get", "pods", "-n", namespace, "-o", "json"])
     if proc.returncode != 0:
-        return [{"name": "docker-compose", "status": sanitize_text(proc.stderr.strip() or proc.stdout.strip())}]
+        return [{"name": "kubernetes", "status": sanitize_text(proc.stderr.strip() or proc.stdout.strip())}]
     services: list[dict[str, str]] = []
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        services.append({"name": item.get("Name", "unknown"), "status": item.get("Status", "unknown")})
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return [{"name": "kubernetes", "status": sanitize_text(proc.stdout.strip())}]
+    for item in payload.get("items", []):
+        status = item.get("status", {})
+        services.append(
+            {
+                "name": item.get("metadata", {}).get("name", "unknown"),
+                "status": status.get("phase", "unknown"),
+            }
+        )
     services.sort(key=lambda item: item["name"])
     return services
 
@@ -413,7 +412,8 @@ def fetch_tools_index(args: argparse.Namespace) -> dict[str, Any]:
     response = curl_request(
         f"{args.external_url if headers else args.internal_url}/tools",
         headers=headers,
-        via_container=None if headers else args.api_container,
+        via_container=None if headers else args.api_deployment,
+        namespace=args.namespace,
         timeout_s=args.tool_timeout,
     )
     if response.http_status != 200 or not isinstance(response.body, dict):
@@ -426,7 +426,8 @@ def fetch_tool_detail(args: argparse.Namespace, tool: str) -> dict[str, Any]:
     response = curl_request(
         f"{args.external_url if headers else args.internal_url}/tools/{tool}",
         headers=headers,
-        via_container=None if headers else args.api_container,
+        via_container=None if headers else args.api_deployment,
+        namespace=args.namespace,
         timeout_s=args.tool_timeout,
     )
     if response.http_status != 200 or not isinstance(response.body, dict):
@@ -624,7 +625,8 @@ def invoke_tool(
             method="POST",
             headers=headers,
             payload=payload,
-            via_container=None if headers else args.api_container,
+            via_container=None if headers else args.api_deployment,
+            namespace=args.namespace,
             timeout_s=args.tool_timeout,
         )
     elif layer == "layer2":
@@ -666,7 +668,8 @@ def mint_layer2_key(args: argparse.Namespace) -> tuple[str, str]:
         method="POST",
         headers=headers,
         payload=payload,
-        via_container=None if headers else args.api_container,
+        via_container=None if headers else args.api_deployment,
+        namespace=args.namespace,
         timeout_s=args.tool_timeout,
     )
     if response.http_status != 200 or not isinstance(response.body, dict):
@@ -684,7 +687,8 @@ def revoke_layer2_key(args: argparse.Namespace, key_id: str) -> None:
         f"{args.external_url if headers else args.internal_url}/admin/api-keys/{key_id}",
         method="DELETE",
         headers=headers,
-        via_container=None if headers else args.api_container,
+        via_container=None if headers else args.api_deployment,
+        namespace=args.namespace,
         timeout_s=args.tool_timeout,
     )
     if response.http_status not in {200, 404}:
@@ -797,7 +801,7 @@ def main() -> int:
     local_api_key = resolve_local_api_key()
     args.local_api_key_source = local_api_key[0] if local_api_key else None
     args.local_api_key = local_api_key[1] if local_api_key else None
-    require_running_service(args.api_service)
+    require_running_service(args.namespace, args.api_deployment)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -817,7 +821,7 @@ def main() -> int:
     report: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),
         "tool_count": len(tools_index),
-        "services": get_services_snapshot(),
+        "services": get_services_snapshot(args.namespace),
         "layer1_transport": "external_host_key" if args.local_api_key else "internal_container",
         "local_api_key_source": args.local_api_key_source,
         "layer1": {"summary": {}, "tools": {}},

@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
-SERVICE_NAME="${CENTAUR_MIGRATIONS_SERVICE:-api}"
+NAMESPACE="${CENTAUR_NAMESPACE:-centaur}"
+DEPLOYMENT="${CENTAUR_MIGRATIONS_DEPLOYMENT:-centaur-centaur-api}"
 CORE_MIGRATIONS_HOST_DIR="${CENTAUR_MIGRATIONS_HOST_DIR:-$REPO_ROOT/services/api/db/migrations}"
 CORE_MIGRATIONS_CONTAINER_DIR="${CENTAUR_MIGRATIONS_CONTAINER_DIR:-/app/db/migrations}"
 OVERLAY_HOST_ROOT="${CENTAUR_OVERLAY_HOST_DIR:-${REPO_ROOT}/../centaur-paradigm}"
@@ -29,17 +29,13 @@ Examples:
   ./scripts/dbmate rollback
 
 When DATABASE_URL is not set in the host shell, the wrapper reuses the value
-from the running api container.
+from the running API pod.
 EOF
 }
 
 die() {
   printf 'error: %s\n' "$1" >&2
   exit 1
-}
-
-compose() {
-  docker compose -f "$COMPOSE_FILE" "$@"
 }
 
 normalize_name() {
@@ -145,22 +141,22 @@ resolve_database_url() {
     return
   fi
 
-  if ! command -v docker >/dev/null 2>&1; then
-    die "docker is required unless DATABASE_URL is already set"
+  if ! command -v kubectl >/dev/null 2>&1; then
+    die "kubectl is required unless DATABASE_URL is already set"
   fi
 
   local database_url
-  if ! database_url="$(compose exec -T "$SERVICE_NAME" printenv DATABASE_URL 2>/dev/null | tr -d '\r')"; then
-    die "could not read DATABASE_URL from the running $SERVICE_NAME container; start it with 'docker compose up -d $SERVICE_NAME' or set DATABASE_URL"
+  if ! database_url="$(kubectl -n "$NAMESPACE" exec "deploy/$DEPLOYMENT" -- printenv DATABASE_URL 2>/dev/null | tr -d '\r')"; then
+    die "could not read DATABASE_URL from deploy/$DEPLOYMENT in namespace $NAMESPACE; start it with 'just up' or set DATABASE_URL"
   fi
-  [[ -n "$database_url" ]] || die "DATABASE_URL is empty in the running $SERVICE_NAME container"
+  [[ -n "$database_url" ]] || die "DATABASE_URL is empty in deploy/$DEPLOYMENT"
   printf '%s' "$database_url"
 }
 
 run_dbmate_for_set() {
   local migration_set="$1"
   shift
-  command -v docker >/dev/null 2>&1 || die "docker is required to run dbmate commands"
+  command -v kubectl >/dev/null 2>&1 || die "kubectl is required to run dbmate commands"
 
   local -a _set_config
   local database_url dbmate_url sep migrations_container_dir migrations_table
@@ -176,9 +172,8 @@ run_dbmate_for_set() {
     dbmate_url+="${sep}sslmode=disable"
   fi
 
-  compose exec -T \
-    -e DATABASE_URL="$dbmate_url" \
-    "$SERVICE_NAME" \
+  kubectl -n "$NAMESPACE" exec "deploy/$DEPLOYMENT" -- \
+    env DATABASE_URL="$dbmate_url" \
     dbmate \
     --url "$dbmate_url" \
     --migrations-dir "$migrations_container_dir" \

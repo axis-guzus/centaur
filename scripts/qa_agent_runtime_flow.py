@@ -21,7 +21,8 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATUS_MARKER = "__CENTAUR_QA_HTTP_STATUS__:"
 DEFAULT_EXTERNAL_URL = os.environ.get("QA_AGENT_RUNTIME_API_URL", "http://localhost:8000")
-DEFAULT_API_CONTAINER = os.environ.get("QA_AGENT_RUNTIME_API_CONTAINER", "centaur-api-1")
+DEFAULT_NAMESPACE = os.environ.get("CENTAUR_NAMESPACE", "centaur")
+DEFAULT_API_DEPLOYMENT = os.environ.get("QA_AGENT_RUNTIME_API_DEPLOYMENT", "centaur-centaur-api")
 DEFAULT_READY_TIMEOUT_S = float(os.environ.get("QA_AGENT_RUNTIME_READY_TIMEOUT_S", "90"))
 DEFAULT_EXECUTION_TIMEOUT_S = float(os.environ.get("QA_AGENT_RUNTIME_EXECUTION_TIMEOUT_S", "180"))
 DEFAULT_EVENT_TIMEOUT_S = float(os.environ.get("QA_AGENT_RUNTIME_EVENT_TIMEOUT_S", "2.0"))
@@ -73,7 +74,8 @@ class HttpResponse:
 class QARunner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.api_url = args.api_url.rstrip("/")
-        self.api_container = args.api_container
+        self.namespace = args.namespace
+        self.api_deployment = args.api_deployment
         self.ready_timeout_s = args.ready_timeout_s
         self.execution_timeout_s = args.execution_timeout_s
         self.event_timeout_s = args.event_timeout_s
@@ -180,12 +182,12 @@ class QARunner:
 
     def admin_request(self, method: str, path: str, payload: Any | None = None) -> HttpResponse:
         url = f"http://localhost:8000{path}"
-        cmd = ["docker", "exec"]
+        cmd = ["kubectl", "-n", self.namespace, "exec"]
         input_text: str | None = None
         if payload is not None:
             input_text = json.dumps(payload)
             cmd.append("-i")
-        cmd.append(self.api_container)
+        cmd.extend([f"deploy/{self.api_deployment}", "--"])
         cmd.extend(
             [
                 "curl",
@@ -1139,7 +1141,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--api-url", default=DEFAULT_EXTERNAL_URL)
-    parser.add_argument("--api-container", default=DEFAULT_API_CONTAINER)
+    parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
+    parser.add_argument("--api-deployment", default=DEFAULT_API_DEPLOYMENT)
     parser.add_argument("--ready-timeout-s", type=float, default=DEFAULT_READY_TIMEOUT_S)
     parser.add_argument("--execution-timeout-s", type=float, default=DEFAULT_EXECUTION_TIMEOUT_S)
     parser.add_argument("--event-timeout-s", type=float, default=DEFAULT_EVENT_TIMEOUT_S)

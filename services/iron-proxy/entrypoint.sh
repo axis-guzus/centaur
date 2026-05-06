@@ -7,7 +7,7 @@ DEFAULT_CONFIG="/usr/local/share/iron-proxy/proxy.yaml.default"
 CA_CERT="$CONFIG_DIR/ca.crt"
 CA_KEY="$CONFIG_DIR/ca.key"
 CERT_SHARE="/certs"
-SECRET_MANAGER_URL="${SECRET_MANAGER_URL:-http://secrets:8100}"
+CA_MOUNT_DIR="${IRON_PROXY_CA_MOUNT:-/etc/iron-proxy-ca}"
 
 log_json() {
     printf '{"timestamp":"%s","level":"%s","service":"iron-proxy","event":"%s","msg":"%s"}\n' \
@@ -22,26 +22,16 @@ if (set -C; cat "$DEFAULT_CONFIG" > "$CONFIG_FILE") 2>/dev/null; then
     log_json "info" "config_seeded" "seeded $CONFIG_FILE from default"
 fi
 
-# ── Load persistent CA if available (fast, non-blocking) ──────────────────
-SECRET_CA_CERT=$(curl -sf --max-time 2 "${SECRET_MANAGER_URL}/secrets/FIREWALL_CA_CERT" | jq -r '.value // empty' 2>/dev/null || true)
-SECRET_CA_KEY=$(curl -sf --max-time 2 "${SECRET_MANAGER_URL}/secrets/FIREWALL_CA_KEY" | jq -r '.value // empty' 2>/dev/null || true)
-
-if [ -n "$SECRET_CA_CERT" ] && [ -n "$SECRET_CA_KEY" ]; then
-    printf '%s\n' "$SECRET_CA_CERT" > "$CA_CERT"
-    printf '%s\n' "$SECRET_CA_KEY" > "$CA_KEY"
-    chmod 600 "$CA_KEY"
-    log_json "info" "ca_loaded" "loaded CA from secrets service"
-elif [ ! -f "$CA_CERT" ] || [ ! -f "$CA_KEY" ]; then
-    log_json "info" "ca_autogen" "no CA in secrets — generating locally"
-    openssl genrsa -out "$CA_KEY" 4096
-    openssl req -x509 -new -nodes \
-        -key "$CA_KEY" -sha256 -days 3650 \
-        -subj "/CN=centaur iron-proxy CA" \
-        -addext "basicConstraints=critical,CA:TRUE" \
-        -addext "keyUsage=critical,keyCertSign" \
-        -out "$CA_CERT"
+# ── Load required CA from the pre-created Kubernetes Secret volume ─────────
+if [ ! -f "$CA_MOUNT_DIR/ca-cert.pem" ] || [ ! -f "$CA_MOUNT_DIR/ca-key.pem" ]; then
+    log_json "error" "ca_unavailable" "required CA files not found at $CA_MOUNT_DIR; refusing to start"
+    exit 1
 fi
-unset SECRET_CA_CERT SECRET_CA_KEY
+
+cp "$CA_MOUNT_DIR/ca-cert.pem" "$CA_CERT"
+cp "$CA_MOUNT_DIR/ca-key.pem" "$CA_KEY"
+chmod 600 "$CA_KEY"
+log_json "info" "ca_loaded" "loaded CA from mounted volume at $CA_MOUNT_DIR"
 
 # ── Share CA cert with sandboxes ──────────────────────────────────────────
 cp "$CA_CERT" "$CERT_SHARE/ca-cert.pem"

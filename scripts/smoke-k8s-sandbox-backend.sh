@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONTEXT="${1:-orbstack}"
-NAMESPACE="${2:-centaur-system}"
-RELEASE="${3:-centaur-orbstack}"
-DEPLOYMENT="${RELEASE}-centaur-k3s-api"
+CONTEXT="${1:-${KUBECTL_CONTEXT:-}}"
+NAMESPACE="${2:-${CENTAUR_NAMESPACE:-centaur}}"
+RELEASE="${3:-${CENTAUR_RELEASE:-centaur}}"
+DEPLOYMENT="${4:-${RELEASE}-centaur-api}"
 THREAD_KEY="smoke-k8s-$(date +%s)"
 
-kubectl --context "$CONTEXT" -n "$NAMESPACE" exec "deploy/${DEPLOYMENT}" -- env SMOKE_THREAD_KEY="$THREAD_KEY" sh -lc '
+KUBECTL=(kubectl)
+if [ -n "$CONTEXT" ]; then
+  KUBECTL+=(--context "$CONTEXT")
+fi
+
+"${KUBECTL[@]}" -n "$NAMESPACE" exec "deploy/${DEPLOYMENT}" -- env SMOKE_THREAD_KEY="$THREAD_KEY" sh -lc '
 cat >/tmp/smoke_k8s_backend.py <<"PY"
 import asyncio
 import contextlib

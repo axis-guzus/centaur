@@ -34,7 +34,6 @@ from api.routers import (
     internal,
 )
 from api.routers import agent as agent_router_mod
-from api.routers import apps as apps_router_mod
 from api.routers import workflows as workflow_router_mod
 from api.tool_manager import ToolManager, load_plugins_config
 from api.agent import reconcile_tick
@@ -51,7 +50,6 @@ from api.workflow_engine import (
     stop_workflow_worker,
     sync_registered_workflow_schedules,
 )
-from api.apps import app_manager
 from api.warm_pool import start_replenish_loop, stop_replenish_loop
 
 configure_structlog()
@@ -180,7 +178,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     if warm_pool_enabled:
         await start_replenish_loop()
-    await app_manager.recover_apps(app.state.db_pool)
     try:
         yield
     finally:
@@ -289,8 +286,6 @@ app.include_router(agent_router_mod.router)
 app.include_router(workflow_router_mod.router)
 app.include_router(attachments_mod.router)
 app.include_router(admin.router)
-app.include_router(apps_router_mod.router)
-app.include_router(apps_router_mod.proxy_router)
 app.include_router(internal.router)
 app.include_router(deprecated.router)
 

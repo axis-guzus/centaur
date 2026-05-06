@@ -20,7 +20,6 @@ SCHEDULE = {
 REPO = "https://github.com/paradigmxyz/centaur"
 SKILL_DIR = Path("/app/.agents/skills")
 WORKFLOW_DIR = Path("/app/workflows")
-DASHBOARD_URL = "https://svc-ai.dayno.xyz/apps/usage"
 
 
 def _load_skill_descs() -> dict[str, str]:
@@ -76,7 +75,6 @@ def _fmt_tokens(n: int) -> str:
 
 def _build_blocks(
     stats: dict,
-    new_apps: list[dict],
     skill_descs: dict[str, str],
     workflow_descs: dict[str, str],
 ) -> list[dict]:
@@ -111,10 +109,8 @@ def _build_blocks(
     }})
     blocks.append({"type": "divider"})
 
-    # New features: Apps, Workflows, Skills
+    # New features: Workflows, Skills
     all_features: list[tuple[str, str, str]] = []
-    for a in new_apps:
-        all_features.append(("New App", a["name"], a.get("desc", "\u2014")))
     for w in new_workflows:
         desc = workflow_descs.get(w["workflow"], "\u2014")
         all_features.append(("New Workflow", w["workflow"], desc))
@@ -156,7 +152,6 @@ def _build_blocks(
         "column_settings": [{"align": "center"}, {"align": "left"}, {"align": "right"}, {"align": "right"}, {"align": "right"}, {"align": "right"}, {"align": "right"}],
         "rows": team_rows,
     })
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"<{DASHBOARD_URL}/teams|See live team leaderboard>"}]})
     blocks.append({"type": "divider"})
 
     # Users table
@@ -169,7 +164,6 @@ def _build_blocks(
         "column_settings": [{"align": "center"}, {"align": "left"}, {"align": "left"}, {"align": "right"}, {"align": "right"}],
         "rows": user_rows,
     })
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"<{DASHBOARD_URL}/users|See live user leaderboard>"}]})
 
     return blocks
 
@@ -180,14 +174,11 @@ async def handler(_inp: dict[str, Any], ctx: WorkflowContext) -> dict[str, Any]:
     # Fetch usage stats
     stats = await ctx.step("fetch_stats", lambda: _fetch_stats(pool), step_kind="gather")
 
-    # Fetch new apps (created in last 7 days)
-    new_apps = await ctx.step("fetch_new_apps", lambda: _fetch_new_apps(pool), step_kind="gather")
-
     # Load descriptions from filesystem
     skill_descs = _load_skill_descs()
     workflow_descs = _load_workflow_descs()
 
-    blocks = _build_blocks(stats, new_apps, skill_descs, workflow_descs)
+    blocks = _build_blocks(stats, skill_descs, workflow_descs)
 
     await ctx.call_tool("slack", "send_message", {
         "channel": "ai-agent",
@@ -209,20 +200,4 @@ async def _fetch_stats(pool) -> dict:
     if isinstance(data, str):
         data = json.loads(data)
     return data
-
-
-async def _fetch_new_apps(pool) -> list[dict]:
-    rows = await pool.fetch(
-        "SELECT name, repo_url FROM apps "
-        "WHERE created_at > NOW() - INTERVAL '7 days' "
-        "ORDER BY created_at"
-    )
-    result = []
-    for r in rows:
-        repo = r["repo_url"] or ""
-        if not repo.startswith("http"):
-            repo = f"https://github.com/{repo}" if "/" in repo else ""
-        result.append({"name": r["name"], "url": repo, "desc": "\u2014"})
-    return result
-
 

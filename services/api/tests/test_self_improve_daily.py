@@ -692,7 +692,7 @@ def test_is_auto_merge_safe_path_rejects_platform_and_infra() -> None:
     assert _is_auto_merge_safe_path("workflows/self_improve_daily.py") is False
     assert _is_auto_merge_safe_path("workflows/agent_loop.py") is False
     assert _is_auto_merge_safe_path(".github/workflows/deploy.yml") is False
-    assert _is_auto_merge_safe_path("docker-compose.yml") is False
+    assert _is_auto_merge_safe_path("contrib/chart/templates/workloads.yaml") is False
     assert _is_auto_merge_safe_path("db/migrations/001_init.sql") is False
 
 

@@ -13,7 +13,7 @@ import asyncpg
 import httpx
 import structlog
 
-from api.firewall import control_headers
+from api.firewall import secrets_headers
 
 log = structlog.get_logger()
 
@@ -232,7 +232,7 @@ async def _fetch_secret_value(secret_manager_url: str, key: str) -> str | None:
     async with httpx.AsyncClient(timeout=5.0) as client:
         response = await client.get(
             f"{secret_manager_url.rstrip('/')}/secrets/{key}",
-            headers=control_headers(),
+            headers=secrets_headers(),
         )
         if response.status_code == 404:
             return None

@@ -1,9 +1,7 @@
 """Unit tests for sandbox token minting and verification in api.deps."""
 
 import sys
-import time
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -95,7 +93,7 @@ class TestDifferentKey:
 
 
 class TestSandboxThreadScope:
-    def test_app_scoped_tokens_allow_child_threads(self):
-        assert sandbox_thread_in_scope("app:venue-scout", "app:venue-scout:search-123")
-        assert not sandbox_thread_in_scope("app:venue-scout", "app:another-app:search-123")
+    def test_tokens_are_scoped_to_exact_thread(self):
+        assert sandbox_thread_in_scope("thread:1", "thread:1")
+        assert not sandbox_thread_in_scope("thread:1", "thread:2")
         assert not sandbox_thread_in_scope("thread:1", "thread:1:child")

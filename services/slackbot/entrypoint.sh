@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source /app/bootstrap-secrets.sh
-
-bootstrap_required_secrets SLACK_BOT_TOKEN SLACK_SIGNING_SECRET SLACKBOT_API_KEY DATABASE_URL
+: "${SLACK_BOT_TOKEN:?SLACK_BOT_TOKEN is required}"
+: "${SLACK_SIGNING_SECRET:?SLACK_SIGNING_SECRET is required}"
+: "${SLACKBOT_API_KEY:?SLACKBOT_API_KEY is required}"
+: "${DATABASE_URL:?DATABASE_URL is required}"
 
 exec "$@"

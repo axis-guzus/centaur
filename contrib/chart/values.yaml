@@ -5,42 +5,18 @@ global:
   imagePullSecrets: []
 
 secretManager:
-  backend: env
-  envPrefix: CENTAUR_SECRET_
-  generatedSecret:
-    enabled: true
-  existingSecretName: ""
-  secrets:
-    firewallControlToken: ""
-    slackBotToken: ""
-    slackSigningSecret: ""
-    slackbotApiKey: ""
-    localDevApiKey: ""
-    sandboxSigningKey: ""
-    ironManagementApiKey: ""
-  extraSecrets: {}
+  backend: onepassword
+  envPrefix: ""
+  existingSecretName: centaur-infra-env
 
 firewall:
-  image:
-    repository: centaur-firewall
-    tag: latest
-    pullPolicy: IfNotPresent
-  trustedInternalHosts: ""
-  existingCaSecretName: ""
-  service:
-    proxyPort: 8080
-    controlPort: 8081
+  existingCaSecretName: centaur-firewall-ca
+  existingCaKeySecretName: centaur-firewall-ca-key
   ca:
     certPem: ""
     keyPem: ""
-  extraEnv: {}
 
-# Opt-in iron-proxy stack. When enabled, deploys iron-proxy + the
-# firewall-manager sidecar (which renders proxy.yaml and triggers reloads
-# via iron-proxy's management API). The legacy firewall continues to run
-# alongside this — callers control which one they push injection maps to.
 ironProxy:
-  enabled: false
   image:
     repository: centaur-iron-proxy
     tag: latest
@@ -48,6 +24,7 @@ ironProxy:
   service:
     proxyPort: 8080
     managementPort: 9092
+    healthPort: 9090
   manager:
     image:
       repository: centaur-firewall-manager
@@ -73,8 +50,6 @@ api:
     repository: centaur-api
     tag: latest
     pullPolicy: IfNotPresent
-  sandboxBackend: docker
-  dockerHost: ""
   executionWorkerEnabled: false
   workflowWorkerEnabled: true
   warmPoolEnabled: false
@@ -162,6 +137,8 @@ postgres:
     database: ai_v2
     username: tempo
     password: tempo_dev_change_me
+    existingSecretName: centaur-infra-env
+    existingSecretKey: POSTGRES_PASSWORD
   persistence:
     enabled: true
     size: 20Gi
@@ -187,7 +164,7 @@ runnerAccess:
   apiService:
     type: LoadBalancer
     loadBalancerSourceRanges: []
-  firewallService:
+  proxyService:
     type: LoadBalancer
     loadBalancerSourceRanges: []
 

@@ -3,9 +3,9 @@ Centaur K3s chart installed.
 Important follow-ups:
 
 1. This chart deploys the trusted control plane on K3s.
-2. The chart still defaults to the Docker sandbox runner path even though the API now has an experimental Kubernetes backend in code.
-3. `api.executionWorkerEnabled` and `api.victoriaMetricsPushEnabled` are disabled by default for the control-plane-first K3s shape.
-4. Set `api.dockerHost`, `api.executionWorkerEnabled=true`, and matching `api.extraEnv.AGENT_API_URL` / `api.extraEnv.FIREWALL_HOST` before expecting agent execution to work through an external runner.
+2. Agent sandboxes run as Kubernetes Pods managed by the API.
+3. Infra Secrets must exist before install or upgrade; use `just bootstrap-secrets` for local dev.
+4. `api.executionWorkerEnabled` and `api.victoriaMetricsPushEnabled` are disabled by default for the control-plane-first K3s shape.
 5. Keep `runnerAccess.enabled=false` unless you have a private subnet and strict source ranges.
 
 Useful commands:

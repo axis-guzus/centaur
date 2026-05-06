@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import httpx
 
-from api.firewall import control_headers, control_url
+from api.firewall import secrets_headers, secrets_url
 
 
 _PROVIDER_PROBE_KEYS = (
@@ -90,8 +90,8 @@ def _runtime_credential_cache_key(
         enabled,
         tuple(required_keys),
         tuple(probe_keys),
-        control_url(),
-        os.getenv("FIREWALL_CONTROL_TOKEN", ""),
+        secrets_url(),
+        os.getenv("SECRETS_AUTH_TOKEN", ""),
     )
 
 
@@ -191,7 +191,8 @@ async def check_runtime_credentials(*, force_refresh: bool = False) -> dict[str,
         _credential_cache_expires_at = now + _credential_cache_seconds()
         return report
 
-    firewall_url = control_url()
+    secrets_base = secrets_url()
+    auth_headers = secrets_headers()
     missing_keys: list[str] = []
     invalid_keys: list[str] = []
     errors: list[str] = []
@@ -199,15 +200,14 @@ async def check_runtime_credentials(*, force_refresh: bool = False) -> dict[str,
     key_lengths: dict[str, int] = {}
     key_reports: dict[str, dict[str, object]] = {}
     secret_values: dict[str, str] = {}
-    headers = control_headers()
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             for key in keys:
                 key_reports[key] = {"status": "checking"}
-                url = f"{firewall_url}/secrets/{quote(key, safe='')}"
+                url = f"{secrets_base}/secrets/{quote(key, safe='')}"
                 try:
-                    resp = await client.get(url, headers=headers)
+                    resp = await client.get(url, headers=auth_headers)
                 except Exception as exc:  # pragma: no cover - network failures are environment-specific
                     errors.append(f"{key}:request_failed:{_exception_code(exc)}")
                     key_reports[key] = {

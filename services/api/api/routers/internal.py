@@ -1,7 +1,6 @@
-"""Internal endpoints served on control_net — no auth required.
+"""Internal endpoints served on the private service network -- no auth required.
 
-Only the firewall can reach these because control_net is an internal
-Docker network with only the API and firewall as members.
+Only trusted in-cluster services should be allowed to reach these endpoints.
 """
 
 from __future__ import annotations

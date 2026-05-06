@@ -6,7 +6,7 @@ import pytest
 from aiohttp import WSMsgType
 
 from api.sandbox.base import SandboxSession
-from api.sandbox.docker import _container_env as docker_container_env
+from api.sandbox.config import container_env as sandbox_container_env
 from api.sandbox.kubernetes import (
     KubernetesExecutorBackend,
     STDOUT_CHANNEL,
@@ -128,7 +128,7 @@ def test_container_env_includes_firewall_host_for_secret_bootstrap(
     monkeypatch.setenv("AGENT_API_URL", "http://api.internal:8000")
     monkeypatch.setenv("FIREWALL_HOST", "firewall.internal")
 
-    env = docker_container_env("thread-key", "sandbox-id")
+    env = sandbox_container_env("thread-key", "sandbox-id")
     env_map = dict(item.split("=", 1) for item in env)
 
     assert "FIREWALL_HOST=firewall.internal" in env
@@ -254,15 +254,15 @@ async def test_create_builds_pod_and_prompt_secret(monkeypatch: pytest.MonkeyPat
         lambda persona: f"prompt:{persona}",
     )
     monkeypatch.setattr(
-        "api.sandbox.kubernetes._container_env",
+        "api.sandbox.kubernetes.container_env",
         lambda *_args, **_kwargs: [
             "CENTAUR_API_URL=http://api.internal:8000",
             "CENTAUR_API_KEY=sandbox-token",
             "AMP_API_KEY=AMP_API_KEY",
         ],
     )
-    monkeypatch.setattr("api.sandbox.kubernetes._build_harness_cmd", lambda *_args: ["amp-wrapper"])
-    monkeypatch.setattr("api.sandbox.kubernetes._image", lambda: "centaur-agent:test")
+    monkeypatch.setattr("api.sandbox.kubernetes.build_harness_cmd", lambda *_args: ["amp-wrapper"])
+    monkeypatch.setattr("api.sandbox.kubernetes.image", lambda: "centaur-agent:test")
 
     async def fake_ensure_clients() -> None:
         return None
@@ -412,14 +412,14 @@ async def test_create_mounts_repo_cache_host_path(monkeypatch: pytest.MonkeyPatc
         lambda persona: f"prompt:{persona}",
     )
     monkeypatch.setattr(
-        "api.sandbox.kubernetes._container_env",
+        "api.sandbox.kubernetes.container_env",
         lambda *_args, **_kwargs: [
             "CENTAUR_API_URL=http://api.internal:8000",
             "CENTAUR_API_KEY=sandbox-token",
         ],
     )
-    monkeypatch.setattr("api.sandbox.kubernetes._build_harness_cmd", lambda *_args: ["amp-wrapper"])
-    monkeypatch.setattr("api.sandbox.kubernetes._image", lambda: "centaur-agent:test")
+    monkeypatch.setattr("api.sandbox.kubernetes.build_harness_cmd", lambda *_args: ["amp-wrapper"])
+    monkeypatch.setattr("api.sandbox.kubernetes.image", lambda: "centaur-agent:test")
 
     async def fake_ensure_clients() -> None:
         return None
@@ -565,8 +565,6 @@ async def test_stream_stdout_yields_prefetched_and_live_lines() -> None:
 
 
 def test_auto_configure_selects_kubernetes_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_BACKEND", "kubernetes")
-
     backend = auto_configure()
 
     assert isinstance(backend, KubernetesExecutorBackend)

@@ -27,7 +27,6 @@ htmlcov/
 .env
 .env.local
 .env.local.*
-docker-compose.local.yml
 
 # Local-only dev scripts (not committed)
 scripts/local_invest_smoke.sh
@@ -38,7 +37,7 @@ scripts/local_invest_smoke.sh
 *.swp
 *.swo
 
-# Postgres data (docker-compose volume)
+# Postgres data (local dev volume)
 pgdata/
 
 # Docker
