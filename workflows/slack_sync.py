@@ -18,6 +18,7 @@ WORKFLOW_NAME = "slack_sync"
 DEFAULT_LOOKBACK_DAYS = 30
 DEFAULT_THREAD_LOOKBACK_DAYS = 3
 DEFAULT_PAGE_LIMIT = 200
+FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 
 
 class SlackSyncClient(Protocol):
@@ -73,6 +74,14 @@ def _positive_int(value: int | str | None, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _env_flag_enabled(name: str, default: bool = True) -> bool:
+    """Read a boolean feature flag where common false strings opt out."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in FALSE_ENV_VALUES
 
 
 def _ts_minus_days(ts: str | None, days: int) -> str | None:
@@ -423,6 +432,14 @@ def _client() -> SlackSyncClient:
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     """Sync public Slack channels that the bot has been added to into Postgres."""
+    if not _env_flag_enabled("SLACK_ETL_ENABLED", default=True):
+        ctx.log("slack_sync_skipped_disabled")
+        return {
+            "status": "skipped",
+            "reason": "slack_etl_disabled",
+            "channels_skipped": [],
+        }
+
     lookback_days = _positive_int(
         inp.lookback_days or os.getenv("SLACK_SYNC_LOOKBACK_DAYS"),
         DEFAULT_LOOKBACK_DAYS,

@@ -175,6 +175,31 @@ def _reply_message() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_slack_etl_disabled_noops_without_run_row(db_pool, monkeypatch):
+    from workflows import slack_sync
+
+    await db_pool.execute(
+        "INSERT INTO slack_sync_channels (channel_id, channel_name, is_member) "
+        "VALUES ('C_OLD', 'old-channel', TRUE)",
+    )
+    fake = FakeSlackClient(channels=[_public_channel()])
+    ctx = FakeCtx(db_pool)
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "false")
+
+    with patch.object(slack_sync, "_client", return_value=fake):
+        result = await slack_sync.handler(slack_sync.Input(), ctx)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "slack_etl_disabled"
+    assert fake.list_bot_channels_calls == 0
+    assert fake.list_users_calls == 0
+    assert await db_pool.fetchval("SELECT COUNT(*) FROM slack_sync_runs") == 0
+    assert await db_pool.fetchval(
+        "SELECT is_member FROM slack_sync_channels WHERE channel_id = 'C_OLD'",
+    ) is True
+
+
+@pytest.mark.asyncio
 async def test_no_bot_member_channels_noops_without_run_row(db_pool):
     from workflows import slack_sync
 

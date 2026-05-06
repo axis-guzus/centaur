@@ -53,6 +53,7 @@ api:
   executionWorkerEnabled: false
   workflowWorkerEnabled: true
   warmPoolEnabled: false
+  slackEtlEnabled: true
   victoriaMetricsPushEnabled: false
   runtimeCredentialGuardEnabled: true
   requiredRuntimeSecretKeys: AMP_API_KEY
