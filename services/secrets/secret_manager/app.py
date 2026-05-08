@@ -24,6 +24,31 @@ from secret_manager.backend import SecretEntry, SecretManagerBackend
 
 log = configure_json_logging("secret_manager", uvicorn=True)
 
+
+def _initialize_laminar() -> None:
+    if not (os.environ.get("LMNR_PROJECT_API_KEY") or "").strip():
+        return
+    try:
+        from lmnr import Laminar
+
+        Laminar.initialize(
+            project_api_key=os.environ.get("LMNR_PROJECT_API_KEY"),
+            base_url=os.environ.get("LMNR_BASE_URL") or "https://api.lmnr.ai",
+            http_port=int(os.environ["LMNR_HTTP_PORT"])
+            if os.environ.get("LMNR_HTTP_PORT")
+            else None,
+            grpc_port=int(os.environ["LMNR_GRPC_PORT"])
+            if os.environ.get("LMNR_GRPC_PORT")
+            else None,
+            instruments=set(),
+        )
+        log.info("laminar initialized")
+    except Exception as exc:
+        log.warning("laminar initialization failed: %s", exc)
+
+
+_initialize_laminar()
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------

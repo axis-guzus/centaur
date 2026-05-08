@@ -20,6 +20,9 @@ api:
   egressDiscovery:
     enabled: false
 
+laminar:
+  enabled: true
+
 ironProxy:
   manager:
     secretSource: onepassword

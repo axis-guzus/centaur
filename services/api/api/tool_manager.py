@@ -29,6 +29,7 @@ from fastapi.responses import PlainTextResponse
 from toon_format import encode as toon_encode
 
 from api.api_keys import check_scope
+from api.laminar_tracing import set_span_attributes, start_span
 from api.firewall import secrets_headers, secrets_url
 from api.vm_metrics import record_tool_call
 from api.deps import get_key_info, get_sandbox_claims, verify_api_key
@@ -867,10 +868,36 @@ class ToolManager:
 
         token = set_tool_context(ctx)
         try:
-            if inspect.iscoroutinefunction(method.fn):
-                result = await method.fn(**args)
-            else:
-                result = await asyncio.to_thread(method.fn, **args)
+            with start_span(
+                name="centaur.tool.call",
+                span_type="TOOL",
+                metadata={
+                    "service": "api",
+                    "tool_name": tool_name,
+                    "tool_method": method_name,
+                    **(
+                        {"thread_key": sandbox_claims.get("thread_key")}
+                        if sandbox_claims
+                        else {}
+                    ),
+                },
+            ):
+                set_span_attributes(
+                    {
+                        "centaur.tool.name": tool_name,
+                        "centaur.tool.method": method_name,
+                        "centaur.tool.arg_keys": ",".join(sorted(args.keys())),
+                        **(
+                            {"centaur.thread_key": sandbox_claims.get("thread_key")}
+                            if sandbox_claims
+                            else {}
+                        ),
+                    }
+                )
+                if inspect.iscoroutinefunction(method.fn):
+                    result = await method.fn(**args)
+                else:
+                    result = await asyncio.to_thread(method.fn, **args)
             duration_ms = round((time.monotonic() - t0) * 1000)
             log.info(
                 "tool_call_completed",
@@ -992,10 +1019,36 @@ class ToolManager:
 
         token = set_tool_context(ctx)
         try:
-            if inspect.iscoroutinefunction(method.fn):
-                result = await method.fn(**args)
-            else:
-                result = await asyncio.to_thread(method.fn, **args)
+            with start_span(
+                name="centaur.tool.call",
+                span_type="TOOL",
+                metadata={
+                    "service": "api",
+                    "tool_name": tool_name,
+                    "tool_method": method_name,
+                    **(
+                        {"thread_key": sandbox_claims.get("thread_key")}
+                        if sandbox_claims
+                        else {}
+                    ),
+                },
+            ):
+                set_span_attributes(
+                    {
+                        "centaur.tool.name": tool_name,
+                        "centaur.tool.method": method_name,
+                        "centaur.tool.arg_keys": ",".join(sorted(args.keys())),
+                        **(
+                            {"centaur.thread_key": sandbox_claims.get("thread_key")}
+                            if sandbox_claims
+                            else {}
+                        ),
+                    }
+                )
+                if inspect.iscoroutinefunction(method.fn):
+                    result = await method.fn(**args)
+                else:
+                    result = await asyncio.to_thread(method.fn, **args)
             duration_ms = round((time.monotonic() - t0) * 1000)
             log.info(
                 "tool_call_completed",

@@ -14,6 +14,7 @@
   "dependencies": {
     "@centaur/api-client": "workspace:*",
     "@centaur/harness-events": "workspace:*",
+    "@lmnr-ai/lmnr": "^0.8.23",
     "@slack/bolt": "^4.5.0",
     "@slack/web-api": "^7.15.1",
     "@toon-format/toon": "^2.1.0",

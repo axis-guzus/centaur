@@ -8,6 +8,19 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    if (process.env.LMNR_PROJECT_API_KEY) {
+      const { Laminar } = await import("@lmnr-ai/lmnr");
+      Laminar.initialize({
+        projectApiKey: process.env.LMNR_PROJECT_API_KEY,
+        baseUrl: process.env.LMNR_BASE_URL,
+        httpPort: process.env.LMNR_HTTP_PORT ? Number(process.env.LMNR_HTTP_PORT) : undefined,
+        grpcPort: process.env.LMNR_GRPC_PORT ? Number(process.env.LMNR_GRPC_PORT) : undefined,
+        metadata: {
+          service: "slackbot",
+          environment: process.env.CENTAUR_ENVIRONMENT || "local",
+        },
+      });
+    }
     const { ensureBotReady, getSlackBootstrapState } = await import("@/lib/bot/setup");
     const { log } = await import("@/lib/logger");
     const bootstrap = getSlackBootstrapState();

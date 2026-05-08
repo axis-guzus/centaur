@@ -81,22 +81,43 @@ delete_if_forced centaur-firewall-ca
 delete_if_forced centaur-firewall-ca-key
 
 if secret_exists centaur-infra-env; then
+  patch_data=()
+  if [[ -n "${LMNR_PROJECT_API_KEY:-}" ]]; then
+    patch_data+=("\"LMNR_PROJECT_API_KEY\":\"$(printf '%s' "$LMNR_PROJECT_API_KEY" | base64 | tr -d '\n')\"")
+  fi
+  if [[ -n "${LMNR_BASE_URL:-}" ]]; then
+    patch_data+=("\"LMNR_BASE_URL\":\"$(printf '%s' "$LMNR_BASE_URL" | base64 | tr -d '\n')\"")
+  fi
+  if [[ "${#patch_data[@]}" -gt 0 ]]; then
+    patch_json="{\"data\":{$(IFS=,; echo "${patch_data[*]}")}}"
+    kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p "$patch_json" >/dev/null
+    echo "Updated optional Laminar keys in Secret centaur-infra-env in namespace $NAMESPACE"
+  fi
   echo "Secret centaur-infra-env already exists in namespace $NAMESPACE; leaving unchanged"
 else
   POSTGRES_PASSWORD="$(rand_hex)"
   DATABASE_URL="postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-pgbouncer:5432/ai_v2"
-  kubectl -n "$NAMESPACE" create secret generic centaur-infra-env \
-    --from-literal=SECRETS_AUTH_TOKEN="$(rand_hex)" \
-    --from-literal=FIREWALL_CONTROL_TOKEN="$(rand_hex)" \
-    --from-literal=IRON_MANAGEMENT_API_KEY="$(rand_hex)" \
-    --from-literal=SANDBOX_SIGNING_KEY="$(rand_hex)" \
-    --from-literal=OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN" \
-    --from-literal=OP_VAULT="$OP_VAULT" \
-    --from-literal=SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN" \
-    --from-literal=SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" \
-    --from-literal=SLACKBOT_API_KEY="$SLACKBOT_API_KEY" \
-    --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-    --from-literal=DATABASE_URL="$DATABASE_URL" >/dev/null
+  secret_args=(
+    -n "$NAMESPACE" create secret generic centaur-infra-env
+    --from-literal=SECRETS_AUTH_TOKEN="$(rand_hex)"
+    --from-literal=FIREWALL_CONTROL_TOKEN="$(rand_hex)"
+    --from-literal=IRON_MANAGEMENT_API_KEY="$(rand_hex)"
+    --from-literal=SANDBOX_SIGNING_KEY="$(rand_hex)"
+    --from-literal=OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN"
+    --from-literal=OP_VAULT="$OP_VAULT"
+    --from-literal=SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN"
+    --from-literal=SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET"
+    --from-literal=SLACKBOT_API_KEY="$SLACKBOT_API_KEY"
+    --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
+    --from-literal=DATABASE_URL="$DATABASE_URL"
+  )
+  if [[ -n "${LMNR_PROJECT_API_KEY:-}" ]]; then
+    secret_args+=(--from-literal=LMNR_PROJECT_API_KEY="$LMNR_PROJECT_API_KEY")
+  fi
+  if [[ -n "${LMNR_BASE_URL:-}" ]]; then
+    secret_args+=(--from-literal=LMNR_BASE_URL="$LMNR_BASE_URL")
+  fi
+  kubectl "${secret_args[@]}" >/dev/null
   echo "Created Secret centaur-infra-env in namespace $NAMESPACE"
 fi
 
