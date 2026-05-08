@@ -3,6 +3,7 @@
 from typing import Any
 
 import httpx
+
 from centaur_sdk import secret
 
 
@@ -10,23 +11,32 @@ class AttioClient:
     """Authenticated Attio CRM API client."""
 
     def __init__(self, api_key: str | None = None):
-        self._api_key = api_key or secret("ATTIO_API_KEY", "")
-        if not self._api_key:
+        self._api_key_override = api_key
+        self._client: httpx.Client | None = None
+
+    def _http(self) -> httpx.Client:
+        """Return the cached HTTP client, building it after secrets are injected."""
+        if self._client is not None:
+            return self._client
+
+        api_key = self._api_key_override or secret("ATTIO_API_KEY", "")
+        if not api_key:
             raise RuntimeError(
                 "ATTIO_API_KEY not set.\nGenerate one at https://app.attio.com/settings/developers"
             )
         self._client = httpx.Client(
             base_url="https://api.attio.com/v2",
             headers={
-                "Authorization": f"Bearer {self._api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             timeout=30.0,
         )
+        return self._client
 
     def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         """Make authenticated request to Attio API."""
-        response = self._client.request(method, path, **kwargs)
+        response = self._http().request(method, path, **kwargs)
         if response.status_code >= 400:
             try:
                 error = response.json()
@@ -332,9 +342,10 @@ class AttioClient:
 
     def close(self):
         """Close the underlying HTTP client."""
-        self._client.close()
+        if self._client is not None:
+            self._client.close()
 
 
 def _client() -> AttioClient:
     """Factory for tool SDK integration."""
-    return AttioClient(api_key=secret("ATTIO_API_KEY"))
+    return AttioClient()
