@@ -156,6 +156,9 @@ spec:
 {{- end }}
         - podSelector:
             matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-proxy") | nindent 14 }}
+        - podSelector:
+            matchLabels:
               centaur.ai/managed: "true"
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
