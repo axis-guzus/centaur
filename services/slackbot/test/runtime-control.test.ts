@@ -89,6 +89,7 @@ function createImmediateStreamClient(): any {
         },
       };
     })()),
+    steerExecution: vi.fn(async () => ({ ok: true, status: "steered" })),
     cancelExecution: vi.fn(async () => ({ ok: true })),
     markFinalDelivered: vi.fn(async () => ({ ok: true })),
     markFinalFailed: vi.fn(async () => ({ ok: true })),
@@ -183,7 +184,7 @@ describe("SlackBot runtime control", () => {
     expect(client.startWorkflowRun.mock.calls[0][0].input.prompt_selector).toBe("invest");
   });
 
-  it("cancels the previous execution before starting a new mention turn", async () => {
+  it("steers the previous execution with the new mention content", async () => {
     const client = createImmediateStreamClient();
     const bot = new SlackBot(client as any);
     const { thread } = createThread();
@@ -199,8 +200,36 @@ describe("SlackBot runtime control", () => {
       isMention: true,
     }));
 
-    expect(oldAbortController.signal.aborted).toBe(true);
-    expect(client.cancelExecution).toHaveBeenCalledWith("exe-old");
+    expect(oldAbortController.signal.aborted).toBe(false);
+    expect(client.steerExecution).toHaveBeenCalledWith("exe-old", {
+      contentBlocks: [{ type: "text", text: "follow-up" }],
+      messageId: "slack:1700000000.000003",
+      userId: "U123",
+      metadata: { platform: "slack", team_id: "T123" },
+    });
+    expect(client.cancelExecution).not.toHaveBeenCalled();
+    expect(client.startWorkflowRun).not.toHaveBeenCalled();
+  });
+
+  it("excludes Slack messages newer than the current mention from workflow history", async () => {
+    const client = createImmediateStreamClient();
+    const slack = createSlackAdapter({
+      fetchMessages: async () => ({
+        messages: [
+          userMessage("<@bot> current ask", { id: "1700000000.000100" }) as any,
+          userMessage("<@bot> stop", { id: "1700000004.000100" }) as any,
+          userMessage("prior context", { id: "1699999999.000100" }) as any,
+        ],
+      }),
+    });
+    const bot = new SlackBot(client as any, "", slack);
+    const { thread } = createThread();
+
+    await bot.onNewMention(thread, userMessage("<@bot> current ask", { id: "1700000000.000100" }));
+
+    expect(client.startWorkflowRun.mock.calls[0][0].input.history_messages.map((m: any) => m.message_id)).toEqual([
+      "slack:1699999999.000100",
+    ]);
   });
 
   it("does not leave a blank streamed message behind when an execution is interrupted before text", async () => {

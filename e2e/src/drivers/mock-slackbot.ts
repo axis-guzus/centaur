@@ -9,7 +9,15 @@ export type MockSlackMention = {
   userId?: string;
   teamId?: string;
   messageId?: string;
+  historyMessages?: MockSlackHistoryMessage[];
   timeoutMs?: number;
+};
+
+export type MockSlackHistoryMessage = {
+  messageId: string;
+  text: string;
+  userId?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type MockSlackResult = {
@@ -32,7 +40,8 @@ export type StartedMention = {
 
 export type StopResult = {
   steerStatus: string;
-  terminal: Omit<MockSlackResult, "runId" | "threadTs">;
+  previous: Omit<MockSlackResult, "runId" | "threadTs">;
+  followUp: MockSlackResult;
 };
 
 const TERMINAL_EXECUTION_STATUSES = new Set([
@@ -107,6 +116,12 @@ export class MockSlackbot {
     const teamId = input.teamId ?? "T-e2e";
     const messageId = input.messageId ?? `slack:${threadTs}`;
     const parts: InputContentBlock[] = [{ type: "text", text: input.text }];
+    const historyMessages = (input.historyMessages ?? []).map((message) => ({
+      message_id: message.messageId,
+      parts: [{ type: "text", text: message.text }],
+      user_id: message.userId ?? userId,
+      metadata: message.metadata ?? { platform: "slack", history_backfill: true },
+    }));
 
     this.metrics.mark("workflowRequest");
     const workflow = await this.client.startWorkflowRun({
@@ -118,7 +133,7 @@ export class MockSlackbot {
         parts,
         user_id: userId,
         message_id: messageId,
-        history_messages: [],
+        history_messages: historyMessages,
         delivery: {
           platform: "slack",
           channel,
@@ -140,26 +155,50 @@ export class MockSlackbot {
     };
   }
 
+  async waitForExecutionTerminal(
+    started: StartedMention,
+    timeoutMs = 180_000,
+  ): Promise<Omit<MockSlackResult, "runId" | "threadTs">> {
+    const terminal = await this.pollExecutionTerminalResult(
+      started.threadKey,
+      started.executionId,
+      timeoutMs,
+    );
+
+    return {
+      threadKey: started.threadKey,
+      executionId: started.executionId,
+      status: terminal.status,
+      terminalReason: terminal.terminalReason,
+      finalText: terminal.finalText,
+      events: terminal.events,
+    };
+  }
+
   async sendStop(
     started: StartedMention,
     opts: { text?: string; timeoutMs?: number } = {},
   ): Promise<StopResult> {
-    const execution = await this.client.getExecution(started.executionId);
-    const assignmentGeneration = Number(execution.assignment_generation);
-    if (!Number.isFinite(assignmentGeneration)) {
-      throw new Error(`execution ${started.executionId} did not expose assignment_generation`);
-    }
-
-    await this.client.message({
-      threadKey: started.threadKey,
-      assignmentGeneration,
-      messageId: `slack:${started.threadTs}:stop`,
-      parts: [{ type: "text", text: opts.text ?? "stop" }],
-      userId: "U-e2e",
-    });
+    // Mirror SlackBot's live-thread behavior for a second mention: it first
+    // interrupts the in-flight execution, then starts a new workflow turn for
+    // the follow-up message in the same Slack thread.
+    await this.waitForExecutionRunning(
+      started.threadKey,
+      started.executionId,
+      Math.min(opts.timeoutMs ?? 180_000, 60_000),
+    );
 
     const steer = await this.client.steerExecution(started.executionId);
-    const terminal = await this.collectTerminalResult(
+
+    const followUp = await this.sendMention({
+      channel: started.threadKey.split(":", 1)[0],
+      threadTs: started.threadTs,
+      text: opts.text ?? "Stop the in-flight response. Reply with exactly STOPPED.",
+      messageId: `slack:${started.threadTs}:stop`,
+      timeoutMs: opts.timeoutMs ?? 180_000,
+    });
+
+    const previous = await this.pollExecutionTerminalResult(
       started.threadKey,
       started.executionId,
       opts.timeoutMs ?? 180_000,
@@ -167,14 +206,15 @@ export class MockSlackbot {
 
     return {
       steerStatus: typeof steer.status === "string" ? steer.status : "unknown",
-      terminal: {
+      previous: {
         threadKey: started.threadKey,
         executionId: started.executionId,
-        status: terminal.status,
-        terminalReason: terminal.terminalReason,
-        finalText: terminal.finalText,
-        events: terminal.events,
+        status: previous.status,
+        terminalReason: previous.terminalReason,
+        finalText: previous.finalText,
+        events: previous.events,
       },
+      followUp,
     };
   }
 
@@ -198,6 +238,57 @@ export class MockSlackbot {
     }
 
     throw new Error(`workflow did not expose execution_id within ${timeoutMs}ms`);
+  }
+
+  private async waitForExecutionRunning(
+    threadKey: string,
+    executionId: string,
+    timeoutMs: number,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const execution = await this.client.getExecution(executionId);
+      const status = typeof execution.status === "string" ? execution.status : "";
+      if (status === "running") return;
+      if (TERMINAL_EXECUTION_STATUSES.has(status)) {
+        throw new Error(
+          `execution ${executionId} reached ${status} before it could be stopped`,
+        );
+      }
+      await sleep(100);
+    }
+
+    throw new Error(
+      `execution ${executionId} for thread ${threadKey} did not start running within ${timeoutMs}ms`,
+    );
+  }
+
+  private async pollExecutionTerminalResult(
+    threadKey: string,
+    executionId: string,
+    timeoutMs: number,
+  ): Promise<{
+    status: string;
+    terminalReason?: string;
+    finalText: string;
+    events: MockSlackResult["events"];
+  }> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const execution = await this.client.getExecution(executionId);
+      const status = statusFromTerminalPayload(execution);
+      if (isTerminalExecutionState(execution)) {
+        return {
+          status,
+          terminalReason: terminalReasonFromPayload(execution),
+          finalText: textFromTerminalPayload(execution),
+          events: [{ eventId: 0, eventKind: "execution_record", type: "execution.state" }],
+        };
+      }
+      await sleep(100);
+    }
+
+    throw new Error(`execution ${executionId} for thread ${threadKey} did not complete within ${timeoutMs}ms`);
   }
 
   private async collectTerminalResult(

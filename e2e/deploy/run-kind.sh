@@ -2,19 +2,48 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+ENV_FILE="${CENTAUR_E2E_ENV_FILE:-$ROOT/.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+  set +a
+fi
+
+if [[ -n "${CI:-}" ]]; then
+  DEFAULT_KEEP_CLUSTER=0
+  DEFAULT_RECREATE_CLUSTER=1
+  DEFAULT_BUILD_IMAGES=1
+  DEFAULT_LOAD_IMAGES=1
+  DEFAULT_WARM_POOL_TARGET=2
+  DEFAULT_WARM_POOL_TIMEOUT_SECONDS=120
+else
+  DEFAULT_KEEP_CLUSTER=1
+  DEFAULT_RECREATE_CLUSTER=0
+  DEFAULT_BUILD_IMAGES=0
+  DEFAULT_LOAD_IMAGES=auto
+  DEFAULT_WARM_POOL_TARGET=1
+  DEFAULT_WARM_POOL_TIMEOUT_SECONDS=60
+fi
+
 CLUSTER_NAME="${CENTAUR_E2E_KIND_CLUSTER:-centaur-e2e}"
 NAMESPACE="${CENTAUR_NAMESPACE:-centaur}"
 RELEASE="${CENTAUR_RELEASE:-centaur}"
 API_PORT="${CENTAUR_E2E_API_PORT:-8000}"
 SLACKBOT_API_KEY="${SLACKBOT_API_KEY:-aiv2_e2e_slackbot_key_do_not_use_outside_tests}"
 LOCAL_DEV_API_KEY="${LOCAL_DEV_API_KEY:-aiv2_e2e_local_dev_key_do_not_use_outside_tests}"
-WARM_POOL_TARGET="${CENTAUR_E2E_WARM_POOL_TARGET:-2}"
-KEEP_CLUSTER="${CENTAUR_E2E_KEEP_CLUSTER:-0}"
-RECREATE_CLUSTER="${CENTAUR_E2E_RECREATE_CLUSTER:-1}"
-BUILD_IMAGES="${E2E_BUILD:-1}"
+WARM_POOL_TARGET="${CENTAUR_E2E_WARM_POOL_TARGET:-$DEFAULT_WARM_POOL_TARGET}"
+KEEP_CLUSTER="${CENTAUR_E2E_KEEP_CLUSTER:-$DEFAULT_KEEP_CLUSTER}"
+RECREATE_CLUSTER="${CENTAUR_E2E_RECREATE_CLUSTER:-$DEFAULT_RECREATE_CLUSTER}"
+BUILD_IMAGES="${E2E_BUILD:-$DEFAULT_BUILD_IMAGES}"
+LOAD_IMAGES="${CENTAUR_E2E_LOAD_IMAGES:-$DEFAULT_LOAD_IMAGES}"
+DEPLOY_STACK="${CENTAUR_E2E_DEPLOY:-auto}"
+WARM_POOL_TIMEOUT_SECONDS="${CENTAUR_E2E_WARM_POOL_TIMEOUT_SECONDS:-$DEFAULT_WARM_POOL_TIMEOUT_SECONDS}"
 API_DEPLOYMENT="deploy/${RELEASE}-centaur-api"
 API_SELECTOR="app.kubernetes.io/name=centaur,app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/component=api"
 pf_pid=""
+cluster_created=0
 IMAGES=(
   centaur-api
   centaur-secrets
@@ -45,11 +74,17 @@ cleanup() {
 require_cmd kind
 require_cmd kubectl
 require_cmd helm
-require_cmd docker
-require_cmd just
 require_cmd curl
 require_cmd node
 require_cmd pnpm
+
+if [[ "$BUILD_IMAGES" =~ ^(1|true|yes)$ ]]; then
+  require_cmd just
+fi
+
+if [[ "$BUILD_IMAGES" =~ ^(1|true|yes)$ ]] || [[ "$LOAD_IMAGES" =~ ^(1|true|yes|auto)$ ]]; then
+  require_cmd docker
+fi
 
 if [[ -z "${AMP_API_KEY:-}" ]]; then
   echo "FATAL: AMP_API_KEY is required" >&2
@@ -80,8 +115,13 @@ wait_for_api_rollout() {
 }
 
 wait_for_warm_pool() {
+  if [[ "$WARM_POOL_TARGET" == "0" ]]; then
+    echo "Skipping warm pool wait (CENTAUR_E2E_WARM_POOL_TARGET=0)"
+    return 0
+  fi
+
   local api_url="http://localhost:${API_PORT}"
-  local deadline=$((SECONDS + 300))
+  local deadline=$((SECONDS + WARM_POOL_TIMEOUT_SECONDS))
   local current_size="0"
   local body=""
 
@@ -123,14 +163,38 @@ load_images_into_kind() {
   fi
 }
 
+cluster_exists() {
+  kind get clusters | grep -Fxq "$CLUSTER_NAME"
+}
+
+should_deploy_stack() {
+  case "$DEPLOY_STACK" in
+    1|true|yes) return 0 ;;
+    0|false|no) return 1 ;;
+  esac
+  if (( cluster_created )); then
+    return 0
+  fi
+  ! kubectl get deployment -n "$NAMESPACE" "${RELEASE}-centaur-api" >/dev/null 2>&1
+}
+
+should_load_images() {
+  case "$LOAD_IMAGES" in
+    1|true|yes) return 0 ;;
+    0|false|no) return 1 ;;
+  esac
+  [[ "$BUILD_IMAGES" =~ ^(1|true|yes)$ ]] || (( cluster_created ))
+}
+
 trap cleanup EXIT
 
 if [[ "$RECREATE_CLUSTER" =~ ^(1|true|yes)$ ]]; then
   kind delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
 fi
 
-if ! kind get clusters | grep -Fxq "$CLUSTER_NAME"; then
+if ! cluster_exists; then
   kind create cluster --name "$CLUSTER_NAME"
+  cluster_created=1
 fi
 
 kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
@@ -139,17 +203,28 @@ if [[ "$BUILD_IMAGES" =~ ^(1|true|yes)$ ]]; then
   (cd "$ROOT" && just build)
 fi
 
-load_images_into_kind
+if should_load_images; then
+  load_images_into_kind
+else
+  echo "Skipping kind image load (CENTAUR_E2E_LOAD_IMAGES=${LOAD_IMAGES}, E2E_BUILD=${BUILD_IMAGES}, cluster_created=${cluster_created})"
+fi
 
-CENTAUR_NAMESPACE="$NAMESPACE" \
-CENTAUR_RELEASE="$RELEASE" \
-SLACKBOT_API_KEY="$SLACKBOT_API_KEY" \
-LOCAL_DEV_API_KEY="$LOCAL_DEV_API_KEY" \
-"$ROOT/e2e/deploy/create-ci-secrets.sh"
+if should_deploy_stack; then
+  CENTAUR_NAMESPACE="$NAMESPACE" \
+  CENTAUR_RELEASE="$RELEASE" \
+  SLACKBOT_API_KEY="$SLACKBOT_API_KEY" \
+  LOCAL_DEV_API_KEY="$LOCAL_DEV_API_KEY" \
+  "$ROOT/e2e/deploy/create-ci-secrets.sh"
 
-helm upgrade --install "$RELEASE" "$ROOT/contrib/chart" \
-  -n "$NAMESPACE" --create-namespace \
-  -f "$ROOT/e2e/deploy/values.ci.yaml"
+  helm upgrade --install "$RELEASE" "$ROOT/contrib/chart" \
+    -n "$NAMESPACE" --create-namespace \
+    -f "$ROOT/e2e/deploy/values.ci.yaml" \
+    --set "api.extraEnv.WARM_POOL_SIZE=${WARM_POOL_TARGET}"
+
+  wait_for_api_rollout
+else
+  echo "Skipping Helm deploy; using existing ${RELEASE} release in namespace ${NAMESPACE}"
+fi
 
 wait_for_api_rollout
 
@@ -162,4 +237,4 @@ wait_for_warm_pool
 cd "$ROOT"
 CENTAUR_API_URL="http://localhost:${API_PORT}" \
 SLACKBOT_API_KEY="$SLACKBOT_API_KEY" \
-pnpm --filter @centaur/e2e test -- "$@"
+pnpm --filter @centaur/e2e exec vitest run "$@"

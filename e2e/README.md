@@ -24,28 +24,40 @@ If the API is only reachable from inside Kubernetes, port-forward it first:
 kubectl port-forward -n centaur deploy/centaur-centaur-api 8000:8000
 ```
 
-## Run in an ephemeral kind cluster
+## Run in kind
 
-The easiest local end-to-end path is to let the helper create a disposable
-kind cluster, build and load local images, deploy Centaur, run the tests, then
-delete the cluster. The E2E deployment enables a small warm pool and waits for
-two warm sandboxes before starting tests:
+The easiest local end-to-end path is to let the helper create or reuse a kind
+cluster, deploy Centaur when needed, warm one sandbox, then run the tests. The
+helper automatically loads environment variables from the repo-root `.env`
+file, so a local `.env` containing `AMP_API_KEY=...` is enough:
 
 ```bash
-AMP_API_KEY=... e2e/deploy/run-kind.sh
+e2e/deploy/run-kind.sh
 ```
+
+Local runs are optimized for a fast feedback loop: by default they keep and
+reuse the kind cluster, skip image builds, skip image loading unless the cluster
+was just created, and skip Helm deploys when the release already exists. CI uses
+the same script with cold defaults: recreate the cluster, build/load images,
+deploy, run tests, and delete the cluster.
 
 Useful options:
 
 ```bash
-# Reuse already-built local images
-AMP_API_KEY=... E2E_BUILD=0 e2e/deploy/run-kind.sh
+# Force a full local rebuild + image reload + deploy
+E2E_BUILD=1 CENTAUR_E2E_LOAD_IMAGES=1 CENTAUR_E2E_DEPLOY=1 e2e/deploy/run-kind.sh
 
-# Keep the cluster after the run for debugging
-AMP_API_KEY=... CENTAUR_E2E_KEEP_CLUSTER=1 e2e/deploy/run-kind.sh
+# Recreate the kind cluster for a clean local run
+CENTAUR_E2E_RECREATE_CLUSTER=1 e2e/deploy/run-kind.sh
+
+# Delete the cluster after the run
+CENTAUR_E2E_KEEP_CLUSTER=0 e2e/deploy/run-kind.sh
+
+# Skip waiting for warm sandboxes
+CENTAUR_E2E_WARM_POOL_TARGET=0 e2e/deploy/run-kind.sh
 
 # Use a different kind cluster name
-AMP_API_KEY=... CENTAUR_E2E_KIND_CLUSTER=my-centaur-e2e e2e/deploy/run-kind.sh
+CENTAUR_E2E_KIND_CLUSTER=my-centaur-e2e e2e/deploy/run-kind.sh
 ```
 
 ## CI

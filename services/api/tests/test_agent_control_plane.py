@@ -1635,7 +1635,7 @@ async def test_claim_next_execution_reclaims_expired_cancel_requested(db_pool):
 
 
 @pytest.mark.asyncio
-async def test_cancel_execution_interrupts_runtime_and_clears_inflight(db_pool):
+async def test_cancel_execution_stops_runtime_and_clears_inflight(db_pool):
     from api.runtime_control import cancel_execution
 
     thread_key = f"slack:C-test:{uuid.uuid4().hex}"
@@ -1666,8 +1666,8 @@ async def test_cancel_execution_interrupts_runtime_and_clears_inflight(db_pool):
         runtime_id,
     )
 
-    backend = SimpleNamespace(interrupt_by_id=AsyncMock())
-    with patch("api.runtime_control.get_backend", return_value=backend):
+    stop_session_mock = AsyncMock(return_value=True)
+    with patch("api.runtime_control.stop_session", stop_session_mock):
         result = await cancel_execution(db_pool, execution_id)
 
     assert result == {
@@ -1676,7 +1676,7 @@ async def test_cancel_execution_interrupts_runtime_and_clears_inflight(db_pool):
         "thread_key": thread_key,
         "status": "cancel_requested",
     }
-    backend.interrupt_by_id.assert_awaited_once_with(runtime_id)
+    stop_session_mock.assert_awaited_once_with(thread_key)
 
     execution = await db_pool.fetchrow(
         "SELECT status FROM agent_execution_requests WHERE execution_id = $1",
@@ -1691,10 +1691,152 @@ async def test_cancel_execution_interrupts_runtime_and_clears_inflight(db_pool):
         thread_key,
     )
     assert session is not None
-    assert session["state"] == "idle"
+    assert session["state"] == "stopped"
     assert session["inflight_turn_id"] is None
     assert session["inflight_turn_input"] is None
     assert session["inflight_attempts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_steer_execution_does_not_replay_original_prompt_before_cursor_advances(db_pool):
+    from api.runtime_control import steer_execution
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    execution_id = f"exe-{uuid.uuid4().hex[:12]}"
+    runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
+
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, $2, 'amp', 'amp', NULL, 'harness:amp', 'sha', 'active')",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO sandbox_sessions ("
+        "thread_key, sandbox_id, harness, engine, state, started_at, last_delivered_id"
+        ") VALUES ($1, $2, 'amp', 'amp', 'running', NOW(), NULL)",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO chat_messages (id, thread_key, role, user_id, parts, metadata, created_at) "
+        "VALUES ($1, $2, 'user', 'U-test', $3::jsonb, '{}'::jsonb, NOW() - INTERVAL '1 second')",
+        f"msg-{uuid.uuid4().hex[:12]}",
+        thread_key,
+        json.dumps([{"type": "text", "text": "original long prompt"}]),
+    )
+    await db_pool.execute(
+        "INSERT INTO chat_messages (id, thread_key, role, user_id, parts, metadata, created_at) "
+        "VALUES ($1, $2, 'system', NULL, $3::jsonb, '{}'::jsonb, NOW())",
+        f"system-{uuid.uuid4().hex[:12]}",
+        thread_key,
+        json.dumps([{"type": "text", "text": "slack formatting instructions"}]),
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, started_at"
+        ") VALUES ($1, $2, 1, 'exec-steer', 'hash-steer', 'running', '{}'::jsonb, '{}'::jsonb, NOW() - INTERVAL '500 milliseconds')",
+        execution_id,
+        thread_key,
+    )
+
+    stop_session_mock = AsyncMock(return_value=True)
+    steer_stdin_mock = AsyncMock(return_value={"ok": True, "steered": True})
+    with (
+        patch("api.runtime_control.stop_session", stop_session_mock),
+        patch("api.runtime_control.steer_stdin", steer_stdin_mock),
+    ):
+        result = await steer_execution(db_pool, execution_id)
+
+    assert result == {
+        "ok": True,
+        "execution_id": execution_id,
+        "thread_key": thread_key,
+        "status": "cancel_requested",
+    }
+    steer_stdin_mock.assert_not_awaited()
+    stop_session_mock.assert_awaited_once_with(thread_key)
+
+    execution = await db_pool.fetchrow(
+        "SELECT status FROM agent_execution_requests WHERE execution_id = $1",
+        execution_id,
+    )
+    assert execution is not None
+    assert execution["status"] == "cancel_requested"
+
+
+@pytest.mark.asyncio
+async def test_steer_execution_persists_and_injects_explicit_message(db_pool):
+    from api.runtime_control import steer_execution
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    execution_id = f"exe-{uuid.uuid4().hex[:12]}"
+    runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
+    message_id = f"slack:{uuid.uuid4().hex[:12]}"
+    content_blocks = [{"type": "text", "text": "stop"}]
+
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, $2, 'amp', 'amp', NULL, 'harness:amp', 'sha', 'active')",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO sandbox_sessions ("
+        "thread_key, sandbox_id, harness, engine, state, started_at, last_delivered_id"
+        ") VALUES ($1, $2, 'amp', 'amp', 'running', NOW(), NULL)",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, started_at"
+        ") VALUES ($1, $2, 1, 'exec-steer', 'hash-steer', 'running', '{}'::jsonb, '{}'::jsonb, NOW() - INTERVAL '500 milliseconds')",
+        execution_id,
+        thread_key,
+    )
+
+    backend = SimpleNamespace(attach=AsyncMock())
+    steer_stdin_mock = AsyncMock(return_value={"ok": True, "steered": True})
+    with (
+        patch("api.runtime_control.get_backend", return_value=backend),
+        patch("api.runtime_control.steer_stdin", steer_stdin_mock),
+    ):
+        result = await steer_execution(
+            db_pool,
+            execution_id,
+            content_blocks=content_blocks,
+            message_id=message_id,
+            metadata={"platform": "slack", "user_id": "U-test"},
+        )
+
+    assert result == {
+        "ok": True,
+        "execution_id": execution_id,
+        "thread_key": thread_key,
+        "status": "steered",
+    }
+    backend.attach.assert_awaited_once()
+    steer_stdin_mock.assert_awaited_once()
+    assert steer_stdin_mock.await_args.args[1] == content_blocks
+
+    message = await db_pool.fetchrow(
+        "SELECT event_json, metadata FROM agent_message_requests "
+        "WHERE thread_key = $1 AND message_id = $2",
+        thread_key,
+        message_id,
+    )
+    assert message is not None
+    event_json = json.loads(message["event_json"]) if isinstance(message["event_json"], str) else message["event_json"]
+    metadata = json.loads(message["metadata"]) if isinstance(message["metadata"], str) else message["metadata"]
+    assert event_json["message"]["content"] == content_blocks
+    assert metadata["user_id"] == "U-test"
 
 
 @pytest.mark.asyncio

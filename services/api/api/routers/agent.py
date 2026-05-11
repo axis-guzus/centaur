@@ -171,6 +171,13 @@ class MessageRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class SteerExecutionRequest(BaseModel):
+    content_blocks: list[dict[str, Any]] | None = None
+    message_id: str | None = None
+    user_id: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
 def _normalize_message_event(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
     if body.get("user_id"):
@@ -930,7 +937,19 @@ async def steer_execution_endpoint(execution_id: str, request: Request):
     Falls back to cancellation if steering fails.
     """
     pool = request.app.state.db_pool
-    result = await steer_execution(pool, execution_id)
+    raw_bytes = await request.body()
+    raw_body = _json.loads(raw_bytes) if raw_bytes else {}
+    body = SteerExecutionRequest.model_validate(raw_body)
+    metadata = body.metadata or {}
+    if body.user_id and "user_id" not in metadata:
+        metadata = {**metadata, "user_id": body.user_id}
+    result = await steer_execution(
+        pool,
+        execution_id,
+        content_blocks=body.content_blocks,
+        message_id=body.message_id,
+        metadata=metadata,
+    )
     if result is None:
         raise HTTPException(status_code=404, detail="Execution not found")
     return JSONResponse(status_code=200, content=result)

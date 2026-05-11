@@ -16,8 +16,11 @@ rand_hex() {
 
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(rand_hex)}"
-DATABASE_URL="${DATABASE_URL:-postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-pgbouncer:5432/ai_v2}"
+EXISTING_POSTGRES_PASSWORD="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env \
+  -o jsonpath='{.data.POSTGRES_PASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+DEFAULT_POSTGRES_PASSWORD="tempo_dev"
+POSTGRES_PASSWORD="${CENTAUR_E2E_POSTGRES_PASSWORD:-${EXISTING_POSTGRES_PASSWORD:-$DEFAULT_POSTGRES_PASSWORD}}"
+DATABASE_URL="${CENTAUR_E2E_DATABASE_URL:-postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-pgbouncer:5432/ai_v2}"
 
 kubectl -n "$NAMESPACE" delete secret centaur-infra-env --ignore-not-found >/dev/null
 kubectl -n "$NAMESPACE" create secret generic centaur-infra-env \

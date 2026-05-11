@@ -1143,7 +1143,6 @@ async def cancel_execution(pool, execution_id: str) -> dict[str, Any] | None:
 
     status = row["status"]
     thread_key = row["thread_key"]
-    assignment_generation = int(row["assignment_generation"])
     if execution_terminal(status):
         return {
             "ok": True,
@@ -1184,36 +1183,19 @@ async def cancel_execution(pool, execution_id: str) -> dict[str, Any] | None:
             thread_key=thread_key,
             status="cancel_requested",
         )
+        # A cancelled turn may still emit buffered stdout after SIGUSR1. If we
+        # immediately mark the session idle, the next execution can attach to
+        # the same process and attribute the previous turn's tail output to the
+        # new turn. Stop the sandbox instead; the next execution will spawn or
+        # claim a clean runtime while preserving the durable message cursor.
+        await _stop_execution_session(thread_key, reason="cancel_requested")
         await pool.execute(
-            "UPDATE sandbox_sessions SET state = 'idle', inflight_turn_id = NULL, inflight_turn_input = NULL, "
+            "UPDATE sandbox_sessions SET state = 'stopped', "
+            "inflight_turn_id = NULL, inflight_turn_input = NULL, "
             "inflight_started_at = NULL, inflight_attempts = 0, updated_at = NOW() "
             "WHERE thread_key = $1",
             thread_key,
         )
-        runtime_id = await pool.fetchval(
-            "SELECT runtime_id FROM agent_runtime_assignments "
-            "WHERE thread_key = $1 AND assignment_generation = $2",
-            thread_key,
-            assignment_generation,
-        )
-        if runtime_id:
-            try:
-                await get_backend().interrupt_by_id(str(runtime_id))
-            except NotImplementedError:
-                log.warning(
-                    "execution_interrupt_not_supported",
-                    thread_key=thread_key,
-                    execution_id=execution_id,
-                    runtime_id=str(runtime_id)[:12],
-                )
-            except Exception:
-                log.warning(
-                    "execution_interrupt_failed",
-                    thread_key=thread_key,
-                    execution_id=execution_id,
-                    runtime_id=str(runtime_id)[:12],
-                    exc_info=True,
-                )
 
     _worker_wake.set()
     return {
@@ -1229,6 +1211,8 @@ async def steer_execution(
     execution_id: str,
     *,
     content_blocks: list[dict] | None = None,
+    message_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Steer a running execution by injecting a steer message.
 
@@ -1241,7 +1225,7 @@ async def steer_execution(
     from api.sandbox.harness_protocol import messages_to_content_blocks
 
     row = await pool.fetchrow(
-        "SELECT execution_id, thread_key, assignment_generation, status "
+        "SELECT execution_id, thread_key, assignment_generation, status, started_at "
         "FROM agent_execution_requests WHERE execution_id = $1",
         execution_id,
     )
@@ -1250,6 +1234,7 @@ async def steer_execution(
 
     status = row["status"]
     thread_key = row["thread_key"]
+    assignment_generation = int(row["assignment_generation"])
 
     if status != "running":
         log.info(
@@ -1260,10 +1245,35 @@ async def steer_execution(
         )
         return await cancel_execution(pool, execution_id)
 
+    if content_blocks is not None:
+        content_blocks = [part for part in content_blocks if isinstance(part, dict)]
+        if message_id and content_blocks:
+            event = {
+                "type": "user",
+                "message": {"role": "user", "content": content_blocks},
+            }
+            await append_message(
+                pool,
+                thread_key=thread_key,
+                assignment_generation=assignment_generation,
+                message_id=message_id,
+                event=event,
+                metadata=metadata or {},
+            )
+
     # Build content blocks from pending messages if not provided
     if content_blocks is None:
         last_delivered_id = await _get_last_delivered_id(thread_key)
         flushed = await _flush_pending(thread_key, last_delivered_id)
+        started_at = row["started_at"]
+        if started_at is not None:
+            flushed = [
+                item
+                for item in flushed
+                if item.get("role") == "user"
+                and item.get("created_at") is not None
+                and item["created_at"] > started_at
+            ]
         if flushed:
             msgs = _flushed_to_messages(flushed)
             content_blocks = messages_to_content_blocks(msgs)
@@ -2254,10 +2264,6 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
                 execution_id,
             )
             if status_row and status_row["status"] == "cancel_requested":
-                # Don't kill the container — cancel_execution() already sent
-                # SIGUSR1 which gracefully interrupts the turn.  The harness
-                # wrapper handles it and keeps the session alive so subsequent
-                # turns retain conversation context.
                 await _finalize_execution(
                     status="cancelled",
                     terminal_reason="cancel_requested",
@@ -2270,6 +2276,18 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
                 turn_done_event = payload
                 break
     except Exception as exc:
+        status_row = await pool.fetchrow(
+            "SELECT status FROM agent_execution_requests WHERE execution_id = $1",
+            execution_id,
+        )
+        if status_row and status_row["status"] == "cancel_requested":
+            await _finalize_execution(
+                status="cancelled",
+                terminal_reason="cancel_requested",
+                result_text="",
+                error_text="cancel_requested",
+            )
+            return
         await _finalize_execution(
             status="failed_permanent",
             terminal_reason="execution_error",

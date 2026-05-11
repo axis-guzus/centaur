@@ -320,8 +320,21 @@ export class CentaurClient {
     return data as Record<string, unknown>;
   }
 
-  async steerExecution(executionId: string) {
-    const { data } = await this.http.post(`/agent/executions/${encodeURIComponent(executionId)}/steer`);
+  async steerExecution(
+    executionId: string,
+    opts?: {
+      contentBlocks?: Array<Record<string, unknown>>;
+      messageId?: string;
+      userId?: string;
+      metadata?: Record<string, unknown>;
+    },
+  ) {
+    const { data } = await this.http.post(`/agent/executions/${encodeURIComponent(executionId)}/steer`, {
+      content_blocks: opts?.contentBlocks,
+      message_id: opts?.messageId,
+      user_id: opts?.userId,
+      metadata: opts?.metadata,
+    });
     return data as Record<string, unknown>;
   }
 

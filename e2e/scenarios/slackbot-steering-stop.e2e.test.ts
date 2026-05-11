@@ -19,16 +19,15 @@ describe("slackbot steering", () => {
     const stopped = await slackbot.sendStop(started, { timeoutMs: 180_000 });
 
     expect(["steered", "cancel_requested", "cancelled"]).toContain(stopped.steerStatus);
-    expect(["cancelled", "completed"]).toContain(stopped.terminal.status);
-
-    if (stopped.terminal.status === "completed") {
-      expect(stopped.terminal.finalText).toMatch(/stop|stopped|cancel|cancelled|interrupt|interrupted/i);
-    }
+    expect(stopped.previous.status).toBe("cancelled");
+    expect(stopped.previous.terminalReason).toMatch(/cancel/i);
+    expect(stopped.followUp.status).toBe("completed");
+    expect(stopped.followUp.finalText).toMatch(/STOPPED/i);
 
     // A non-stopped run would usually contain the nonce many times. Keep the
     // assertion intentionally loose because Amp may emit a short acknowledgement
     // after steering instead of a hard cancellation.
-    const nonceCount = stopped.terminal.finalText.split(nonce).length - 1;
+    const nonceCount = stopped.previous.finalText.split(nonce).length - 1;
     expect(nonceCount).toBeLessThan(5);
 
     console.log(JSON.stringify(ctx.metrics.summary({
@@ -37,10 +36,14 @@ describe("slackbot steering", () => {
       runId: started.runId,
       executionId: started.executionId,
       steerStatus: stopped.steerStatus,
-      terminalStatus: stopped.terminal.status,
-      terminalReason: stopped.terminal.terminalReason,
-      finalTextChars: stopped.terminal.finalText.length,
-      eventCount: stopped.terminal.events.length,
+      previousStatus: stopped.previous.status,
+      previousTerminalReason: stopped.previous.terminalReason,
+      previousFinalTextChars: stopped.previous.finalText.length,
+      previousEventCount: stopped.previous.events.length,
+      followUpExecutionId: stopped.followUp.executionId,
+      followUpStatus: stopped.followUp.status,
+      followUpFinalTextChars: stopped.followUp.finalText.length,
+      followUpEventCount: stopped.followUp.events.length,
     }), null, 2));
   });
 });

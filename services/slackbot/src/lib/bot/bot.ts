@@ -253,6 +253,13 @@ function stableSlackMessageId(msg: { id?: string; raw?: SlackRawMessage }): stri
   return stableId ? `slack:${stableId}` : undefined;
 }
 
+function compareSlackMessageIds(a: string, b: string): number {
+  const aTs = Number(a.replace(/^slack:/, ""));
+  const bTs = Number(b.replace(/^slack:/, ""));
+  if (Number.isFinite(aTs) && Number.isFinite(bTs)) return aTs - bTs;
+  return a.localeCompare(b);
+}
+
 function slackTeamId(msg: { raw?: SlackRawMessage }): string | undefined {
   const teamId = msg.raw?.team_id ?? msg.raw?.team;
   return typeof teamId === "string" && teamId.trim() ? teamId : undefined;
@@ -482,6 +489,19 @@ export class SlackBot {
     this.finalDeliveryLoop = this.runFinalDeliveryLoop();
   }
 
+  hasInFlightExecution(threadId: string): boolean {
+    return this.inFlightExecutions.has(normalizeThreadKey(threadId));
+  }
+
+  async waitForInFlightExecution(threadId: string, timeoutMs = 5000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.hasInFlightExecution(threadId)) return true;
+      await sleep(50);
+    }
+    return this.hasInFlightExecution(threadId);
+  }
+
   private async runFinalDeliveryLoop(): Promise<void> {
     while (true) {
       try {
@@ -653,10 +673,12 @@ export class SlackBot {
     historyMessages?: SlackHistoryWorkflowMessage[],
   ) {
     const threadKey = normalizeThreadKey(thread.id);
-    await this.steerOrCancelInflightExecution(threadKey);
     const promptSelector = promptSelectorOverride ?? parsePromptSelectorFlag(text);
     if (promptSelector) {
       await this.releaseForPromptSwitch(threadKey, delivery.messageId);
+    } else {
+      const steerResult = await this.steerOrCancelInflightExecution(threadKey, parts, delivery);
+      if (steerResult === "steered") return;
     }
     const { channel, threadTs } = splitThreadKey(thread.id);
     const workflowInput = {
@@ -1272,23 +1294,32 @@ export class SlackBot {
     }
   }
 
-  private async steerOrCancelInflightExecution(threadKey: string): Promise<void> {
+  private async steerOrCancelInflightExecution(
+    threadKey: string,
+    parts: InputContentBlock[],
+    delivery: DeliveryContext,
+  ): Promise<"none" | "steered" | "cancelled"> {
     const current = this.inFlightExecutions.get(threadKey);
-    if (!current) return;
-
-    // Abort the local SSE stream reader so we stop processing old events
-    this.inFlightExecutions.delete(threadKey);
-    current.abortController.abort();
+    if (!current) return "none";
 
     // Try to steer the execution first — this preserves conversation context
     try {
-      const result = await this.client.steerExecution(current.executionId);
+      const result = await this.client.steerExecution(current.executionId, {
+        contentBlocks: parts,
+        messageId: delivery.messageId,
+        userId: delivery.userId,
+        metadata: {
+          platform: "slack",
+          ...(delivery.teamId ? { team_id: delivery.teamId } : {}),
+        },
+      });
       if (result.status === "steered") {
         log.info("steered_previous_execution", {
           thread_key: threadKey,
           execution_id: current.executionId,
+          message_id: delivery.messageId,
         });
-        return;
+        return "steered";
       }
     } catch (err) {
       log.warn("steer_previous_execution_failed", {
@@ -1297,6 +1328,11 @@ export class SlackBot {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+
+    // Abort the local SSE stream reader only when steering failed and we are
+    // replacing the execution with a new workflow.
+    this.inFlightExecutions.delete(threadKey);
+    current.abortController.abort();
 
     // Fall back to hard cancel
     try {
@@ -1308,6 +1344,7 @@ export class SlackBot {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+    return "cancelled";
   }
 
   private async cancelInflightExecution(threadKey: string): Promise<void> {
@@ -1705,6 +1742,7 @@ export class SlackBot {
         if (m.author.isMe || m.author.isBot) continue;
         const messageId = stableSlackMessageId(m);
         if (!messageId || messageId === currentMessageId) continue;
+        if (currentMessageId && compareSlackMessageIds(messageId, currentMessageId) >= 0) continue;
         const text = richTextFromMessage(m);
         const attachments = m.attachments || [];
         if (!text && !attachments.length) continue;

@@ -766,13 +766,25 @@ export class BoltSlackApp {
   private async routeSlackEvent(event: SlackMessageEvent, teamId?: string): Promise<void> {
     const threadId = threadIdFromEvent(event);
     if (!threadId) return;
-    await this.enqueue(threadId, () => this.processMessageEvent(event, threadId, teamId));
+    const duplicateMessage = event.ts ? this.seenMessageRecently(threadId, event) : false;
+    if (duplicateMessage) return;
+
+    if (this.isPotentialMention(event) && this.queue.has(threadId)) {
+      const inFlightReady = await this.bot.waitForInFlightExecution(threadId);
+      if (inFlightReady) {
+        await this.processMessageEvent(event, threadId, teamId, true);
+        return;
+      }
+    }
+
+    await this.enqueue(threadId, () => this.processMessageEvent(event, threadId, teamId, true));
   }
 
   private async processMessageEvent(
     event: SlackMessageEvent,
     threadId: string,
     teamId?: string,
+    messageAlreadyClaimed = false,
   ): Promise<void> {
     if (event.type !== "message" && event.type !== "app_mention") return;
     if (isIgnoredMessageSubtype(event.subtype)) return;
@@ -799,7 +811,7 @@ export class BoltSlackApp {
     const isSubscribed = await this.isSubscribedThread(threadId);
 
     if (!isSubscribed && !isMention) return;
-    if (this.seenMessageRecently(threadId, event)) return;
+    if (!messageAlreadyClaimed && this.seenMessageRecently(threadId, event)) return;
 
     const thread = this.createThread(threadId, {
       recipientUserId: event.user,
@@ -817,6 +829,16 @@ export class BoltSlackApp {
     }
 
     await this.bot.onNewMention(thread, message);
+  }
+
+  private isPotentialMention(event: SlackMessageEvent): boolean {
+    if (event.type !== "message" && event.type !== "app_mention") return false;
+    if (isIgnoredMessageSubtype(event.subtype)) return false;
+    if (event.user === this.adapter.getBotUserId()) return false;
+    return event.type === "app_mention"
+      || event.channel_type === "im"
+      || Boolean(event.channel === POLICY_TOUCHPOINT_CHANNEL_ID && POLICY_TOUCHPOINT_PATTERN.test(event.text || ""))
+      || this.messageMentionsBot(event.text || "");
   }
 
   private createThread(threadId: string, context: ThreadContext): BotThread {
