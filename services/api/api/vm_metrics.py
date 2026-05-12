@@ -431,6 +431,11 @@ ETL_SOURCE_CURSOR_LAG_SECONDS = Gauge(
     "Worst source checkpoint lag in seconds.",
     ["source", "source_type"],
 )
+ETL_SCOPE_SYNC_FRESHNESS_SECONDS = Gauge(
+    "etl_scope_sync_freshness_seconds",
+    "Worst time since a syncable ETL scope last completed successfully.",
+    ["source", "source_type"],
+)
 ETL_ACTIVE_SCOPES = Gauge(
     "etl_active_scopes",
     "Number of source scopes expected to sync.",
@@ -745,6 +750,7 @@ async def refresh_runtime_metrics(pool: Pool) -> None:
 async def refresh_etl_metrics(pool: Pool) -> None:
     """Refresh ETL freshness gauges from durable Postgres state."""
     ETL_SOURCE_CURSOR_LAG_SECONDS.clear_children()
+    ETL_SCOPE_SYNC_FRESHNESS_SECONDS.clear_children()
     ETL_ACTIVE_SCOPES.clear_children()
     ETL_FAILED_SCOPES.clear_children()
     ETL_BACKFILL_JOBS.clear_children()
@@ -752,7 +758,7 @@ async def refresh_etl_metrics(pool: Pool) -> None:
     COMPANY_CONTEXT_PROJECTION_LAG_SECONDS.clear_children()
 
     slack_scope_rows = await pool.fetch(
-        "SELECT ch.channel_id, cp.watermark_ts, cp.last_error "
+        "SELECT ch.channel_id, cp.watermark_ts, cp.last_success_at, cp.last_error, cp.updated_at "
         "FROM slack_sync_channels ch "
         "LEFT JOIN slack_sync_checkpoints cp ON cp.channel_id = ch.channel_id "
         "WHERE ch.is_syncable = TRUE"
@@ -762,21 +768,33 @@ async def refresh_etl_metrics(pool: Pool) -> None:
     )
     failed_scopes = 0
     max_lag_s = 0.0
+    max_sync_freshness_s = 0.0
     now = dt.datetime.now(dt.timezone.utc)
     for row in slack_scope_rows:
-        if str(row["last_error"] or "").strip():
+        has_error = bool(str(row["last_error"] or "").strip())
+        if has_error:
             failed_scopes += 1
         watermark_ts = str(row["watermark_ts"] or "").strip()
-        if not watermark_ts:
-            continue
-        try:
-            watermark = dt.datetime.fromtimestamp(float(watermark_ts), tz=dt.timezone.utc)
-        except (TypeError, ValueError, OSError):
-            continue
-        max_lag_s = max(max_lag_s, (now - watermark).total_seconds())
+        if watermark_ts:
+            try:
+                watermark = dt.datetime.fromtimestamp(float(watermark_ts), tz=dt.timezone.utc)
+            except (TypeError, ValueError, OSError):
+                pass
+            else:
+                max_lag_s = max(max_lag_s, (now - watermark).total_seconds())
+        if not has_error:
+            success_at = row["last_success_at"] or row["updated_at"]
+            if isinstance(success_at, dt.datetime):
+                max_sync_freshness_s = max(
+                    max_sync_freshness_s,
+                    (now - success_at.astimezone(dt.timezone.utc)).total_seconds(),
+                )
     ETL_FAILED_SCOPES.labels(source="slack", source_type="channel").set(failed_scopes)
     ETL_SOURCE_CURSOR_LAG_SECONDS.labels(source="slack", source_type="channel").set(
         max(max_lag_s, 0.0)
+    )
+    ETL_SCOPE_SYNC_FRESHNESS_SECONDS.labels(source="slack", source_type="channel").set(
+        max(max_sync_freshness_s, 0.0)
     )
 
     backfill_rows = await pool.fetch(

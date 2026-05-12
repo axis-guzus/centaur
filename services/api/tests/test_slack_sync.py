@@ -545,11 +545,12 @@ async def test_syncs_user_token_public_channels(
     assert messages[0]["parent_message_ts"] is None
 
     checkpoint = await db_pool.fetchrow(
-        "SELECT watermark_ts, last_error FROM slack_sync_checkpoints "
+        "SELECT watermark_ts, last_success_at, last_error FROM slack_sync_checkpoints "
         "WHERE channel_id = 'C_PUBLIC'",
     )
     assert checkpoint is not None
     assert checkpoint["watermark_ts"] == "3000000.000000"
+    assert checkpoint["last_success_at"] is not None
     assert checkpoint["last_error"] == ""
 
     run = await db_pool.fetchrow(
@@ -939,10 +940,11 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
         "VALUES ('C_PUBLIC', 'ai-agent', TRUE), ('C_OTHER', 'other-channel', TRUE)",
     )
     await db_pool.execute(
-        "INSERT INTO slack_sync_checkpoints (channel_id, watermark_ts, last_error) "
-        "VALUES ($1, $2, ''), ($3, $4, 'write_error')",
+        "INSERT INTO slack_sync_checkpoints (channel_id, watermark_ts, last_success_at, last_error) "
+        "VALUES ($1, $2, $3, ''), ($4, $5, NULL, 'write_error')",
         "C_PUBLIC",
         f"{(now - dt.timedelta(seconds=60)).timestamp():.6f}",
+        now - dt.timedelta(seconds=30),
         "C_OTHER",
         f"{(now - dt.timedelta(seconds=120)).timestamp():.6f}",
     )
@@ -974,6 +976,12 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
     )
     assert match is not None
     assert float(match.group(1)) >= 100
+    freshness_match = re.search(
+        r'etl_scope_sync_freshness_seconds\{source="slack",source_type="channel"\} ([0-9.]+)',
+        metrics,
+    )
+    assert freshness_match is not None
+    assert 25 <= float(freshness_match.group(1)) < 100
     age_match = re.search(
         r'etl_backfill_job_age_seconds\{job_type="channel_bootstrap",source="slack",status="pending"\} ([0-9.]+)',
         metrics,
