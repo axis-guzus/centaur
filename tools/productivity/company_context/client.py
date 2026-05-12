@@ -1,4 +1,4 @@
-"""Search company context documents stored in Postgres."""
+"""Fetch historical company context documents."""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ MAX_SEARCH_LIMIT = 50
 TITLE_MATCH_BOOST = 4
 THREAD_SCORE_MULTIPLIER = 1.25
 CHANNEL_DAY_SCORE_MULTIPLIER = 0.75
+DEFAULT_PREVIEW_CHARS = 280
+MAX_RELATED_CHILDREN = 25
 
 _SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
 
@@ -48,6 +50,11 @@ def _isoformat(value: Any) -> str | None:
     return None
 
 
+def _normalize_text(value: str) -> str:
+    """Collapse whitespace so previews stay compact and readable."""
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def _search_terms(query: str) -> list[str]:
     """Extract unique terms for SQL-level AND matching."""
     seen: set[str] = set()
@@ -71,6 +78,60 @@ def _search_where_clause(terms: list[str]) -> str:
             f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index})"
         )
     return " AND ".join(clauses)
+
+
+def _body_preview(body: str, *, query: str, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:
+    """Build a compact preview centered on the first query-term hit when possible."""
+    normalized = _normalize_text(body)
+    if not normalized:
+        return ""
+    if len(normalized) <= max_chars:
+        return normalized
+
+    terms = _search_terms(query)
+    start = 0
+    lowered = normalized.lower()
+    for term in terms:
+        index = lowered.find(term.lower())
+        if index >= 0:
+            start = max(0, index - max_chars // 3)
+            break
+
+    end = min(len(normalized), start + max_chars)
+    snippet = normalized[start:end].strip()
+    if start > 0:
+        snippet = f"...{snippet}"
+    if end < len(normalized):
+        snippet = f"{snippet}..."
+    return snippet
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    """Read values from asyncpg rows while tolerating sparse test doubles."""
+    try:
+        value = row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+    return default if value is None else value
+
+
+def _document_summary(row: Any) -> dict[str, Any]:
+    """Return the common metadata we expose for document records."""
+    return {
+        "document_id": str(_row_value(row, "document_id", "")),
+        "source": str(_row_value(row, "source", "")),
+        "source_type": str(_row_value(row, "source_type", "")),
+        "source_document_id": str(_row_value(row, "source_document_id", "")),
+        "source_chunk_id": str(_row_value(row, "source_chunk_id", "")),
+        "parent_document_id": str(_row_value(row, "parent_document_id", "") or "") or None,
+        "title": str(_row_value(row, "title", "")),
+        "url": str(_row_value(row, "url", "")),
+        "author_name": str(_row_value(row, "author_name", "")),
+        "access_scope": str(_row_value(row, "access_scope", "")),
+        "occurred_at": _isoformat(_row_value(row, "occurred_at")),
+        "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
+        "metadata": _as_dict(_row_value(row, "metadata", {})),
+    }
 
 
 class CompanyContextClient:
@@ -111,8 +172,14 @@ class CompanyContextClient:
                     document_id,
                     source,
                     source_type,
+                    source_document_id,
+                    source_chunk_id,
+                    parent_document_id,
                     title,
                     url,
+                    author_name,
+                    access_scope,
+                    body,
                     occurred_at,
                     source_updated_at,
                     metadata,
@@ -138,19 +205,13 @@ class CompanyContextClient:
             )
             results = []
             for row in rows:
-                results.append(
-                    {
-                        "document_id": str(row["document_id"]),
-                        "source": str(row["source"]),
-                        "source_type": str(row["source_type"]),
-                        "title": str(row["title"] or ""),
-                        "url": str(row["url"] or ""),
-                        "score": float(row["score"] or 0.0),
-                        "occurred_at": _isoformat(row["occurred_at"]),
-                        "source_updated_at": _isoformat(row["source_updated_at"]),
-                        "metadata": _as_dict(row["metadata"]),
-                    }
+                result = _document_summary(row)
+                result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
+                result["preview"] = _body_preview(
+                    str(_row_value(row, "body", "") or ""),
+                    query=query,
                 )
+                results.append(result)
             return {
                 "status": "ok",
                 "query": query,
@@ -186,7 +247,135 @@ class CompanyContextClient:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
-    async def _read_document_async(self, document_id: str, max_chars: int | None) -> dict[str, Any]:
+    async def _latest_date_async(
+        self,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        conn = await self._connect()
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    MAX(COALESCE(source_updated_at, occurred_at)) AS latest_date,
+                    MAX(source_updated_at) AS latest_source_updated_at,
+                    MAX(occurred_at) AS latest_occurred_at,
+                    COUNT(*)::bigint AS document_count
+                FROM company_context_documents
+                WHERE ($1::text IS NULL OR source = $1)
+                  AND ($2::text IS NULL OR source_type = $2)
+                """,
+                source,
+                source_type,
+            )
+            if not row or int(row["document_count"] or 0) == 0:
+                return {
+                    "status": "ok",
+                    "source": source,
+                    "source_type": source_type,
+                    "document_count": 0,
+                    "latest_date": None,
+                    "latest_source_updated_at": None,
+                    "latest_occurred_at": None,
+                }
+
+            return {
+                "status": "ok",
+                "source": source,
+                "source_type": source_type,
+                "document_count": int(row["document_count"] or 0),
+                "latest_date": _isoformat(row["latest_date"]),
+                "latest_source_updated_at": _isoformat(row["latest_source_updated_at"]),
+                "latest_occurred_at": _isoformat(row["latest_occurred_at"]),
+            }
+        finally:
+            await conn.close()
+
+    def latest_date(self, source: str | None = None, source_type: str | None = None) -> dict:
+        """Return the latest indexed timestamp for company context documents."""
+        try:
+            return asyncio.run(
+                self._latest_date_async(
+                    source=source.strip() if source else None,
+                    source_type=source_type.strip() if source_type else None,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    async def _related_documents_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        row: Any,
+        max_children: int,
+    ) -> dict[str, Any]:
+        parent = None
+        if row["parent_document_id"]:
+            parent_row = await conn.fetchrow(
+                """
+                SELECT
+                    document_id,
+                    source,
+                    source_type,
+                    source_document_id,
+                    source_chunk_id,
+                    parent_document_id,
+                    title,
+                    url,
+                    author_name,
+                    access_scope,
+                    occurred_at,
+                    source_updated_at,
+                    metadata
+                FROM company_context_documents
+                WHERE document_id = $1
+                """,
+                row["parent_document_id"],
+            )
+            if parent_row:
+                parent = _document_summary(parent_row)
+
+        child_rows = await conn.fetch(
+            """
+            SELECT
+                document_id,
+                source,
+                source_type,
+                source_document_id,
+                source_chunk_id,
+                parent_document_id,
+                title,
+                url,
+                author_name,
+                access_scope,
+                occurred_at,
+                source_updated_at,
+                metadata
+            FROM company_context_documents
+            WHERE parent_document_id = $1
+            ORDER BY occurred_at ASC NULLS LAST, document_id ASC
+            LIMIT $2
+            """,
+            row["document_id"],
+            max_children,
+        )
+        children = [_document_summary(child_row) for child_row in child_rows]
+        return {
+            "parent": parent,
+            "children": children,
+            "child_count": len(children),
+        }
+
+    async def _read_document_async(
+        self,
+        document_id: str,
+        max_chars: int | None,
+        *,
+        include_related: bool,
+        max_related_children: int,
+    ) -> dict[str, Any]:
         conn = await self._connect()
         try:
             row = await conn.fetchrow(
@@ -195,9 +384,14 @@ class CompanyContextClient:
                     document_id,
                     source,
                     source_type,
+                    source_document_id,
+                    source_chunk_id,
+                    parent_document_id,
                     title,
                     body,
                     url,
+                    author_name,
+                    access_scope,
                     occurred_at,
                     source_updated_at,
                     metadata
@@ -215,25 +409,31 @@ class CompanyContextClient:
             body = str(row["body"] or "")
             content = body if max_chars is None else body[:max_chars]
             truncated = max_chars is not None and len(body) > max_chars
-            return {
+            result = {
                 "status": "ok",
-                "document_id": str(row["document_id"]),
-                "source": str(row["source"]),
-                "source_type": str(row["source_type"]),
-                "title": str(row["title"] or ""),
-                "url": str(row["url"] or ""),
-                "occurred_at": _isoformat(row["occurred_at"]),
-                "source_updated_at": _isoformat(row["source_updated_at"]),
-                "metadata": _as_dict(row["metadata"]),
+                **_document_summary(row),
                 "chars": len(content),
                 "total_chars": len(body),
                 "truncated": truncated,
                 "content": content,
             }
+            if include_related:
+                result["related"] = await self._related_documents_async(
+                    conn,
+                    row=row,
+                    max_children=max_related_children,
+                )
+            return result
         finally:
             await conn.close()
 
-    def read_document(self, document_id: str, max_chars: int = 0) -> dict:
+    def read_document(
+        self,
+        document_id: str,
+        max_chars: int = 0,
+        include_related: bool = False,
+        max_related_children: int = MAX_RELATED_CHILDREN,
+    ) -> dict:
         """Read a company context document by id, returning full content by default."""
         normalized_document_id = document_id.strip()
         if not normalized_document_id:
@@ -244,6 +444,12 @@ class CompanyContextClient:
                 self._read_document_async(
                     document_id=normalized_document_id,
                     max_chars=max_chars if max_chars > 0 else None,
+                    include_related=include_related,
+                    max_related_children=_clamp(
+                        max_related_children,
+                        minimum=1,
+                        maximum=MAX_RELATED_CHILDREN,
+                    ),
                 )
             )
         except Exception as exc:

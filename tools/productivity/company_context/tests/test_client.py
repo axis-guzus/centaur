@@ -77,9 +77,15 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
         "document_id": "slack:thread:C123:1770000000.000000",
         "source": "slack",
         "source_type": "slack_thread",
+        "source_document_id": "",
+        "source_chunk_id": "",
+        "parent_document_id": None,
         "title": "BM25 indexing plan",
         "url": "https://slack.example/thread",
+        "author_name": "",
+        "access_scope": "",
         "score": 1.25,
+        "preview": "",
         "occurred_at": "2026-05-08T12:00:00+00:00",
         "source_updated_at": "2026-05-08T12:05:00+00:00",
         "metadata": {"channel_name": "eng-ai", "thread_ts": "1770000000.000000"},
@@ -115,6 +121,69 @@ def test_search_terms_are_required_once(monkeypatch):
     assert "AND (title ||| $3::text::pdb.boost(4) OR body ||| $3)" in query
     assert "title ||| $4::text::pdb.boost(4)" not in query
     assert args == ("state", "root", "mismatch", None, None, 3)
+
+
+def test_latest_date_returns_latest_indexed_slack_timestamp(monkeypatch):
+    fake = _FakeConnection(
+        row={
+            "latest_date": dt.datetime(2026, 5, 10, 15, 30, tzinfo=dt.UTC),
+            "latest_source_updated_at": dt.datetime(2026, 5, 10, 15, 30, tzinfo=dt.UTC),
+            "latest_occurred_at": dt.datetime(2026, 5, 10, 14, 0, tzinfo=dt.UTC),
+            "document_count": 42,
+        }
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").latest_date(
+        source="slack",
+        source_type="slack_thread",
+    )
+
+    assert result == {
+        "status": "ok",
+        "source": "slack",
+        "source_type": "slack_thread",
+        "document_count": 42,
+        "latest_date": "2026-05-10T15:30:00+00:00",
+        "latest_source_updated_at": "2026-05-10T15:30:00+00:00",
+        "latest_occurred_at": "2026-05-10T14:00:00+00:00",
+    }
+    _, args = fake.fetchrow_calls[0]
+    assert args == ("slack", "slack_thread")
+    assert fake.closed is True
+
+
+def test_latest_date_reports_empty_index(monkeypatch):
+    fake = _FakeConnection(
+        row={
+            "latest_date": None,
+            "latest_source_updated_at": None,
+            "latest_occurred_at": None,
+            "document_count": 0,
+        }
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").latest_date(source="slack")
+
+    assert result == {
+        "status": "ok",
+        "source": "slack",
+        "source_type": None,
+        "document_count": 0,
+        "latest_date": None,
+        "latest_source_updated_at": None,
+        "latest_occurred_at": None,
+    }
+    assert fake.closed is True
 
 
 def test_read_document_returns_full_content_by_default(monkeypatch):
