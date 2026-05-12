@@ -1951,11 +1951,45 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
         hard_deadline = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
             seconds=EXECUTION_HARD_TIMEOUT_S
         )
+    durable_turn_id = str(row.get("durable_turn_id") or "")
     silence_deadline = row.get("silence_deadline_at")
     if not isinstance(silence_deadline, dt.datetime):
         silence_deadline = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
             seconds=EXECUTION_SILENCE_TIMEOUT_S
         )
+    now = dt.datetime.now(dt.timezone.utc)
+    if now >= hard_deadline:
+        await _mark_execution_terminal(
+            pool,
+            execution_id=execution_id,
+            thread_key=thread_key,
+            status="failed_permanent",
+            terminal_reason="hard_deadline_exceeded",
+            result_text="",
+            error_text="execution exceeded hard deadline",
+        )
+        await _stop_execution_session(
+            thread_key,
+            reason="hard_deadline_exceeded",
+        )
+        record_execution_watchdog_timeout(harness, "hard_deadline_exceeded")
+        return
+    if not durable_turn_id and now >= silence_deadline:
+        await _mark_execution_terminal(
+            pool,
+            execution_id=execution_id,
+            thread_key=thread_key,
+            status="failed_permanent",
+            terminal_reason="silence_deadline_exceeded",
+            result_text="",
+            error_text="execution made no progress before silence deadline",
+        )
+        await _stop_execution_session(
+            thread_key,
+            reason="silence_deadline_exceeded",
+        )
+        record_execution_watchdog_timeout(harness, "silence_deadline_exceeded")
+        return
 
     session = await get_or_spawn(
         thread_key,
@@ -1975,9 +2009,10 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
     if assignment_override:
         await _write_agents_override(session.sandbox_id, str(assignment_override))
 
-    durable_turn_id = str(row.get("durable_turn_id") or "")
     if durable_turn_id:
         await _heartbeat_execution_lease(pool, execution_id)
+        if silence_deadline <= dt.datetime.now(dt.timezone.utc):
+            silence_deadline = await _touch_execution_progress(pool, execution_id)
     else:
         inject_result = await inject_stdin(
             session,

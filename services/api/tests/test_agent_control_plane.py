@@ -2257,6 +2257,75 @@ async def test_worker_marks_silence_deadline_exceeded_and_stops_session(db_pool)
 
 
 @pytest.mark.asyncio
+async def test_worker_terminalizes_expired_execution_before_reacquiring_runtime(db_pool):
+    from api.runtime_control import _process_execution
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    execution_id = f"exe-{uuid.uuid4().hex[:12]}"
+    runtime_id = f"rt-missing-{uuid.uuid4().hex[:8]}"
+
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, $2, 'amp', 'amp', NULL, 'harness:amp', 'sha', 'active')",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, started_at, hard_deadline_at, silence_deadline_at"
+        ") VALUES ($1, $2, 1, 'exec-expired', 'hash-expired', 'running', '{}'::jsonb, '{}'::jsonb, "
+        "NOW() - INTERVAL '2 hours', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '90 minutes')",
+        execution_id,
+        thread_key,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_final_delivery_outbox (execution_id, thread_key, delivery, state) "
+        "VALUES ($1, $2, '{}'::jsonb, 'awaiting_terminal')",
+        execution_id,
+        thread_key,
+    )
+
+    row = {
+        "execution_id": execution_id,
+        "thread_key": thread_key,
+        "assignment_generation": 1,
+        "status": "running",
+        "durable_turn_id": None,
+        "delivery": {},
+        "metadata": {},
+        "created_at": dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2),
+        "claimed_at": dt.datetime.now(dt.timezone.utc),
+        "hard_deadline_at": dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1),
+        "silence_deadline_at": dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=90),
+    }
+
+    get_or_spawn = AsyncMock()
+    stop_execution_session = AsyncMock()
+    with (
+        patch("api.runtime_control.get_or_spawn", new=get_or_spawn),
+        patch("api.runtime_control._stop_execution_session", stop_execution_session),
+    ):
+        await _process_execution(db_pool, row)
+
+    get_or_spawn.assert_not_awaited()
+    stop_execution_session.assert_awaited_once_with(
+        thread_key,
+        reason="hard_deadline_exceeded",
+    )
+    execution = await db_pool.fetchrow(
+        "SELECT status, terminal_reason, error_text FROM agent_execution_requests WHERE execution_id = $1",
+        execution_id,
+    )
+    assert execution is not None
+    assert execution["status"] == "failed_permanent"
+    assert execution["terminal_reason"] == "hard_deadline_exceeded"
+    assert "hard deadline" in (execution["error_text"] or "")
+
+
+@pytest.mark.asyncio
 async def test_worker_ignores_stream_end_after_execution_already_terminal(db_pool):
     from api.runtime_control import _process_execution
 

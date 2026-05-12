@@ -439,6 +439,45 @@ describe("SlackBot runtime control", () => {
     expect(markdownCalls).not.toContain("Agent request failed before execution started. Please retry.");
   });
 
+  it("falls back to durable result delivery when Slack reports messaging_processing_failed", async () => {
+    const client = createImmediateStreamClient();
+    client.getExecution = vi.fn(async () => ({
+      status: "completed",
+      result_text: "durable final answer",
+    }));
+
+    const post = vi.fn(async (content: AsyncGenerator<StreamChunk> | { markdown: string }) => {
+      if ("markdown" in content) {
+        return { id: "fallback", async edit() {} };
+      }
+      throw new Error("An API error occurred: messaging_processing_failed");
+    });
+
+    const thread: BotThread = {
+      id: "slack:C123:1700000000.000100",
+      async subscribe() {},
+      async startTyping() {},
+      async post(content) {
+        return post(content);
+      },
+    };
+
+    const bot = new SlackBot(client as any);
+
+    await bot.onSubscribedMessage(thread, userMessage("follow-up", {
+      id: "1700000000.000004",
+      isMention: true,
+    }));
+
+    const markdownCalls = post.mock.calls
+      .map(([content]) => content)
+      .filter((content): content is { markdown: string } => "markdown" in content)
+      .map((content) => content.markdown);
+    expect(markdownCalls.join("\n")).toContain("durable final answer");
+    expect(markdownCalls.join("\n")).not.toContain("Agent request failed");
+    expect(client.markFinalDelivered).toHaveBeenCalledWith("exe-new", undefined);
+  });
+
   it("retries without triggerKey on 409 idempotency mismatch", async () => {
     let callCount = 0;
     const client = createImmediateStreamClient();

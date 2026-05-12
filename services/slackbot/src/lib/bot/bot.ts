@@ -403,6 +403,7 @@ function expectedSlackFallbackReason(error: unknown): string | null {
   const errMsg = classified.message;
   if (errMsg.includes("message_not_in_streaming_state")) return "message_not_in_streaming_state";
   if (errMsg.includes("message_not_found")) return "message_not_found";
+  if (errMsg.includes("messaging_processing_failed")) return "messaging_processing_failed";
   if (errMsg.includes("msg_too_long")) return "msg_too_long";
   if (errMsg.includes("msg_blocks_too_long")) return "msg_blocks_too_long";
   if (errMsg.includes("streaming_mode_mismatch")) return "streaming_mode_mismatch";
@@ -867,7 +868,11 @@ export class SlackBot {
             retryable: classified.retryable,
             execution_id: executionId,
           });
-          let converted = await convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim(), { renderChart: this.chartRenderer });
+          const preferPolledResult = fallbackReason === "messaging_processing_failed";
+          let converted = await convertDashboardBlocks(
+            preferPolledResult ? "" : (tracker.resultText || tracker.lastAssistantText).trim(),
+            { renderChart: this.chartRenderer },
+          );
           let fallback = rewriteSlackFileLinks(converted.markdown, tracker.repoContext);
           let footer = buildResponseFooter(tracker.agentThreadId, tracker.repoContext?.gitCommit);
 
@@ -876,6 +881,11 @@ export class SlackBot {
             converted = await convertDashboardBlocks(polled.text, { renderChart: this.chartRenderer });
             fallback = rewriteSlackFileLinks(converted.markdown, polled.repoContext);
             footer = buildResponseFooter(polled.agentThreadId, polled.repoContext?.gitCommit);
+            if (!fallback && preferPolledResult) {
+              converted = await convertDashboardBlocks((tracker.resultText || tracker.lastAssistantText).trim(), { renderChart: this.chartRenderer });
+              fallback = rewriteSlackFileLinks(converted.markdown, tracker.repoContext);
+              footer = buildResponseFooter(tracker.agentThreadId, tracker.repoContext?.gitCommit);
+            }
           }
 
           try {
