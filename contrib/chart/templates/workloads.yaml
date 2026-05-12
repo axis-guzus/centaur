@@ -48,8 +48,6 @@ spec:
                   name: {{ required "postgres.auth.existingSecretName is required when postgres.enabled=true" .Values.postgres.auth.existingSecretName | quote }}
                   key: {{ required "postgres.auth.existingSecretKey is required when postgres.enabled=true" .Values.postgres.auth.existingSecretKey | quote }}
 {{- end }}
-            - name: PGDATA
-              value: /var/lib/postgresql/data/pgdata
           ports:
             - containerPort: 5432
               name: postgres
