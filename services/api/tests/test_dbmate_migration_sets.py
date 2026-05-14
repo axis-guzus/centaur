@@ -43,13 +43,13 @@ def test_run_migrations_applies_each_migration_set(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr(db.subprocess, "run", fake_run)
 
-    db.run_migrations("postgresql://tempo:tempo_dev@pgbouncer:5432/centaur")
+    db.run_migrations("postgresql://tempo:tempo_dev@postgres:5432/centaur")
 
     assert len(calls) == 2
     assert calls[0] == [
         "dbmate",
         "--url",
-        "postgresql://tempo:tempo_dev@pgbouncer:5432/centaur?sslmode=disable",
+        "postgresql://tempo:tempo_dev@postgres:5432/centaur?sslmode=disable",
         "--migrations-dir",
         str(base_dir),
         "--migrations-table",
@@ -60,7 +60,7 @@ def test_run_migrations_applies_each_migration_set(tmp_path, monkeypatch) -> Non
     assert calls[1] == [
         "dbmate",
         "--url",
-        "postgresql://tempo:tempo_dev@pgbouncer:5432/centaur?sslmode=disable",
+        "postgresql://tempo:tempo_dev@postgres:5432/centaur?sslmode=disable",
         "--migrations-dir",
         str(overlay_dir),
         "--migrations-table",

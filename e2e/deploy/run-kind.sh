@@ -46,7 +46,6 @@ pf_pid=""
 cluster_created=0
 IMAGES=(
   centaur-api
-  centaur-pgbouncer
   centaur-iron-proxy
   centaur-firewall-manager
   centaur-agent

@@ -19,7 +19,7 @@ credentials through a proxy, and keeps an event trail clients can replay.
 | Plane | Responsibility | Main components |
 |-------|----------------|-----------------|
 | Ingress | Accept user and app input. | Slack Events API, Slackbot webhook, external API clients, apps. |
-| Control | Persist requests and coordinate runtime state. | FastAPI, Postgres, PgBouncer, execution worker. |
+| Control | Persist requests and coordinate runtime state. | FastAPI, Postgres, execution worker. |
 | Execution | Run one assigned agent session per thread. | Docker container locally, Kubernetes sandbox pod in production. |
 | Capabilities | Give agents and apps approved actions. | Tool plugins, workflow engine, Apps API, overlays. |
 | Secrets and egress | Let agents call third-party APIs without receiving raw keys. | Secret manager, Iron Proxy, firewall compatibility path. |

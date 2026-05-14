@@ -249,68 +249,6 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "pgbouncer") }}
-  labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "pgbouncer") | nindent 4 }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "pgbouncer") | nindent 6 }}
-  template:
-    metadata:
-      annotations:
-        checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "database" .Values.database "postgresAuth" .Values.postgres.auth) | sha256sum }}
-        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
-      labels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "pgbouncer") | nindent 8 }}
-    spec:
-      automountServiceAccountToken: false
-      {{- with .Values.global.imagePullSecrets }}
-      imagePullSecrets:
-{{ toYaml . | nindent 8 }}
-      {{- end }}
-      containers:
-        - name: pgbouncer
-          image: {{ printf "%s:%s" .Values.pgbouncer.image.repository .Values.pgbouncer.image.tag | quote }}
-          imagePullPolicy: {{ .Values.pgbouncer.image.pullPolicy }}
-          env:
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ required "postgres.auth.existingSecretName is required" .Values.postgres.auth.existingSecretName | quote }}
-                  key: {{ required "postgres.auth.existingSecretKey is required" .Values.postgres.auth.existingSecretKey | quote }}
-            - name: POSTGRES_USER
-              value: {{ .Values.postgres.auth.username | quote }}
-            - name: POSTGRES_DB
-              value: {{ .Values.postgres.auth.database | quote }}
-            - name: POSTGRES_HOST
-              value: {{ include "centaur.componentName" (dict "root" . "component" "postgres") | quote }}
-            - name: AUTH_TYPE
-              value: {{ .Values.pgbouncer.authType | quote }}
-            - name: POOL_MODE
-              value: {{ .Values.pgbouncer.poolMode | quote }}
-            - name: MAX_CLIENT_CONN
-              value: {{ .Values.pgbouncer.maxClientConn | quote }}
-            - name: DEFAULT_POOL_SIZE
-              value: {{ .Values.pgbouncer.defaultPoolSize | quote }}
-          ports:
-            - containerPort: 5432
-              name: postgres
-          readinessProbe:
-            tcpSocket:
-              port: 5432
-          livenessProbe:
-            tcpSocket:
-              port: 5432
-          securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
-          resources:
-{{ toYaml .Values.pgbouncer.resources | nindent 12 }}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
   name: {{ include "centaur.componentName" (dict "root" . "component" "api") }}
   labels:
 {{ include "centaur.componentLabels" (dict "root" . "component" "api") | nindent 4 }}
@@ -322,7 +260,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "database" .Values.database "firewallCa" .Values.firewall.ca) | sha256sum }}
+        checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "firewallCa" .Values.firewall.ca) | sha256sum }}
         checksum/firewall-ca: {{ toJson .Values.firewall.ca | sha256sum }}
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
         checksum/overlay: {{ toJson .Values.overlay | sha256sum }}
@@ -414,9 +352,9 @@ spec:
             - name: SSL_CERT_FILE
               value: /firewall-certs/ca-cert.pem
             - name: NO_PROXY
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
             - name: no_proxy
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
             - name: CENTAUR_LOG_LEVEL
               value: info
             - name: TOOL_DIRS
@@ -669,7 +607,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "database" .Values.database "firewallCa" .Values.firewall.ca) | sha256sum }}
+        checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager "firewallCa" .Values.firewall.ca) | sha256sum }}
         checksum/firewall-ca: {{ toJson .Values.firewall.ca | sha256sum }}
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
       labels:
@@ -732,9 +670,9 @@ spec:
             - name: NODE_EXTRA_CA_CERTS
               value: /firewall-certs/ca-cert.pem
             - name: NO_PROXY
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
             - name: no_proxy
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
 {{- if .Values.slackbot.runtimeErrorAlertChannel }}
             - name: RUNTIME_ERROR_ALERT_CHANNEL
               value: {{ .Values.slackbot.runtimeErrorAlertChannel | quote }}

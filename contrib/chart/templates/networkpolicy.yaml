@@ -50,7 +50,12 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "pgbouncer") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+{{- if .Values.slackbot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
+{{- end }}
       ports:
         - protocol: TCP
           port: 5432
@@ -139,45 +144,6 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "pgbouncer") }}
-  labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "pgbouncer") | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "pgbouncer") | nindent 6 }}
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
-{{- if .Values.slackbot.enabled }}
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
-{{- end }}
-      ports:
-        - protocol: TCP
-          port: 5432
-  egress:
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- else }}
-    - {}
-{{- end }}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
   name: {{ include "centaur.componentName" (dict "root" . "component" "api") }}
   labels:
 {{ include "centaur.componentLabels" (dict "root" . "component" "api") | nindent 4 }}
@@ -217,13 +183,15 @@ spec:
         - protocol: TCP
           port: 8000
   egress:
+{{- if .Values.postgres.enabled }}
     - to:
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "pgbouncer") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
       ports:
         - protocol: TCP
           port: 5432
+{{- end }}
     - to:
         - podSelector:
             matchLabels:
@@ -280,13 +248,15 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+{{- if .Values.postgres.enabled }}
     - to:
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "pgbouncer") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
       ports:
         - protocol: TCP
           port: 5432
+{{- end }}
     - to:
         - podSelector:
             matchLabels:

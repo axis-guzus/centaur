@@ -198,7 +198,6 @@ Core Centaur images are public on GHCR:
 | Slackbot | `ghcr.io/paradigmxyz/centaur-slackbot` |
 | Secrets | `ghcr.io/paradigmxyz/centaur-secrets` |
 | Firewall | `ghcr.io/paradigmxyz/centaur-firewall` |
-| PgBouncer | `ghcr.io/paradigmxyz/centaur-pgbouncer` |
 | Sandbox | `ghcr.io/paradigmxyz/centaur-agent` |
 | Iron Proxy | `ghcr.io/paradigmxyz/centaur-iron-proxy` |
 | Firewall manager | `ghcr.io/paradigmxyz/centaur-firewall-manager` |
@@ -258,11 +257,6 @@ slackbot:
     repository: ghcr.io/paradigmxyz/centaur-slackbot
     tag: latest
 
-pgbouncer:
-  image:
-    repository: ghcr.io/paradigmxyz/centaur-pgbouncer
-    tag: latest
-
 postgres:
   enabled: true
   persistence:
@@ -313,8 +307,8 @@ the same credentials as unprefixed `AMP_API_KEY`, `ANTHROPIC_API_KEY`, and
 `OPENAI_API_KEY`. See [Configure Agent Harnesses](/ops/harnesses) for the Iron
 Proxy and KMS details.
 
-For RDS Postgres, set `postgres.enabled=false` and configure `database.appUrl`
-and `database.pgbouncerUrl` for the RDS endpoint.
+For RDS Postgres, set `postgres.enabled=false` and configure the `DATABASE_URL`
+secret to point at the RDS endpoint.
 
 Use a pinned GHCR release or SHA tag when you want deterministic rollouts;
 `latest` is acceptable for a first bootstrap.
@@ -410,5 +404,5 @@ kubectl -n centaur-system logs deploy/centaur-slackbot --tail=200
 kubectl -n centaur-system get pods -l centaur-agent=true
 ```
 
-For production data durability, move Postgres to RDS, keep PgBouncer
-in-cluster, and test restore procedures before depending on the deployment.
+For production data durability, move Postgres to RDS and test restore
+procedures before depending on the deployment.

@@ -25,7 +25,7 @@ architecture only when the next bottleneck is real.
 |------------|-----------------|------------|
 | Sandbox startup latency | More users and more conversations | Warm pool, Kubernetes backend, pinned images. |
 | Docker host contention | Many concurrent agents on one VM | Move to EKS/GKE or self-managed Kubernetes. |
-| Postgres durability | Production data matters | External Postgres, backups, restore tests, PgBouncer. |
+| Postgres durability | Production data matters | External Postgres, backups, restore tests. |
 | Proxy pressure | Many credentialed outbound calls | Iron Proxy, health checks, injection-map monitoring. |
 | Logs volume | Many sandboxes and workflows | VictoriaLogs retention and dashboards. |
 | App sprawl | Many internal apps | Scoped keys, app owners, logs, restart policy. |

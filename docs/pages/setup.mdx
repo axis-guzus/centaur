@@ -50,9 +50,8 @@ surprises.
 
 | Secret | Required for | Notes |
 |--------|--------------|-------|
-| `DATABASE_URL` | API | App connection string. In the Helm chart this usually points at PgBouncer. |
-| `PGBOUNCER_DATABASE_URL` | PgBouncer | PgBouncer upstream connection string. In local Kubernetes this points at Postgres. |
-| `FIREWALL_CONTROL_TOKEN` | Firewall/API/PgBouncer/Slackbot control calls | Generate with `openssl rand -hex 32`. |
+| `DATABASE_URL` | API | App connection string. In the Helm chart this points at Postgres. |
+| `FIREWALL_CONTROL_TOKEN` | Firewall/API/Slackbot control calls | Generate with `openssl rand -hex 32`. |
 | `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
 | `LOCAL_DEV_API_KEY` | Optional local admin/API access | Bootstrapped into Postgres with `admin`, `agent`, `threads`, and `tools:*` scopes. |
 
@@ -187,7 +186,6 @@ Slackbot logs should include `webhook_received` and `webhook_dispatched`.
 | `OP_SERVICE_ACCOUNT_TOKEN` if using 1Password | Deployment env / CI secret |
 | `OP_VAULT` if using 1Password | Deployment env / CI secret |
 | `DATABASE_URL` | `DATABASE_URL` |
-| `PGBOUNCER_DATABASE_URL` | `PGBOUNCER_DATABASE_URL` |
 | `FIREWALL_CONTROL_TOKEN` | Deployment env / generated Kubernetes secret |
 | `SANDBOX_SIGNING_KEY` | `SANDBOX_SIGNING_KEY` |
 | `LOCAL_DEV_API_KEY` | Optional |

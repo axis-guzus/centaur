@@ -70,7 +70,7 @@ All calls via `kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s htt
 kubectl get pods -n centaur
 ```
 
-All required local deployments must be Ready: postgres, pgbouncer, secrets, iron-proxy/firewall-manager, and api. Slackbot is disabled in the default dev overlay.
+All required local deployments must be Ready: postgres, secrets, iron-proxy/firewall-manager, and api. Slackbot is disabled in the default dev overlay.
 
 ```bash
 kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s http://localhost:8000/health/ready
@@ -542,7 +542,6 @@ cp {SKILL_DIR}/templates/tool-qa-report-template.md {OUTPUT_DIR}/report.md
 
 | Symptom | Root Cause | Fix |
 |---------|-----------|-----|
-| PgBouncer unhealthy on startup | Postgres credentials mismatch | Check `POSTGRES_PASSWORD` in `centaur-infra-env` and rerun `just bootstrap-secrets --force` only if PVC data can be reset |
 | 502 on `/agent/execute` via ingress | Missing SSE directives (`proxy_buffering off`, `proxy_read_timeout`) | Add SSE config to the ingress/route handling `/agent/` |
 | Assistant messages missing from `chat_messages` | `stream_exec` result extraction expected dict, got string | Fix in `services/api/api/agent.py` — handle both string and dict `result` |
 | `API_SECRET_KEY` empty from `.env` | Key is in secrets manager, not `.env` | Fetch via `curl http://firewall:8081/secrets/API_SECRET_KEY` |

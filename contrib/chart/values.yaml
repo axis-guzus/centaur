@@ -148,17 +148,6 @@ slackbot:
   extraEnv: {}
   resources: {}
 
-pgbouncer:
-  image:
-    repository: centaur-pgbouncer
-    tag: latest
-    pullPolicy: IfNotPresent
-  authType: scram-sha-256
-  poolMode: transaction
-  maxClientConn: 200
-  defaultPoolSize: 25
-  resources: {}
-
 postgres:
   enabled: true
   image:
@@ -179,10 +168,6 @@ postgres:
     size: 20Gi
     storageClassName: ""
   resources: {}
-
-database:
-  appUrl: ""
-  pgbouncerUrl: ""
 
 laminar:
   enabled: false

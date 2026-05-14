@@ -15,7 +15,7 @@ build:
       just _build-all-sequential
     else
       pids=()
-      for recipe in _build-api _build-pgbouncer _build-iron-proxy _build-firewall-manager _build-slackbot _build-agent; do
+      for recipe in _build-api _build-iron-proxy _build-firewall-manager _build-slackbot _build-agent; do
         just "$recipe" &
         pids+=("$!")
       done
@@ -28,7 +28,6 @@ build:
 
 _build-all-sequential:
     just _build-api
-    just _build-pgbouncer
     just _build-iron-proxy
     just _build-firewall-manager
     just _build-slackbot
@@ -39,7 +38,6 @@ build-one service:
     set -euo pipefail
     case "{{service}}" in
       api) just _build-api ;;
-      pgbouncer) just _build-pgbouncer ;;
       iron-proxy) just _build-iron-proxy ;;
       firewall-manager) just _build-firewall-manager ;;
       slackbot) just _build-slackbot ;;
@@ -49,9 +47,6 @@ build-one service:
 
 _build-api:
     docker build -t centaur-api:latest -f services/api/Dockerfile .
-
-_build-pgbouncer:
-    docker build -t centaur-pgbouncer:latest -f services/pgbouncer/Dockerfile .
 
 _build-iron-proxy:
     docker build -t centaur-iron-proxy:latest -f services/iron-proxy/Dockerfile .
@@ -79,7 +74,7 @@ deploy:
         --set onepasswordConnect.connect.create=true
       )
     fi
-    helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} "${extra_args[@]}"
+    helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}
 
 up:
     just bootstrap-secrets

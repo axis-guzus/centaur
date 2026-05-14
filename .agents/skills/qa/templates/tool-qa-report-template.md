@@ -24,7 +24,6 @@
 | Service | Status | Notes |
 |---------|--------|-------|
 | postgres | ⬜ | |
-| pgbouncer | ⬜ | |
 | secrets | ⬜ | |
 | firewall | ⬜ | |
 | api | ⬜ | |

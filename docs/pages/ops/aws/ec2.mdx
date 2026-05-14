@@ -21,8 +21,8 @@ multi-tenant deployments, use [Deploy on AWS EKS](/ops/aws/eks) with
 | Disk | 100 GB gp3 or larger | Postgres, logs, Docker images, and sandbox layers grow over time. |
 
 Expose only HTTP, HTTPS, and locked-down SSH at the security group. Do not
-expose Postgres, PgBouncer, Docker, Slackbot, Grafana, or the raw API container
-ports directly.
+expose Postgres, Docker, Slackbot, Grafana, or the raw API container ports
+directly.
 
 ## Step 2. Create the EC2 host
 
@@ -144,9 +144,8 @@ Store the baseline deployment secrets described in [Set Up Centaur](/setup):
 
 | Secret | Required for |
 |--------|--------------|
-| `DATABASE_URL` | API database connection through PgBouncer. |
-| `PGBOUNCER_DATABASE_URL` | PgBouncer connection to Postgres. |
-| `FIREWALL_CONTROL_TOKEN` | Firewall/API/PgBouncer/Slackbot control calls. |
+| `DATABASE_URL` | API database connection. |
+| `FIREWALL_CONTROL_TOKEN` | Firewall/API/Slackbot control calls. |
 | `SANDBOX_SIGNING_KEY` | Stable sandbox API tokens across restarts. |
 | `SLACK_BOT_TOKEN` | Slack Web API calls. |
 | `SLACK_SIGNING_SECRET` | Slack webhook signature validation. |
@@ -197,7 +196,7 @@ sudo certbot --nginx -d centaur.example.com
 ```bash
 docker compose build api slackbot nginx
 docker compose build sandbox
-docker compose up -d postgres secrets firewall pgbouncer api slackbot nginx
+docker compose up -d postgres secrets firewall api slackbot nginx
 docker compose ps
 ```
 

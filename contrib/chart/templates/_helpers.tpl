@@ -68,22 +68,6 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-%s" (include "centaur.fullname" .root) $suffix | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "centaur.appDatabaseUrl" -}}
-{{- if .Values.database.appUrl -}}
-{{- .Values.database.appUrl -}}
-{{- else -}}
-{{- printf "postgresql://%s:%s@%s:5432/%s" .Values.postgres.auth.username .Values.postgres.auth.password (include "centaur.componentName" (dict "root" . "component" "pgbouncer")) .Values.postgres.auth.database -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "centaur.pgbouncerDatabaseUrl" -}}
-{{- if .Values.database.pgbouncerUrl -}}
-{{- .Values.database.pgbouncerUrl -}}
-{{- else -}}
-{{- printf "postgresql://%s:%s@%s:5432/%s" .Values.postgres.auth.username .Values.postgres.auth.password (include "centaur.componentName" (dict "root" . "component" "postgres")) .Values.postgres.auth.database -}}
-{{- end -}}
-{{- end -}}
-
 {{- define "centaur.secretResourceVersion" -}}
 {{- $secret := lookup "v1" "Secret" .root.Release.Namespace .name -}}
 {{- if $secret -}}

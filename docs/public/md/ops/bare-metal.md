@@ -27,8 +27,7 @@ setup from the AWS/GCP guides.
 For the Cloudflare Tunnel path, the host only needs outbound HTTPS plus
 locked-down SSH; do not open inbound HTTP or HTTPS. For the direct public-IP
 path, expose only HTTP, HTTPS, and locked-down SSH at your network edge. Keep
-Postgres, PgBouncer, Docker, Slackbot, Grafana, and the raw API container ports
-private.
+Postgres, Docker, Slackbot, Grafana, and the raw API container ports private.
 
 ## Step 2. Prepare the machine
 
@@ -149,9 +148,8 @@ Store the baseline deployment secrets described in [Set Up Centaur](/setup):
 
 | Secret | Required for |
 |--------|--------------|
-| `DATABASE_URL` | API database connection through PgBouncer. |
-| `PGBOUNCER_DATABASE_URL` | PgBouncer connection to Postgres. |
-| `FIREWALL_CONTROL_TOKEN` | Firewall/API/PgBouncer/Slackbot control calls. |
+| `DATABASE_URL` | API database connection. |
+| `FIREWALL_CONTROL_TOKEN` | Firewall/API/Slackbot control calls. |
 | `SANDBOX_SIGNING_KEY` | Stable sandbox API tokens across restarts. |
 | `SLACK_BOT_TOKEN` | Slack Web API calls. |
 | `SLACK_SIGNING_SECRET` | Slack webhook signature validation. |
@@ -282,7 +280,7 @@ TLS there and forward to `http://<host-internal-ip>:8000` or to host nginx.
 ```bash
 docker compose build api slackbot nginx
 docker compose build sandbox
-docker compose up -d postgres secrets firewall pgbouncer api slackbot nginx
+docker compose up -d postgres secrets firewall api slackbot nginx
 docker compose ps
 ```
 
@@ -392,5 +390,4 @@ docker exec centaur-postgres-1 pg_dump -U tempo ai_v2 \
 ```
 
 For durable production data, use an external Postgres instance you operate,
-keep PgBouncer close to the API, and test restore procedures before relying on
-the deployment.
+and test restore procedures before relying on the deployment.

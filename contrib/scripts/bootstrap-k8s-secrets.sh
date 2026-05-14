@@ -106,7 +106,7 @@ if secret_exists centaur-infra-env; then
   echo "Secret centaur-infra-env already exists in namespace $NAMESPACE; leaving unchanged"
 else
   POSTGRES_PASSWORD="$(rand_hex)"
-  DATABASE_URL="postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-pgbouncer:5432/ai_v2"
+  DATABASE_URL="postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-postgres:5432/ai_v2"
   secret_args=(
     -n "$NAMESPACE" create secret generic centaur-infra-env
     --from-literal=FIREWALL_CONTROL_TOKEN="$(rand_hex)"

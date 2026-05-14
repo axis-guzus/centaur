@@ -78,7 +78,6 @@ jobs:
         run: |
           for image in \
             centaur-api \
-            centaur-pgbouncer \
             centaur-iron-proxy \
             centaur-firewall-manager \
             centaur-agent; do

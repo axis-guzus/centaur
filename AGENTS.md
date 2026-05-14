@@ -207,7 +207,7 @@ Agents call tools via `curl $CENTAUR_API_URL/tools/<tool>/<method>` over the in-
 
 ### Network Isolation
 
-The Helm chart installs deny-by-default NetworkPolicies, then explicitly allows the service paths the stack needs: Slackbot to API, API to PgBouncer/secrets/firewall/Kubernetes, PgBouncer to Postgres, sandbox Pods to API/firewall, DNS, and configured egress.
+The Helm chart installs deny-by-default NetworkPolicies, then explicitly allows the service paths the stack needs: Slackbot to API, API to Postgres/secrets/firewall/Kubernetes, sandbox Pods to API/firewall, DNS, and configured egress.
 
 ## Directory Structure
 
@@ -230,7 +230,6 @@ centaur/
 │   ├── firewall/         # mitmproxy addon — credential injection proxy
 │   ├── sandbox/          # Agent container image (Ubuntu 24.04 + uv + gh + node + amp)
 │   ├── slackbot/         # Next.js + Slack Bolt event listener (pnpm)
-│   ├── pgbouncer/        # PgBouncer connection pooler
 │   ├── grafana/          # Grafana dashboards + provisioning
 │   ├── fluentbit/        # Fluent Bit log shipping config
 │   └── alloy/            # Grafana Alloy config

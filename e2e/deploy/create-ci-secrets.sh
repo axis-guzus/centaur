@@ -15,7 +15,7 @@ EXISTING_POSTGRES_PASSWORD="$(kubectl -n "$NAMESPACE" get secret centaur-infra-e
   -o jsonpath='{.data.POSTGRES_PASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || true)"
 DEFAULT_POSTGRES_PASSWORD="tempo_dev"
 POSTGRES_PASSWORD="${CENTAUR_E2E_POSTGRES_PASSWORD:-${EXISTING_POSTGRES_PASSWORD:-$DEFAULT_POSTGRES_PASSWORD}}"
-DATABASE_URL="${CENTAUR_E2E_DATABASE_URL:-postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-pgbouncer:5432/ai_v2}"
+DATABASE_URL="${CENTAUR_E2E_DATABASE_URL:-postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-postgres:5432/ai_v2}"
 
 kubectl -n "$NAMESPACE" delete secret centaur-infra-env --ignore-not-found >/dev/null
 kubectl -n "$NAMESPACE" create secret generic centaur-infra-env \
@@ -28,7 +28,6 @@ kubectl -n "$NAMESPACE" create secret generic centaur-infra-env \
   --from-literal=LOCAL_DEV_API_KEY="$LOCAL_DEV_API_KEY" \
   --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   --from-literal=DATABASE_URL="$DATABASE_URL" \
-  --from-literal=PGBOUNCER_DATABASE_URL="$DATABASE_URL" \
   --from-literal=AMP_API_KEY="${AMP_API_KEY:-}" >/dev/null
 
 kubectl -n "$NAMESPACE" delete secret centaur-firewall-ca centaur-firewall-ca-key --ignore-not-found >/dev/null
