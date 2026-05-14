@@ -118,6 +118,7 @@ spec:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-proxy") | nindent 8 }}
+        centaur.ai/iron-proxy: "true"
     spec:
       automountServiceAccountToken: false
       {{- with .Values.global.imagePullSecrets }}
