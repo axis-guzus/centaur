@@ -103,7 +103,34 @@ class AttioClient:
         limit: int = 25,
         offset: int = 0,
     ) -> list[dict]:
-        """Query records for an object with optional filtering."""
+        """Query records for an object with optional filtering.
+
+        IMPORTANT — filter_obj format:
+        filter_obj is placed directly into the request body as ``{"filter": filter_obj}``,
+        so do NOT nest an extra "filter" key inside it.
+
+        Keys must be real Attio attribute slugs (e.g. "name", "domains",
+        "email_addresses"). If unsure which slugs exist, call list_attributes()
+        first.
+
+        Each attribute value is an object whose keys depend on the attribute type:
+          - text/domain/email: {"value": "exact match"}
+          - number:            {"gt": 10} | {"lt": 5} | {"gte": 1, "lte": 100}
+          - select:            {"value": "option-slug"}
+          - record-reference:  {"target_object": "companies", "target_record_id": "..."}
+          - checkbox:          {"value": true}
+
+        Compound filters use "$and" / "$or" at the top level:
+          {"$or": [{"name": {"value": "Acme"}}, {"domains": {"value": "acme.com"}}]}
+
+        Examples:
+          filter_obj={"name": {"value": "Acme Inc"}}
+          filter_obj={"domains": {"domain": "acme.com"}}
+          filter_obj={"email_addresses": {"email_address": "j@example.com"}}
+
+        For multi-select attributes, the value must be a list:
+          {"tags": [{"value": "partner"}, {"value": "active"}]}
+        """
         body: dict[str, Any] = {"limit": limit, "offset": offset}
         if filter_obj:
             body["filter"] = filter_obj
@@ -118,13 +145,28 @@ class AttioClient:
         return data.get("data", {})
 
     def create_record(self, object_slug: str, values: dict) -> dict:
-        """Create a new record."""
+        """Create a new record.
+
+        values format — keys are attribute slugs, values are lists of typed objects:
+          {"name": [{"first_name": "Jane", "last_name": "Doe"}]}
+          {"name": [{"value": "Acme Inc"}], "domains": [{"domain": "acme.com"}]}
+
+        Multi-select attributes MUST be arrays:
+          {"channel_source": [{"option": "inbound"}, {"option": "referral"}]}
+
+        Call list_attributes(object_slug) first to discover required fields and
+        attribute types so you don't omit required values or pass wrong types.
+        """
         body = {"data": {"values": values}}
         data = self._request("POST", f"/objects/{object_slug}/records", json=body)
         return data.get("data", {})
 
     def update_record(self, object_slug: str, record_id: str, values: dict) -> dict:
-        """Update an existing record."""
+        """Update an existing record.
+
+        values format is the same as create_record — attribute slugs mapping to
+        lists of typed value objects.
+        """
         body = {"data": {"values": values}}
         data = self._request("PATCH", f"/objects/{object_slug}/records/{record_id}", json=body)
         return data.get("data", {})
@@ -162,7 +204,12 @@ class AttioClient:
         limit: int = 25,
         offset: int = 0,
     ) -> list[dict]:
-        """Query entries in a list."""
+        """Query entries in a list.
+
+        filter_obj uses the same format as query_records — keys are attribute
+        slugs (not "filter"), values are typed condition objects. Do NOT wrap
+        filter_obj in an extra "filter" key; the method does that automatically.
+        """
         body: dict[str, Any] = {"limit": limit, "offset": offset}
         if filter_obj:
             body["filter"] = filter_obj
