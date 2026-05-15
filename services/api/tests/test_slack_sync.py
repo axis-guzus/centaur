@@ -263,7 +263,7 @@ def test_schedule_defaults_enabled(monkeypatch):
 
     assert reloaded.SCHEDULE == {
         "schedule_id": "slack_sync",
-        "interval_seconds": 14400,
+        "interval_seconds": 3600,
         "enabled": True,
         "no_delivery": True,
     }
