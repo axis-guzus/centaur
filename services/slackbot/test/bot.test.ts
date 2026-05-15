@@ -1801,6 +1801,16 @@ describe("parsePromptSelectorFlag", () => {
     expect(parsePromptSelectorFlag("--INVEST")).toBe("invest");
   });
 
+  it("handles Slack smart-dash persona flags", () => {
+    expect(parsePromptSelectorFlag("—invest hyperliquid miqs")).toBe("invest");
+    expect(parsePromptSelectorFlag("–invest hyperliquid miqs")).toBe("invest");
+  });
+
+  it("handles inline-code wrapped persona flags", () => {
+    expect(parsePromptSelectorFlag("`--invest hyperliquid miqs`")).toBe("invest");
+    expect(parsePromptSelectorFlag("`--invest` hyperliquid miqs")).toBe("invest");
+  });
+
   it("resolves aliases (claude → claude-code, pi → pi-mono)", () => {
     expect(parsePromptSelectorFlag("--claude do a thing")).toBe("claude-code");
     expect(parsePromptSelectorFlag("--pi analyse")).toBe("pi-mono");
@@ -1921,6 +1931,18 @@ describe("extractFlagSelector — returns stripped text for the agent", () => {
     const { selector, cleaned } = extractFlagSelector("--invest");
     expect(selector).toBe("invest");
     expect(cleaned).toBe("");
+  });
+
+  it("strips smart-dash persona flags", () => {
+    const { selector, cleaned } = extractFlagSelector("—invest hyperliquid miqs");
+    expect(selector).toBe("invest");
+    expect(cleaned).toBe("hyperliquid miqs");
+  });
+
+  it("strips inline-code wrapped persona flags", () => {
+    const { selector, cleaned } = extractFlagSelector("`--invest hyperliquid miqs`");
+    expect(selector).toBe("invest");
+    expect(cleaned).toBe("hyperliquid miqs");
   });
 
   it("no flag leaves text untouched", () => {

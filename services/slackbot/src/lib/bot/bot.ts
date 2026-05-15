@@ -220,7 +220,7 @@ type SlackHistoryWorkflowMessage = {
   metadata?: Record<string, unknown>;
 };
 
-const PROMPT_FLAG_RE = /(?:^|\s)--([a-z][a-z0-9-]*)(?=\s|$)/gi;
+const PROMPT_FLAG_RE = /(^|\s)(`?)(--|[\u2013\u2014])([a-z][a-z0-9-]*)(?=\s|`|$)/gi;
 const PROMPT_FLAG_SKIP = new Set(["engine", "model", "opus", "sonnet", "haiku"]);
 
 /**
@@ -240,17 +240,31 @@ export function extractFlagSelector(text: string): { selector?: string; cleaned:
   const recognisedOffsets: Array<{ start: number; end: number }> = [];
   let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {
-    const flag = match[1].toLowerCase();
+    const leading = match[1] || "";
+    const openingTick = match[2] || "";
+    const marker = match[3] || "";
+    const flag = match[4].toLowerCase();
+    const flagStart = match.index + leading.length + openingTick.length;
+    const flagEnd = flagStart + marker.length + flag.length;
+    const stripStart = openingTick ? flagStart - openingTick.length : flagStart;
+    const stripEnd = text[flagEnd] === "`" ? flagEnd + 1 : flagEnd;
+    const closingTick =
+      openingTick && stripEnd === flagEnd ? text.indexOf("`", flagEnd) : -1;
     if (PROMPT_FLAG_SKIP.has(flag)) {
-      recognisedOffsets.push({ start: match.index, end: match.index + match[0].length });
+      recognisedOffsets.push({ start: stripStart, end: stripEnd });
+      if (closingTick > stripEnd) {
+        recognisedOffsets.push({ start: closingTick, end: closingTick + 1 });
+      }
       continue;
     }
     const resolved = PROMPT_FLAG_ALIASES.get(flag) || flag;
     if (selectors.has(resolved) || selectors.has(flag)) {
       selector = resolved;
-      recognisedOffsets.push({ start: match.index, end: match.index + match[0].length });
+      recognisedOffsets.push({ start: stripStart, end: stripEnd });
+      if (closingTick > stripEnd) {
+        recognisedOffsets.push({ start: closingTick, end: closingTick + 1 });
+      }
     }
-    // Unknown flags: leave in text, do not set selector
   }
   // Strip only recognised flag tokens from the text
   let cleaned = text;
