@@ -181,10 +181,9 @@ def _configure_laminar_otel(trace_id: str | None, thread_key: str | None) -> Non
     writes = {
         "otel.environment": environment,
         "otel.log_user_prompt": False,
-        "otel.trace_exporter": "otlp-http",
-        "otel.exporter.otlp-http.endpoint": endpoint,
-        "otel.exporter.otlp-http.protocol": "binary",
-        "otel.exporter.otlp-http.headers": headers,
+        "otel.trace_exporter.otlp-http.endpoint": endpoint,
+        "otel.trace_exporter.otlp-http.protocol": "binary",
+        "otel.trace_exporter.otlp-http.headers": headers,
     }
     for key_path, value in writes.items():
         request(

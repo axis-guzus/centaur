@@ -39,13 +39,13 @@ def test_configure_laminar_otel_uses_turn_trace_id(monkeypatch) -> None:
     )
 
     indexed = dict(writes)
-    assert indexed["otel.trace_exporter"] == "otlp-http"
     assert indexed["otel.environment"] == "staging"
     assert (
-        indexed["otel.exporter.otlp-http.endpoint"] == "http://laminar:8000/v1/traces"
+        indexed["otel.trace_exporter.otlp-http.endpoint"]
+        == "http://laminar:8000/v1/traces"
     )
-    assert indexed["otel.exporter.otlp-http.protocol"] == "binary"
-    assert indexed["otel.exporter.otlp-http.headers"] == {
+    assert indexed["otel.trace_exporter.otlp-http.protocol"] == "binary"
+    assert indexed["otel.trace_exporter.otlp-http.headers"] == {
         "x-trace-id": "00000000-0000-0000-0000-000000000123",
         "x-centaur-thread-key": "slack:C123:1700000000.000100",
         "authorization": "Bearer lmnr-key",

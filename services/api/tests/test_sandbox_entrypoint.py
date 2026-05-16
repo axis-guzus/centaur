@@ -83,7 +83,7 @@ def test_sandbox_entrypoint_writes_codex_laminar_otel_config(tmp_path: Path) -> 
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
-    assert 'trace_exporter = "otlp-http"' in result.stdout
+    assert "[otel.trace_exporter.otlp-http]" in result.stdout
     assert (
         'endpoint = "http://stg-laminar-app-server.stg-laminar.svc.cluster.local:8000/v1/traces"'
         in result.stdout

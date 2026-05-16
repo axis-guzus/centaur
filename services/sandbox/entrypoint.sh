@@ -101,9 +101,8 @@ if [ -n "$codex_laminar_endpoint" ] && [ -n "${CENTAUR_TRACE_ID:-}" ]; then
 [otel]
 environment = "$(toml_escape "$codex_otel_environment")"
 log_user_prompt = false
-trace_exporter = "otlp-http"
 
-[otel.exporter.otlp-http]
+[otel.trace_exporter.otlp-http]
 endpoint = "$(toml_escape "$codex_laminar_endpoint")"
 protocol = "binary"
 headers = { $codex_otel_headers }
