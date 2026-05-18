@@ -68,7 +68,7 @@ async function deliver(client: WebClient, delivery: any): Promise<void> {
   const { sessionId } = await renderer.open({
     channel,
     parentTs: threadTs,
-    recipientTeamId: String(meta.team_id ?? delivery.team_id ?? target.teamId ?? ''),
+    recipientTeamId: String(meta.recipient_team_id ?? meta.team_id ?? delivery.team_id ?? target.teamId ?? ''),
     recipientUserId: String(meta.recipient_user_id ?? meta.user_id ?? delivery.user_id ?? ''),
     title: 'Execution steps'
   })
