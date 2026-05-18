@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import json
 import os
@@ -122,6 +123,154 @@ async def test_create_slack_thread_turn_workflow_eager_start(
     assert append_message_mock.await_args_list[2].kwargs["message_id"] == "slack:current"
     assert append_message_mock.await_args_list[2].kwargs["metadata"]["user_id"] == "U123"
     assert enqueue_execution_mock.await_args.kwargs["metadata"]["user_id"] == "U123"
+
+
+@pytest.mark.asyncio
+async def test_slack_thread_turn_attachment_roundtrip_to_agent(
+    client,
+    db_pool,
+    api_key: str,
+):
+    from api.deps import mint_sandbox_token
+    from api.sandbox.harness_protocol import messages_to_content_blocks
+
+    raw_attachment = b"%PDF-1.4 slack attachment bytes"
+    thread_key = f"slack:T123:C123:{uuid.uuid4().hex}"
+    message_id = f"slack:T123:C123:{uuid.uuid4().hex}"
+    generation = 11
+
+    async def fake_spawn(pool, *, thread_key: str, **_kwargs):
+        await pool.execute(
+            "INSERT INTO agent_runtime_assignments ("
+            "thread_key, assignment_generation, runtime_id, harness, engine, "
+            "persona_id, prompt_ref, effective_agents_md_sha256, state"
+            ") VALUES ($1, $2, $3, 'amp', 'amp', NULL, 'harness:amp', 'sha', 'active')",
+            thread_key,
+            generation,
+            f"rt-{uuid.uuid4().hex}",
+        )
+        return {"assignment_generation": generation}
+
+    payload = {
+        "workflow_name": "slack_thread_turn",
+        "trigger_key": message_id,
+        "eager_start": True,
+        "input": {
+            "thread_key": thread_key,
+            "message_id": message_id,
+            "user_id": "U123",
+            "parts": [
+                {"type": "text", "text": "please inspect this Slack file"},
+                {
+                    "type": "document",
+                    "name": "customer-list.pdf",
+                    "mime_type": "application/pdf",
+                    "slack_file_id": "F123",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": base64.b64encode(raw_attachment).decode("utf-8"),
+                    },
+                },
+            ],
+            "delivery": {
+                "platform": "slack",
+                "channel": "C123",
+                "thread_ts": "1778883099.579529",
+                "recipient_user_id": "U123",
+                "recipient_team_id": "T123",
+            },
+        },
+    }
+
+    with (
+        patch(
+            "api.workflow_engine.spawn_assignment",
+            new=AsyncMock(side_effect=fake_spawn),
+        ),
+        patch(
+            "api.workflow_engine.enqueue_execution",
+            new=AsyncMock(
+                return_value={
+                    "ok": True,
+                    "execution_id": "exe-slack-attachment",
+                    "status": "queued",
+                }
+            ),
+        ),
+    ):
+        response = await client.post(
+            "/workflows/runs",
+            headers=_auth(api_key),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "waiting"
+
+    attachment = await db_pool.fetchrow(
+        "SELECT id, message_id, name, mime_type, data "
+        "FROM attachments WHERE thread_key = $1",
+        thread_key,
+    )
+    assert attachment is not None
+    att_id = attachment["id"]
+    assert attachment["name"] == f"{att_id}.bin"
+    assert attachment["mime_type"] == "application/pdf"
+    assert bytes(attachment["data"]) == raw_attachment
+
+    request_row = await db_pool.fetchrow(
+        "SELECT event_json FROM agent_message_requests "
+        "WHERE thread_key = $1 AND message_id = $2",
+        thread_key,
+        message_id,
+    )
+    assert request_row is not None
+    event_json = request_row["event_json"]
+    if isinstance(event_json, str):
+        event_json = json.loads(event_json)
+    stored_part = event_json["message"]["content"][1]
+    assert stored_part["type"] == "attachment_ref"
+    assert stored_part["attachment_id"] == att_id
+    assert "name" not in stored_part
+    assert "source" not in stored_part
+
+    chat_row = await db_pool.fetchrow(
+        "SELECT role, parts, user_id FROM chat_messages WHERE id = $1",
+        attachment["message_id"],
+    )
+    assert chat_row is not None
+    chat_parts = chat_row["parts"]
+    if isinstance(chat_parts, str):
+        chat_parts = json.loads(chat_parts)
+    assert chat_parts[1] == {
+        "type": "attachment_ref",
+        "id": att_id,
+        "name": f"{att_id}.bin",
+        "mime_type": "application/pdf",
+    }
+
+    blocks = messages_to_content_blocks(
+        [
+            {
+                "role": chat_row["role"],
+                "parts": chat_parts,
+                "user_id": chat_row["user_id"],
+            }
+        ]
+    )
+    assert blocks[0]["text"] == "<@U123>: please inspect this Slack file"
+    assert f"User attached file: {att_id}.bin (application/pdf)" in blocks[1]["text"]
+    assert f"/agent/attachments/{att_id}/download" in blocks[1]["text"]
+
+    sandbox_token = mint_sandbox_token(thread_key, "rt-test")
+    download = await client.get(
+        f"/agent/attachments/{att_id}/download",
+        headers={"Authorization": f"Bearer {sandbox_token}"},
+    )
+    assert download.status_code == 200
+    assert download.content == raw_attachment
 
 
 def test_recovery_command_paraphrases_are_recognized():

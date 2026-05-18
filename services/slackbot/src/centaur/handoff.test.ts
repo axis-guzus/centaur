@@ -60,4 +60,67 @@ describe('CentaurHandoff', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  it('passes Slack attachment parts through workflow input', async () => {
+    const originalFetch = globalThis.fetch
+    let capturedInit: RequestInit | undefined
+    const fetchMock = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+      capturedInit = init
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    })
+    globalThis.fetch = fetchMock as any
+    try {
+      const handoff = new CentaurHandoff(config)
+      const event: NormalizedSlackEvent = {
+        thread_key: 'slack:T123:C123:1778883099.579529',
+        message_id: 'slack:T123:C123:1778883099.579529',
+        team_id: 'T123',
+        user_id: 'U123',
+        channel_id: 'C123',
+        thread_ts: '1778883099.579529',
+        is_mention: true,
+        parts: [
+          { type: 'text', text: 'review this' },
+          {
+            type: 'document',
+            name: 'report.pdf',
+            mime_type: 'application/pdf',
+            size: 8,
+            slack_file_id: 'F123',
+            source: {
+              type: 'base64',
+              media_type: 'application/pdf',
+              data: 'JVBERi0xLjQ='
+            }
+          }
+        ],
+        slack: {
+          event_ts: '1778883100.000000',
+          message_ts: '1778883099.579529'
+        }
+      }
+
+      await handoff.emit(event)
+
+      const bodyText = capturedInit?.body
+      expect(typeof bodyText).toBe('string')
+      if (typeof bodyText !== 'string') throw new Error('expected JSON request body')
+      const body = JSON.parse(bodyText) as {
+        input: { parts: NormalizedSlackEvent['parts'] }
+      }
+      expect(body.input.parts[1]).toMatchObject({
+        type: 'document',
+        name: 'report.pdf',
+        mime_type: 'application/pdf',
+        slack_file_id: 'F123',
+        source: {
+          type: 'base64',
+          media_type: 'application/pdf',
+          data: 'JVBERi0xLjQ='
+        }
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })
