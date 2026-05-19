@@ -57,25 +57,28 @@ export default defineConfig({
   // (ported from tempoxyz/mpp's /api/og handler) using the vendored brand
   // fonts. Map each known route to its card; new routes fall back to
   // _default.png until the next build picks them up.
-  ogImageUrl: {
-    '/': '/og/index.png',
-    '/what-is-centaur': '/og/what-is-centaur.png',
-    '/quickstart': '/og/quickstart.png',
-    '/deploying-in-production': '/og/deploying-in-production.png',
-    '/architecture': '/og/architecture.png',
-    '/operate/slack-etl': '/og/operate_slack-etl.png',
-    '/brand': '/og/brand.png',
-    '/extend/overlay': '/og/extend_overlay.png',
-    '/extend/apps': '/og/extend_apps.png',
-    '/extend/tools': '/og/extend_tools.png',
-    '/extend/workflows': '/og/extend_workflows.png',
-    '/extend/skills': '/og/extend_skills.png',
-    '/security': '/og/security.png',
-    '/secrets/onepassword': '/og/secrets_onepassword.png',
-    '/secrets/environment': '/og/secrets_environment.png',
-    '/secrets/aws-kms': '/og/secrets_aws-kms.png',
-    '/secrets/gcp-secret-manager': '/og/secrets_gcp-secret-manager.png',
-    '/secrets/advanced-permissioning': '/og/secrets_advanced-permissioning.png',
+  ogImageUrl: (path, { baseUrl }) => {
+    const images: Record<string, string> = {
+      '/': '/og/index.png',
+      '/what-is-centaur': '/og/what-is-centaur.png',
+      '/quickstart': '/og/quickstart.png',
+      '/deploying-in-production': '/og/deploying-in-production.png',
+      '/architecture': '/og/architecture.png',
+      '/operate/slack-etl': '/og/operate_slack-etl.png',
+      '/brand': '/og/brand.png',
+      '/extend/overlay': '/og/extend_overlay.png',
+      '/extend/apps': '/og/extend_apps.png',
+      '/extend/tools': '/og/extend_tools.png',
+      '/extend/workflows': '/og/extend_workflows.png',
+      '/extend/skills': '/og/extend_skills.png',
+      '/security': '/og/security.png',
+      '/secrets/onepassword': '/og/secrets_onepassword.png',
+      '/secrets/environment': '/og/secrets_environment.png',
+      '/secrets/aws-kms': '/og/secrets_aws-kms.png',
+      '/secrets/gcp-secret-manager': '/og/secrets_gcp-secret-manager.png',
+      '/secrets/advanced-permissioning': '/og/secrets_advanced-permissioning.png',
+    }
+    return `${baseUrl}${images[path] ?? '/og/_default.png'}`
   },
   ...(basePath ? { basePath } : {}),
   editLink: {
