@@ -585,8 +585,11 @@ a.home-lockup-link {
 
 .home-thread-demo {
   justify-self: stretch;
-  margin: 0;
-  max-width: none;
+  margin: 0 auto;
+  /* Cap the demo width on ultra-wide displays so the slack panel stays
+   * legible. Below 1100px we let it stretch up to the grid column width
+   * naturally; above that it locks to 70vw and never exceeds 1100px. */
+  max-width: min(1100px, 70vw);
   min-width: 0;
   width: 100%;
 }
@@ -1017,6 +1020,8 @@ a.home-lockup-link {
 
 .thread-panel-avatar-bot {
   background: #050505;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-sizing: border-box;
   overflow: hidden;
   padding: 0;
 }
@@ -1105,7 +1110,9 @@ a.home-lockup-link {
   font-weight: 700;
   letter-spacing: 0.06em;
   line-height: 1.4;
-  padding: 4px 7px;
+  /* Tighter than Slack's spec to sit closer to the username — the
+   * bot row reads as a single tight unit instead of "Centaur"... "APP". */
+  padding: 2px 5px;
   text-transform: uppercase;
 }
 
