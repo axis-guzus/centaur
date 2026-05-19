@@ -4,12 +4,12 @@ import { defineConfig, McpSource } from 'vocs/config'
 import { sidebar } from './sidebar.js'
 
 const basePath = process.env.VOCS_BASE_PATH || undefined
-const siteUrl = 'https://centaur.run'
+const siteUrl = process.env.VOCS_SITE_URL || 'https://centaur.run'
 
 function canonicalHref(path: string) {
-  const root = 'https://centaur.run'
+  const root = siteUrl.replace(/\/+$/, '')
   if (path === '/') return `${root}/`
-  return `${root}${path.replace(/\/+$/, '')}/`
+  return `${root}${path.replace(/\/+$/, '')}`
 }
 
 export default defineConfig({
@@ -122,6 +122,10 @@ export default defineConfig({
     {
       text: 'GitHub',
       link: 'https://github.com/paradigmxyz/centaur',
+    },
+    {
+      text: 'Contact',
+      link: '/contact',
     },
   ],
   search: {

@@ -42,6 +42,7 @@ export const sidebar = [
     text: 'Resources',
     items: [
       { text: 'Brand', link: '/brand' },
+      { text: 'Contact', link: '/contact' },
     ],
   },
 ] satisfies Config['sidebar']

@@ -17,6 +17,7 @@
     "waku": "1.0.0-alpha.6"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260519.1",
     "@resvg/resvg-wasm": "^2.6.2",
     "gray-matter": "^4.0.3",
     "typescript": "5.9.3",
