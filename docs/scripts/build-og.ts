@@ -239,7 +239,7 @@ const DEFAULT_TITLE_BASELINE_Y = 270
 const TITLE_LINE_H = 89
 const DESC_LINE_H = 47
 const TITLE_TO_DESC_BASELINE_GAP = 62
-const DESC_BASELINE_MAX_Y = 490
+const DESC_BASELINE_MAX_Y = 470
 
 function computeStackY(nTitle: number, nDesc: number) {
   const titleStackHeight = Math.max(0, nTitle - 1) * TITLE_LINE_H
@@ -275,8 +275,21 @@ function buildSvg(
 ): string {
   let svg = TEMPLATE_SVG
 
-  const titleLines = balanceLines(title, 99)
-  const descLines = description ? wrapText(description, 41, 3) : []
+  // Strip leading emojis (and any surrounding whitespace) from the title.
+  // The Bodoni/Source-Serif/Geist-Mono fonts loaded for resvg don't carry
+  // emoji glyphs, so a leading "🔐 Secrets" renders as a tofu box.
+  const cleanTitle = title
+    .replace(
+      /^[\p{Extended_Pictographic}\p{Emoji_Component}\uFE0F\u200D\s]+/u,
+      '',
+    )
+    .trim()
+
+  const titleLines = balanceLines(cleanTitle, 99)
+  // Wrap descriptions tighter so they don't crash into the centaur
+  // silhouette in the bottom-right (~x=868). 36 chars * ~20px ≈ 720px
+  // of text width leaves a comfortable 20px+ gap from the logo edge.
+  const descLines = description ? wrapText(description, 36, 3) : []
   const { eyebrowBaseline, titleBaselines, descBaselines } = computeStackY(
     titleLines.length,
     descLines.length,
@@ -320,7 +333,7 @@ function buildSvg(
       .join('')
     svg = svg.replace(
       /<text id="Description[^>]*>[\s\S]*?<\/text>/,
-      `<text opacity="0.6" fill="white" xml:space="preserve" font-family="Source Serif 4" font-weight="400" font-size="41" letter-spacing="0em">${descTspans}</text>`,
+      `<text opacity="0.6" fill="white" xml:space="preserve" font-family="Source Serif 4" font-weight="400" font-size="41" letter-spacing="-0.02em">${descTspans}</text>`,
     )
   } else {
     svg = svg.replace(/<text id="Description[^>]*>[\s\S]*?<\/text>/, '')
