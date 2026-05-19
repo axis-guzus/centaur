@@ -30,6 +30,7 @@ type Segment = {
   streamTs?: string
   streamStartPromise?: Promise<void>
   planStarted: boolean
+  headerEmitted: boolean
   pendingText: string
   pendingTextPlanPrefix: boolean
   streamedText: string
@@ -46,7 +47,7 @@ type AgentSessionState = {
   recipientTeamId: string
   recipientUserId: string
   title: string
-  footer?: string
+  header?: string
   finalCommentaryMarkdown?: string
   finalAnswerMarkdown?: string
   done: boolean
@@ -60,6 +61,9 @@ export type OpenAgentSessionInput = {
   recipientTeamId: string
   recipientUserId: string
   title?: string
+  /** Italic one-line identifier rendered at the top of every assistant message
+   *  (e.g. "base · claude-opus-4-7", "legal · codex-gpt-5"). */
+  header?: string
 }
 
 export type StepInput = {
@@ -88,6 +92,14 @@ export type DoneOptions = {
   answerMarkdown?: string
 }
 
+function headerMarkdown(header: string): string {
+  return `_${header.trim()}_`
+}
+
+function headerBlock(header: string): AnyBlock {
+  return { type: 'markdown', text: headerMarkdown(header) }
+}
+
 const sessions = new Map<string, AgentSessionState>()
 const sessionQueues = new Map<string, Promise<void>>()
 const THINKING_STATUS = 'Thinking...'
@@ -106,6 +118,7 @@ export class AgentSessionRenderer {
 
   async open(input: OpenAgentSessionInput): Promise<{ sessionId: string }> {
     const id = ulid()
+    const header = input.header?.trim() || undefined
     sessions.set(id, {
       id,
       channel: input.channel,
@@ -113,6 +126,7 @@ export class AgentSessionRenderer {
       recipientTeamId: input.recipientTeamId,
       recipientUserId: input.recipientUserId,
       title: input.title ?? 'Execution steps',
+      header,
       segments: [newSegment()],
       done: false,
       statusCleared: false
@@ -189,10 +203,9 @@ export class AgentSessionRenderer {
     await this.flushText(state, segment, { force: true })
   }
 
-  async done(sessionId: string, footer?: string, opts: DoneOptions = {}): Promise<void> {
+  async done(sessionId: string, opts: DoneOptions = {}): Promise<void> {
     const state = requireSession(sessionId)
     state.done = true
-    state.footer = footer
     state.finalCommentaryMarkdown = opts.commentaryMarkdown
     state.finalAnswerMarkdown = opts.answerMarkdown
     const streamFinalUpdates = opts.streamFinalUpdates ?? true
@@ -252,7 +265,6 @@ export class AgentSessionRenderer {
     if (!segment.streamTs && !segment.textParts.length && !segment.tasks.size && !hasFinalText) {
       return
     }
-    const footer = state.footer?.trim()
     await this.ensureStream(state, segment, [])
     if (!segment.streamTs) return
     const originalTasks = finalTaskSnapshot(segment)
@@ -265,22 +277,22 @@ export class AgentSessionRenderer {
     const showThinking =
       !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
     const thinkingBlock = showThinking ? thinkingContextBlock(commentaryMarkdown) : null
+    const header = state.header?.trim()
     // Slack accumulates appendStream chunks; stopStream blocks are the composed final layout.
     // Only add blocks for content that was not streamed live; live task_update chunks carry
     // fenced details/output, so adding a final plan block would render a second plan step.
     const blocks = sanitizeFinalMessagePayload([
+      ...(header ? [headerBlock(header)] : []),
       ...(tasks.length && !segment.planStarted
         ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)]
         : []),
       ...(thinkingBlock ? [thinkingBlock] : []),
-      ...(!streamedTextLive && answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : []),
-      ...(footer ? footerBlocks(footer) : [])
+      ...(!streamedTextLive && answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : [])
     ] as AnyBlock[])
     const fallbackText = buildFinalFallbackText({
       title: state.title,
       commentaryMarkdown: showThinking ? commentaryMarkdown : '',
-      answerMarkdown,
-      footer
+      answerMarkdown
     })
     const stopResponse = await this.client.chat.stopStream({
       channel: state.channel,
@@ -299,18 +311,19 @@ export class AgentSessionRenderer {
   ): Promise<void> {
     raiseStreamError(segment)
     if (!chunks.length || segment.closed) return
+    const effectiveChunks = this.withHeaderPrefix(state, segment, chunks)
     if (!segment.streamTs) {
-      const initialChunksUsed = await this.ensureStream(state, segment, chunks)
+      const initialChunksUsed = await this.ensureStream(state, segment, effectiveChunks)
       if (initialChunksUsed) return
     }
     if (!segment.streamTs) throw new Error('chat.startStream did not return a stream ts')
     const response = await this.client.chat.appendStream({
       channel: state.channel,
       ts: segment.streamTs,
-      chunks
+      chunks: effectiveChunks
     })
     if (!response.ok) throw new Error(response.error ?? 'chat.appendStream failed')
-    await this.clearStatusAfterVisibleOutput(state, chunks)
+    await this.clearStatusAfterVisibleOutput(state, effectiveChunks)
   }
 
   private async queueText(
@@ -465,6 +478,17 @@ export class AgentSessionRenderer {
     }
     return chunks
   }
+
+  private withHeaderPrefix(
+    state: AgentSessionState,
+    segment: Segment,
+    chunks: AnyChunk[]
+  ): AnyChunk[] {
+    const header = state.header?.trim()
+    if (!header || segment.headerEmitted) return chunks
+    segment.headerEmitted = true
+    return [markdownChunk(`${headerMarkdown(header)}\n`), ...chunks]
+  }
 }
 
 function logStatusFailure(state: AgentSessionState, status: string, error: string): void {
@@ -609,6 +633,7 @@ function newSegment(): Segment {
     textParts: [],
     tasks: new Map(),
     planStarted: false,
+    headerEmitted: false,
     pendingText: '',
     pendingTextPlanPrefix: true,
     streamedText: '',
@@ -729,10 +754,6 @@ function normalizeDeltaBoundary(previous: string, delta: string): string {
     return `\n${delta}`
   }
   return delta
-}
-
-function footerBlocks(footer: string): AnyBlock[] {
-  return [{ type: 'context', elements: [{ type: 'mrkdwn', text: footer }] }]
 }
 
 export async function withAgentSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
