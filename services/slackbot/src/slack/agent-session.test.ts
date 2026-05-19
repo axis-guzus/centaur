@@ -430,7 +430,7 @@ describe('AgentSessionRenderer', () => {
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
   })
 
-  it('hides thinking text and renders the answer in markdown on finalize', async () => {
+  it('shows thinking text by default and renders the answer in markdown on finalize', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
@@ -480,7 +480,7 @@ describe('AgentSessionRenderer', () => {
           block.type === 'context' &&
           String(block.elements?.[0]?.text ?? '').includes('Planning the tool calls.')
       )
-    ).toBe(false)
+    ).toBe(true)
     expect(
       blocks.some(
         (block: any) =>

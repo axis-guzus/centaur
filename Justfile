@@ -50,7 +50,7 @@ _build-iron-proxy:
     docker build -t centaur-iron-proxy:latest -f services/iron-proxy/Dockerfile .
 
 _build-slackbot:
-    docker build -t centaur-slackbot:latest -f services/slackbot/Dockerfile .
+    docker build --build-arg SHOW_THINKING_TEXT="${SHOW_THINKING_TEXT:-true}" -t centaur-slackbot:latest -f services/slackbot/Dockerfile .
 
 _build-agent:
     docker build --target sandbox -t centaur-agent:latest -f services/sandbox/Dockerfile .

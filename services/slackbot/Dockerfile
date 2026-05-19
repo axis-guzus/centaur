@@ -4,7 +4,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 ARG SHOW_THINKING_TEXT
-ENV SHOW_THINKING_TEXT=${SHOW_THINKING_TEXT:-false}
+ENV SHOW_THINKING_TEXT=${SHOW_THINKING_TEXT:-true}
 
 COPY services/slackbot/package.json services/slackbot/bun.lock ./
 RUN bun install --frozen-lockfile

@@ -1,4 +1,5 @@
-export const SHOW_THINKING_TEXT = process.env.SHOW_THINKING_TEXT === 'true'
+const SHOW_THINKING_TEXT_ENV = process.env.SHOW_THINKING_TEXT?.trim().toLowerCase()
+export const SHOW_THINKING_TEXT = SHOW_THINKING_TEXT_ENV !== 'false'
 
 export const slackReplyLimits = {
   text: {
@@ -12,7 +13,8 @@ export const slackReplyLimits = {
     planTitleChars: 256,
     taskCount: 24,
     taskTitleChars: 128,
-    taskDetailsChars: 128,
+    /** Slack caps task_update chunk text at 256 chars; keep 10% headroom. */
+    taskDetailsChars: 230,
     taskOutputChars: 48
   },
   finalPlan: {
