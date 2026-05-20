@@ -133,8 +133,8 @@ harnessAuth:
 | Secret | Used for |
 |--------|----------|
 | `CODEX_AUTH_JSON` | Codex local auth file reconstruction. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token from `claude setup-token`. |
-| `CLAUDE_AUTH_JSON` | Claude account metadata, when available. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token from `claude setup-token`; required for Claude Code local auth. |
+| `CLAUDE_AUTH_JSON` | Optional Claude account metadata, not sufficient for Claude Code local auth by itself. |
 | `CLAUDE_CREDENTIALS_JSON` | Legacy Claude portable credentials, when available. |
 
 Then enable only the providers you intend to use:

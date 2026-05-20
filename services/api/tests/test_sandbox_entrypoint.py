@@ -200,6 +200,49 @@ def test_sandbox_entrypoint_reconstructs_local_auth_payloads(tmp_path: Path) -> 
     assert env_line == "unset/unset/unset/claude-oauth-token"
 
 
+def test_sandbox_entrypoint_keeps_claude_api_key_without_oauth_token(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    harness_dir = _write_codex_harness_config(home)
+    auth_dir = tmp_path / "harness-auth"
+    auth_dir.mkdir()
+    (auth_dir / "claude-auth.json").write_text(
+        '{"oauthAccount":{"accountUuid":"metadata-only"}}'
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ENTRYPOINT_SH),
+            "sh",
+            "-lc",
+            (
+                'cat "$HOME/.claude.json"; printf "\\n"; '
+                'printf "%s\\n" "$ANTHROPIC_API_KEY"'
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "CENTAUR_HARNESS_CONFIG_DIR": str(harness_dir),
+            "CLAUDE_USE_LOCAL_AUTH": "true",
+            "CLAUDE_AUTH_JSON_FILE": str(auth_dir / "claude-auth.json"),
+            "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    claude_line, api_key_line = result.stdout.splitlines()
+    assert json.loads(claude_line) == {
+        "oauthAccount": {"accountUuid": "metadata-only"}
+    }
+    assert api_key_line == "ANTHROPIC_API_KEY"
+
+
 def test_sandbox_entrypoint_preserves_api_keys_when_local_auth_missing(
     tmp_path: Path,
 ) -> None:

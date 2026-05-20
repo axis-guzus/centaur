@@ -194,7 +194,6 @@ if (loginRequested && loginCommands.length > 0) {
       process.exitCode = result.status ?? 1;
     } else if (command === "claude" && args[0] === "setup-token") {
       const output = result.stdout || "";
-      process.stdout.write(output);
       const token = extractClaudeCodeOauthToken(output);
       if (token) {
         upsertEnvValues(envFile, { CLAUDE_CODE_OAUTH_TOKEN: token });

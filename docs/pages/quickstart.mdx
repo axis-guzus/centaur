@@ -96,9 +96,10 @@ If local auth is missing, run the command it prints, or use:
 bun run auth:bootstrap -- --login
 ```
 
-That opt-in mode streams `codex login --device-auth` or
-`claude setup-token`, captures the emitted `CLAUDE_CODE_OAUTH_TOKEN`, then you
-rerun `bun run auth:bootstrap`.
+That opt-in mode streams `codex login --device-auth`. For Claude, it captures
+`claude setup-token` output and writes only the redacted
+`CLAUDE_CODE_OAUTH_TOKEN` import message, then you rerun
+`bun run auth:bootstrap`.
 
 Enable local auth only for deployments that need it:
 

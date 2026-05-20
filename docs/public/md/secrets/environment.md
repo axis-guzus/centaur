@@ -62,8 +62,8 @@ Optional payload keys:
 | Secret | Notes |
 |--------|-------|
 | `CODEX_AUTH_JSON` | Copied from `~/.codex/auth.json`. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Emitted by `claude setup-token`. |
-| `CLAUDE_AUTH_JSON` | Claude account metadata from `~/.claude.json`, when available. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Required for Claude Code local auth; emitted by `claude setup-token`. |
+| `CLAUDE_AUTH_JSON` | Optional Claude account metadata from `~/.claude.json`; not sufficient for Claude Code local auth by itself. |
 | `CLAUDE_CREDENTIALS_JSON` | Legacy portable Claude credentials from `~/.claude/.credentials.json`, when available. |
 
 `just bootstrap-secrets` writes those payloads to `centaur-harness-auth`, not
