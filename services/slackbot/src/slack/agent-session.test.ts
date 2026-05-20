@@ -2,14 +2,14 @@ import { describe, expect, it } from 'bun:test'
 import { AgentSessionRenderer, withAgentSessionLock } from './agent-session'
 
 describe('AgentSessionRenderer', () => {
-  it('stops calling assistant.threads.setStatus after the channel returns user_not_found', async () => {
+  it('never calls assistant.threads.setStatus from the open-agent-session path', async () => {
     const setStatusCalls: any[] = []
     const client = {
       assistant: {
         threads: {
           setStatus: async (params: any) => {
             setStatusCalls.push(params)
-            return { ok: false, error: 'user_not_found' }
+            return { ok: true }
           }
         }
       },
@@ -30,13 +30,11 @@ describe('AgentSessionRenderer', () => {
       title: 'Centaur execution'
     })
 
-    expect(setStatusCalls.length).toBe(1)
-
     await renderer.text(sessionId, 'Hi there')
     await renderer.step(sessionId, { id: 's1', title: 'Run command', status: 'in_progress' })
     await renderer.done(sessionId)
 
-    expect(setStatusCalls.length).toBe(1)
+    expect(setStatusCalls).toEqual([])
   })
 
   it('streams pending text before appending inline task updates', async () => {
@@ -101,15 +99,8 @@ describe('AgentSessionRenderer', () => {
         details: '```bash\nsleep 2\n```'
       }
     ])
-    expect(calls.slice(0, 3).map(call => call.method)).toEqual([
-      'assistant.threads.setStatus',
-      'chat.startStream',
-      'assistant.threads.setStatus'
-    ])
-    expect(calls[0]?.params.status).toBe('Thinking...')
-    expect(calls[0]?.params.loading_messages).toEqual(['Thinking...'])
-    expect(calls[2]?.params.status).toBe('')
-    expect(calls[2]?.params.loading_messages).toBeUndefined()
+    expect(calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
+    expect(calls[0]?.method).toBe('chat.startStream')
 
     const appends = calls.filter(call => call.method === 'chat.appendStream')
     expect(appends[0]?.params.chunks).toEqual([
@@ -127,51 +118,6 @@ describe('AgentSessionRenderer', () => {
       .flatMap(call => call.params.chunks ?? [])
       .filter((chunk: any) => chunk.type === 'task_update')
     expect(taskUpdates.at(-1)).toMatchObject({ id: 'sleep-1', status: 'complete' })
-  })
-
-  it('continues streaming when assistant status is rejected', async () => {
-    const calls: Array<{ method: string; params: any }> = []
-    const client = {
-      assistant: {
-        threads: {
-          setStatus: async (params: any) => {
-            calls.push({ method: 'assistant.threads.setStatus', params })
-            return { ok: false, error: 'invalid_thread_ts' }
-          }
-        }
-      },
-      chat: {
-        startStream: async (params: any) => {
-          calls.push({ method: 'chat.startStream', params })
-          return { ok: true, ts: '1778866940.295499' }
-        },
-        appendStream: async (params: any) => {
-          calls.push({ method: 'chat.appendStream', params })
-          return { ok: true }
-        },
-        stopStream: async (params: any) => {
-          calls.push({ method: 'chat.stopStream', params })
-          return { ok: true }
-        },
-        update: async () => ({ ok: true })
-      }
-    }
-
-    const renderer = new AgentSessionRenderer(client as any)
-    const { sessionId } = await renderer.open({
-      channel: 'C123',
-      parentTs: '1778866921.505479',
-      recipientTeamId: 'T123',
-      recipientUserId: 'U123',
-      title: 'Centaur execution'
-    })
-
-    await renderer.text(sessionId, 'Reply still streams.')
-    await renderer.done(sessionId)
-
-    expect(calls.map(call => call.method)).toContain('chat.startStream')
-    expect(calls.map(call => call.method)).toContain('chat.stopStream')
-    expect(calls.filter(call => call.method === 'assistant.threads.setStatus')).toHaveLength(3)
   })
 
   it('streams task updates with accumulated details and output', async () => {
@@ -588,17 +534,12 @@ describe('AgentSessionRenderer', () => {
     }
   })
 
-  it('clears assistant status even when closing the stream fails', async () => {
+  it('retries chat.stopStream when the first attempt reports stream_already_closed', async () => {
     const calls: Array<{ method: string; params: any }> = []
     let stopAttempts = 0
     const client = {
       assistant: {
-        threads: {
-          setStatus: async (params: any) => {
-            calls.push({ method: 'assistant.threads.setStatus', params })
-            return { ok: true }
-          }
-        }
+        threads: { setStatus: async () => ({ ok: true }) }
       },
       chat: {
         startStream: async (params: any) => {
@@ -632,17 +573,7 @@ describe('AgentSessionRenderer', () => {
     })
 
     await renderer.text(sessionId, 'Finished reply')
-    expect(renderer.done(sessionId)).rejects.toThrow('stream_already_closed')
-
-    expect(calls.filter(call => call.method === 'assistant.threads.setStatus').at(-1)).toEqual({
-      method: 'assistant.threads.setStatus',
-      params: {
-        channel_id: 'C123',
-        thread_ts: '1778866921.505479',
-        status: ''
-      }
-    })
-
+    await expect(renderer.done(sessionId)).rejects.toThrow('stream_already_closed')
     await expect(renderer.done(sessionId)).resolves.toEqual({
       streamedTextChars: expect.any(Number)
     })
