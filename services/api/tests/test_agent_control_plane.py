@@ -2621,7 +2621,7 @@ async def test_release_stale_runtime_assignments_preserves_undelivered_messages(
 
 
 @pytest.mark.asyncio
-async def test_worker_marks_silence_deadline_exceeded_and_stops_session(db_pool):
+async def test_worker_requeues_durable_turn_for_log_replay_on_silence(db_pool):
     from api.runtime_control import _process_execution
 
     thread_key = f"slack:C-test:{uuid.uuid4().hex}"
@@ -2694,14 +2694,17 @@ async def test_worker_marks_silence_deadline_exceeded_and_stops_session(db_pool)
         await _process_execution(db_pool, row)
 
     execution = await db_pool.fetchrow(
-        "SELECT status, terminal_reason, error_text FROM agent_execution_requests WHERE execution_id = $1",
+        "SELECT status, terminal_reason, error_text, metadata FROM agent_execution_requests WHERE execution_id = $1",
         execution_id,
     )
     assert execution is not None
-    assert execution["status"] == "failed_permanent"
-    assert execution["terminal_reason"] == "silence_deadline_exceeded"
-    assert "no progress" in (execution["error_text"] or "")
-    stop_session_mock.assert_awaited_once_with(thread_key)
+    assert execution["status"] == "queued"
+    assert execution["terminal_reason"] is None
+    assert execution["error_text"] is None
+    metadata = json.loads(execution["metadata"])
+    assert metadata["recovered_from_stale_lease"] is True
+    assert metadata["stale_lease_recovery_reason"] == "silence_deadline_exceeded"
+    stop_session_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

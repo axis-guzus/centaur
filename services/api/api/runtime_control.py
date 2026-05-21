@@ -2660,6 +2660,14 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 record_execution_watchdog_timeout(harness, "hard_deadline_exceeded")
                 return
             if now >= silence_deadline:
+                if durable_turn_id and not replay_recovered_logs:
+                    await _requeue_execution_for_log_replay(
+                        pool,
+                        execution_id=execution_id,
+                        thread_key=thread_key,
+                        reason="silence_deadline_exceeded",
+                    )
+                    return
                 await _finalize_execution(
                     status="failed_permanent",
                     terminal_reason="silence_deadline_exceeded",
@@ -3089,6 +3097,40 @@ async def _recover_stale_running(pool) -> int:
             recovered=recovered,
         )
     return recovered
+
+
+async def _requeue_execution_for_log_replay(
+    pool,
+    *,
+    execution_id: str,
+    thread_key: str,
+    reason: str,
+) -> None:
+    await pool.execute(
+        "UPDATE agent_execution_requests SET "
+        "status = 'queued', "
+        "worker_id = NULL, "
+        "worker_lease_expires_at = NULL, "
+        "silence_deadline_at = NOW() + make_interval(secs => $1::double precision), "
+        "stream_break_count = stream_break_count + 1, "
+        "last_stream_break_at = NOW(), "
+        "metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object("
+        f"'{_STALE_LEASE_RECOVERY_METADATA_KEY}', TRUE, "
+        "'stale_lease_recovered_at', NOW(), "
+        "'stale_lease_recovery_reason', $2::text"
+        "), "
+        "updated_at = NOW() "
+        "WHERE execution_id = $3 AND status = 'running'",
+        float(max(EXECUTION_TOOL_SILENCE_TIMEOUT_S, EXECUTION_SILENCE_TIMEOUT_S)),
+        reason,
+        execution_id,
+    )
+    log.warning(
+        "execution_requeued_for_log_replay",
+        execution_id=execution_id,
+        thread_key=thread_key,
+        reason=reason,
+    )
 
 
 async def recover_interrupted_executions_on_startup(pool) -> int:
