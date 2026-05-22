@@ -12,6 +12,11 @@
     ],
     "target": "ESNext",
     "module": "ESNext",
+    "paths": {
+      "@centaur/api-client": [
+        "../../packages/api-client/src/index.ts"
+      ]
+    },
     "skipLibCheck": true,
     "alwaysStrict": true,
     "esModuleInterop": true,

@@ -1,5 +1,27 @@
 import type { AnyBlock, AnyChunk, MarkdownBlock, RichTextBlock } from '@slack/types'
 
+export type SlackEnvelopeEvent = {
+  type?: string
+  subtype?: string
+  user?: string
+  user_team?: string
+  source_team?: string
+  bot_id?: string
+  channel?: string
+  channel_type?: string
+  team?: string
+  text?: string
+  ts?: string
+  thread_ts?: string
+  event_ts?: string
+  blocks?: AnyBlock[]
+  files?: SlackMessageFile[]
+  codex_thread_id?: string
+  agent_thread_id?: string
+  thread_id?: string
+  session_id?: string
+}
+
 export type NormalizedTextPart = {
   type: 'text'
   text: string
@@ -55,7 +77,7 @@ export type SlackEnvelope = {
   enterprise_id?: string
   event_id?: string
   event_time?: number
-  event?: Record<string, unknown>
+  event?: SlackEnvelopeEvent
 }
 
 export type SlackMessageFile = {

@@ -10,7 +10,11 @@ import { loadConfig } from './config'
 import { logError, logWarn, sanitizeLogValue } from './logging'
 import { AgentSessionRenderer, withAgentSessionLock } from './slack/agent-session'
 import { authorizeSlackOrg } from './slack/authorization'
-import { CodexSessionRenderer, hasActiveCodexSession } from './slack/codex-session'
+import {
+  CodexSessionRenderer,
+  hasActiveCodexSession,
+  type SlackbotHarnessEvent
+} from './slack/codex-session'
 import { EventDeduper, slackDedupKey } from './slack/dedup'
 import { duplicateSlackAlertText, type DuplicateSlackEventDetails } from './slack/duplicate-alert'
 import { EnvSlackInstallationStore, SlackClientResolver } from './slack/installations'
@@ -18,7 +22,7 @@ import { normalizeSlackEnvelope } from './slack/normalize'
 import { markdownToStreamChunks } from './slack/render'
 import { verifySlackSignature } from './slack/signature'
 import { shouldAckWithReaction } from './slack/trivial-ack'
-import type { NormalizedSlackEvent, SlackEnvelope } from './slack/types'
+import type { NormalizedSlackEvent, SlackEnvelope, SlackEnvelopeEvent } from './slack/types'
 import type { AnyBlock, AnyChunk } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
 
@@ -36,6 +40,12 @@ const resolver = new SlackClientResolver(
 const handoff = new CentaurHandoff(config)
 const deduper = new EventDeduper(config.SLACK_EVENT_DEDUP_TTL_MS)
 const CODEX_THREAD_RE = /\b(?:codex|agent|amp)\s+thread\b[^A-Z0-9]*(T-[A-Z0-9-]+)/i
+const CODEX_THREAD_ID_EVENT_KEYS = [
+  'codex_thread_id',
+  'agent_thread_id',
+  'thread_id',
+  'session_id'
+] as const
 
 void resolver
   .resolve({})
@@ -49,7 +59,7 @@ type Variables = {
 }
 
 type WaitUntilContext = {
-  waitUntil(promise: Promise<unknown>): void
+  waitUntil(promise: Promise<void>): void
 }
 
 export const app = new Hono<{ Variables: Variables }>()
@@ -367,7 +377,7 @@ app.post('/api/slack/agent-sessions/:session_id/done', apiKeyMiddleware, async c
 })
 
 app.post('/api/slack/agent-sessions/:session_id/harness-event', apiKeyMiddleware, async c => {
-  const body = await c.req.json<{ event: unknown }>()
+  const body = await c.req.json<{ event: SlackbotHarnessEvent }>()
   const { client } = await resolver.resolve({})
   try {
     const sessionId = c.req.param('session_id')
@@ -423,7 +433,7 @@ export default {
 
 function duplicateSlackEventDetails(
   envelope: SlackEnvelope,
-  event: Record<string, unknown> | undefined,
+  event: SlackEnvelopeEvent | undefined,
   dedupeKey: string
 ): DuplicateSlackEventDetails {
   const messageTs = typeof event?.ts === 'string' ? event.ts : undefined
@@ -463,28 +473,33 @@ async function notifyDuplicateSlackAlert(details: DuplicateSlackEventDetails): P
 }
 
 function codexThreadIdFromSlackEvent(
-  event: Record<string, unknown> | undefined
+  event: SlackEnvelopeEvent | undefined
 ): string | undefined {
   if (!event) return undefined
-  for (const key of ['codex_thread_id', 'agent_thread_id', 'thread_id', 'session_id']) {
+  for (const key of CODEX_THREAD_ID_EVENT_KEYS) {
     const value = event[key]
     if (typeof value === 'string' && value.trim()) return value.trim()
   }
-  return codexThreadIdFromUnknown(event)
+  return codexThreadIdFromValue(event)
 }
 
-function codexThreadIdFromUnknown(value: unknown): string | undefined {
+function codexThreadIdFromValue(value: unknown): string | undefined {
   if (typeof value === 'string') return CODEX_THREAD_RE.exec(value)?.[1]
-  if (!value || typeof value !== 'object') return undefined
   if (Array.isArray(value)) {
     for (const item of value) {
-      const found = codexThreadIdFromUnknown(item)
+      const found = codexThreadIdFromValue(item)
       if (found) return found
     }
     return undefined
   }
-  for (const item of Object.values(value)) {
-    const found = codexThreadIdFromUnknown(item)
+  let record: Record<string, unknown>
+  try {
+    record = assertRecord(value)
+  } catch {
+    return undefined
+  }
+  for (const item of Object.values(record)) {
+    const found = codexThreadIdFromValue(item)
     if (found) return found
   }
   return undefined
@@ -550,8 +565,13 @@ async function ackWithReaction(client: WebClient, event: NormalizedSlackEvent): 
 }
 
 function slackApiErrorResponse(c: Context, error: unknown) {
-  const data = (error as { data?: unknown })?.data
-  if (data && typeof data === 'object') return c.json(sanitizeLogValue(data), 502)
+  let data: Record<string, unknown> | null = null
+  try {
+    data = assertRecord(assertRecord(error).data)
+  } catch {
+    data = null
+  }
+  if (data) return c.json(sanitizeLogValue(data), 502)
   return c.json(
     {
       ok: false,
@@ -675,7 +695,7 @@ function firstLineTitle(text: string): string {
 }
 
 function runInBackground(c: Context, promise: Promise<void>): void {
-  const guarded = promise.catch((error: unknown) => {
+  const guarded = promise.catch(error => {
     logError('slack_event_processing_failed', error)
   })
   const executionCtx = getExecutionContext(c)
@@ -699,13 +719,82 @@ function parseSlackBody(rawBody: string, contentType: string | undefined): Slack
     if (contentType?.includes('application/x-www-form-urlencoded')) {
       const form = new URLSearchParams(rawBody)
       const payload = form.get('payload')
-      if (payload) return JSON.parse(payload) as SlackEnvelope
-      return Object.fromEntries(form) as SlackEnvelope
+      if (payload) return assertSlackEnvelope(JSON.parse(payload) as unknown)
+      return assertSlackEnvelope(Object.fromEntries(form))
     }
-    return JSON.parse(rawBody) as SlackEnvelope
+    return assertSlackEnvelope(JSON.parse(rawBody) as unknown)
   } catch {
     return null
   }
+}
+
+function assertSlackEnvelope(input: unknown): SlackEnvelope {
+  const record = assertRecord(input)
+  return {
+    token: optionalString(record.token, 'token'),
+    challenge: optionalString(record.challenge, 'challenge'),
+    type: optionalString(record.type, 'type'),
+    team_id: optionalString(record.team_id, 'team_id'),
+    enterprise_id: optionalString(record.enterprise_id, 'enterprise_id'),
+    event_id: optionalString(record.event_id, 'event_id'),
+    event_time: optionalNumber(record.event_time, 'event_time'),
+    event:
+      record.event === undefined ? undefined : assertSlackEnvelopeEvent(record.event)
+  }
+}
+
+function assertSlackEnvelopeEvent(input: unknown): SlackEnvelopeEvent {
+  const record = assertRecord(input)
+  return {
+    type: optionalString(record.type, 'event.type'),
+    subtype: optionalString(record.subtype, 'event.subtype'),
+    user: optionalString(record.user, 'event.user'),
+    user_team: optionalString(record.user_team, 'event.user_team'),
+    source_team: optionalString(record.source_team, 'event.source_team'),
+    bot_id: optionalString(record.bot_id, 'event.bot_id'),
+    channel: optionalString(record.channel, 'event.channel'),
+    channel_type: optionalString(record.channel_type, 'event.channel_type'),
+    team: optionalString(record.team, 'event.team'),
+    text: optionalString(record.text, 'event.text'),
+    ts: optionalString(record.ts, 'event.ts'),
+    thread_ts: optionalString(record.thread_ts, 'event.thread_ts'),
+    event_ts: optionalString(record.event_ts, 'event.event_ts'),
+    blocks: record.blocks === undefined ? undefined : assertSlackBlocks(record.blocks),
+    files: record.files === undefined ? undefined : assertSlackFiles(record.files),
+    codex_thread_id: optionalString(record.codex_thread_id, 'event.codex_thread_id'),
+    agent_thread_id: optionalString(record.agent_thread_id, 'event.agent_thread_id'),
+    thread_id: optionalString(record.thread_id, 'event.thread_id'),
+    session_id: optionalString(record.session_id, 'event.session_id')
+  }
+}
+
+function assertSlackBlocks(input: unknown): AnyBlock[] {
+  if (!Array.isArray(input)) throw new Error('event.blocks must be an array')
+  return input as AnyBlock[]
+}
+
+function assertSlackFiles(input: unknown): SlackEnvelopeEvent['files'] {
+  if (!Array.isArray(input)) throw new Error('event.files must be an array')
+  return input as SlackEnvelopeEvent['files']
+}
+
+function optionalString(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new Error(`${field} must be a string`)
+  return value
+}
+
+function optionalNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number') throw new Error(`${field} must be a number`)
+  return value
+}
+
+function assertRecord(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('expected object')
+  }
+  return value as Record<string, unknown>
 }
 
 function parseSlackCommandBody(rawBody: string): SlackCommandPayload | null {

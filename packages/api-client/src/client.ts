@@ -1,128 +1,64 @@
 import { EventSourceParserStream, type EventSourceMessage } from "eventsource-parser/stream";
 import axios, { type AxiosInstance } from "axios";
+import {
+  type AgentExecutionRecord,
+  type AgentExecutionStateEvent,
+  type AgentInputContentBlock,
+  type AgentResultStreamEvent,
+  type AgentStatus,
+  type AgentTurnDoneStreamEvent,
+  type ClientLogger,
+  type ExecuteOptions,
+  type ExecutionAccepted,
+  type ExecutionControlResult,
+  type FinalDeliveryClaimResponse,
+  type FinalDeliveryMutationResult,
+  type FinalDeliveryReadyEvent,
+  type MessageAccepted,
+  type MessageOptions,
+  type ReleaseThreadResult,
+  type SpawnOptions,
+  type SpawnResult,
+  type StreamEvent,
+  type ThreadExecutionSummary,
+  type ThreadMessageRecord,
+  type WorkflowEventAccepted,
+  type WorkflowRunAccepted,
+  type WorkflowRunOptions,
+} from "./types";
 
-export type InputContentBlock =
-  | { type: "text"; text: string }
-  | {
-      type: "image";
-      source_path?: string;
-      source: { type: "base64"; media_type: string; data: string };
-    }
-  | {
-      type: "document";
-      source_path?: string;
-      source: { type: "base64"; media_type: string; data: string };
-    };
-
-export interface SpawnOptions {
-  threadKey: string;
-  spawnId?: string;
-  harness?: string;
-  engine?: string;
-  personaId?: string;
-  agentsMdOverride?: string;
-}
-
-export interface SpawnResult {
-  ok: boolean;
-  runtime_id: string;
-  thread_key: string;
-  trace_id?: string;
-  assignment_state: string;
-  assignment_generation: number;
-  persona_id?: string | null;
-  prompt_ref?: string | null;
-  effective_agents_md_sha256?: string | null;
-}
-
-export interface MessageOptions {
-  threadKey: string;
-  assignmentGeneration: number;
-  messageId?: string;
-  role?: string;
-  event?: Record<string, unknown>;
-  parts?: InputContentBlock[];
-  userId?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface ExecuteOptions {
-  threadKey: string;
-  assignmentGeneration: number;
-  executeId?: string;
-  harness?: string;
-  platform?: string;
-  userId?: string;
-  metadata?: Record<string, unknown>;
-  delivery?: Record<string, unknown>;
-}
-
-export interface ExecutionAccepted {
-  ok: boolean;
-  execution_id: string;
-  execute_id: string;
-  assignment_generation: number;
-  status: string;
-  final_key: string;
-  delivery_token: string;
-  idempotent?: boolean;
-}
-
-export interface WorkflowRunOptions {
-  workflowName: string;
-  triggerKey?: string;
-  input?: Record<string, unknown>;
-  eagerStart?: boolean;
-  timeoutMs?: number;
-}
-
-export interface WorkflowRunAccepted {
-  ok: boolean;
-  run_id: string;
-  workflow_name: string;
-  workflow_version?: string;
-  workflow_source_path?: string | null;
-  parent_run_id?: string | null;
-  root_run_id?: string | null;
-  status: string;
-  thread_key?: string | null;
-  execution_id?: string | null;
-  output_json?: Record<string, unknown> | null;
-  error_text?: string | null;
-  latest_checkpoint_name?: string | null;
-  latest_step_kind?: string | null;
-  waiting_on?: Record<string, unknown> | null;
-  child_runs_count?: number;
-  created_at?: string | null;
-  started_at?: string | null;
-  completed_at?: string | null;
-  idempotent?: boolean;
-}
-
-export interface ThreadMessageRecord {
-  id: string;
-  role: string;
-  parts: Array<Record<string, unknown>>;
-  user_id?: string | null;
-  metadata?: Record<string, unknown> | null;
-  created_at?: string | null;
-}
-
-export interface StreamEvent {
-  eventId: number;
-  eventKind: string;
-  data: Record<string, unknown>;
-}
+export type {
+  AgentExecutionRecord,
+  AgentInputContentBlock,
+  AgentStatus,
+  ExecuteOptions,
+  ExecutionAccepted,
+  ExecutionControlResult,
+  FinalDeliveryClaimResponse,
+  FinalDeliveryMutationResult,
+  InputContentBlock,
+  MessageAccepted,
+  MessageOptions,
+  ReleaseThreadResult,
+  SpawnOptions,
+  SpawnResult,
+  StreamEvent,
+  ThreadExecutionSummary,
+  ThreadMessageRecord,
+  WorkflowEventAccepted,
+  WorkflowRunAccepted,
+  WorkflowRunOptions,
+} from "./types";
 
 export class CentaurClient {
   readonly http: AxiosInstance;
-  private log?: { info: Function; warn: Function; error: Function };
+  private log?: ClientLogger;
 
   constructor(opts: {
     apiUrl: string;
     apiKey: string;
     timeoutMs?: number;
-    logger?: { info: Function; warn: Function; error: Function };
+    logger?: ClientLogger;
   }) {
     this.log = opts.logger;
     this.http = axios.create({
@@ -149,7 +85,7 @@ export class CentaurClient {
     return data as SpawnResult;
   }
 
-  async message(opts: MessageOptions): Promise<{ ok: boolean; message_id: string; attachment_ids: string[] }> {
+  async message(opts: MessageOptions): Promise<MessageAccepted> {
     const body: Record<string, unknown> = {
       thread_key: opts.threadKey,
       assignment_generation: opts.assignmentGeneration,
@@ -166,7 +102,7 @@ export class CentaurClient {
     }
 
     const { data } = await this.http.post("/agent/message", body);
-    return data as { ok: boolean; message_id: string; attachment_ids: string[] };
+    return data as MessageAccepted;
   }
 
   async execute(opts: ExecuteOptions): Promise<ExecutionAccepted> {
@@ -235,13 +171,13 @@ export class CentaurClient {
     eventType: string;
     correlationId: string;
     payload?: Record<string, unknown>;
-  }): Promise<Record<string, unknown>> {
+  }): Promise<WorkflowEventAccepted> {
     const { data } = await this.http.post("/workflows/events", {
       event_type: opts.eventType,
       correlation_id: opts.correlationId,
       payload: opts.payload ?? {},
     });
-    return data as Record<string, unknown>;
+    return data as WorkflowEventAccepted;
   }
 
   async *streamEvents(opts: {
@@ -278,9 +214,10 @@ export class CentaurClient {
 
     for await (const event of stream as unknown as AsyncIterable<EventSourceMessage>) {
       if (!event.data || event.data === "[DONE]") continue;
-      let parsed: Record<string, unknown> = { type: "unknown", raw: event.data };
+      let parsed: StreamEvent["data"] = { type: "unknown", raw: event.data };
       try {
-        parsed = JSON.parse(event.data) as Record<string, unknown>;
+        const value = JSON.parse(event.data) as unknown;
+        parsed = assertStreamData(value);
       } catch {
         // keep raw fallback
       }
@@ -292,12 +229,16 @@ export class CentaurClient {
     }
   }
 
-  async getExecution(executionId: string) {
+  async getExecution(executionId: string): Promise<AgentExecutionRecord> {
     const { data } = await this.http.get(`/agent/executions/${encodeURIComponent(executionId)}`);
-    return data as Record<string, unknown>;
+    return data as AgentExecutionRecord;
   }
 
-  async getMessages(threadKey: string, opts?: { cursor?: string; limit?: number }) {
+  async getMessages(threadKey: string, opts?: { cursor?: string; limit?: number }): Promise<{
+    messages: ThreadMessageRecord[];
+    cursor: string | null;
+    has_more: boolean;
+  }> {
     const { data } = await this.http.get("/agent/messages", {
       params: {
         thread_key: threadKey,
@@ -312,29 +253,32 @@ export class CentaurClient {
     };
   }
 
-  async listExecutions(threadKey: string, limit = 20) {
+  async listExecutions(threadKey: string, limit = 20): Promise<{
+    thread_key: string;
+    executions: ThreadExecutionSummary[];
+  }> {
     const { data } = await this.http.get(
       `/agent/threads/${encodeURIComponent(threadKey)}/executions`,
       { params: { limit } },
     );
-    return data as { thread_key: string; executions: Array<Record<string, unknown>> };
+    return data as { thread_key: string; executions: ThreadExecutionSummary[] };
   }
 
-  async cancelExecution(executionId: string) {
+  async cancelExecution(executionId: string): Promise<ExecutionControlResult> {
     const { data } = await this.http.post(`/agent/executions/${encodeURIComponent(executionId)}/cancel`);
-    return data as Record<string, unknown>;
+    return data as ExecutionControlResult;
   }
 
   async steerExecution(
     executionId: string,
     opts?: {
-      contentBlocks?: Array<Record<string, unknown>>;
+      contentBlocks?: AgentInputContentBlock[];
       messageId?: string;
       userId?: string;
       metadata?: Record<string, unknown>;
       suppressCancellationDelivery?: boolean;
     },
-  ) {
+  ): Promise<ExecutionControlResult> {
     const { data } = await this.http.post(`/agent/executions/${encodeURIComponent(executionId)}/steer`, {
       content_blocks: opts?.contentBlocks,
       message_id: opts?.messageId,
@@ -346,10 +290,13 @@ export class CentaurClient {
           : { steer_replacement: opts.suppressCancellationDelivery }),
       },
     });
-    return data as Record<string, unknown>;
+    return data as ExecutionControlResult;
   }
 
-  async releaseThread(threadKey: string, opts?: { releaseId?: string; cancelInflight?: boolean }) {
+  async releaseThread(
+    threadKey: string,
+    opts?: { releaseId?: string; cancelInflight?: boolean },
+  ): Promise<ReleaseThreadResult> {
     const { data } = await this.http.post(
       `/agent/threads/${encodeURIComponent(threadKey)}/release`,
       {
@@ -357,20 +304,28 @@ export class CentaurClient {
         cancel_inflight: opts?.cancelInflight ?? false,
       },
     );
-    return data as Record<string, unknown>;
+    return data as ReleaseThreadResult;
   }
 
-  async claimFinalDeliveries(opts: { consumerId: string; limit?: number; leaseSeconds?: number; platform?: string }) {
+  async claimFinalDeliveries(opts: {
+    consumerId: string;
+    limit?: number;
+    leaseSeconds?: number;
+    platform?: string;
+  }): Promise<FinalDeliveryClaimResponse> {
     const { data } = await this.http.post("/agent/final-deliveries/claim", {
       consumer_id: opts.consumerId,
       limit: opts.limit ?? 1,
       lease_seconds: opts.leaseSeconds ?? 60,
       platform: opts.platform,
     });
-    return data as { deliveries: Array<Record<string, unknown>> };
+    return data as FinalDeliveryClaimResponse;
   }
 
-  async renewFinalDeliveryLease(executionId: string, opts: { consumerId: string; leaseSeconds?: number }) {
+  async renewFinalDeliveryLease(
+    executionId: string,
+    opts: { consumerId: string; leaseSeconds?: number },
+  ): Promise<FinalDeliveryMutationResult> {
     const { data } = await this.http.post(
       `/agent/final-deliveries/${encodeURIComponent(executionId)}/heartbeat`,
       {
@@ -378,15 +333,18 @@ export class CentaurClient {
         lease_seconds: opts.leaseSeconds ?? 60,
       },
     );
-    return data as Record<string, unknown>;
+    return data as FinalDeliveryMutationResult;
   }
 
-  async markFinalDelivered(executionId: string, consumerId?: string) {
+  async markFinalDelivered(
+    executionId: string,
+    consumerId?: string,
+  ): Promise<FinalDeliveryMutationResult> {
     const { data } = await this.http.post(
       `/agent/final-deliveries/${encodeURIComponent(executionId)}/delivered`,
       { consumer_id: consumerId },
     );
-    return data as Record<string, unknown>;
+    return data as FinalDeliveryMutationResult;
   }
 
   async markFinalFailed(
@@ -398,7 +356,7 @@ export class CentaurClient {
       nonRetryable?: boolean;
       errorClass?: string;
     },
-  ) {
+  ): Promise<FinalDeliveryMutationResult> {
     const { data } = await this.http.post(
       `/agent/final-deliveries/${encodeURIComponent(executionId)}/failed`,
       {
@@ -409,11 +367,155 @@ export class CentaurClient {
         error_class: opts?.errorClass,
       },
     );
-    return data as Record<string, unknown>;
+    return data as FinalDeliveryMutationResult;
   }
 
-  async getStatus(threadKey: string) {
+  async getStatus(threadKey: string): Promise<AgentStatus> {
     const { data } = await this.http.get("/agent/status", { params: { key: threadKey } });
-    return data as Record<string, unknown>;
+    return data as AgentStatus;
   }
+}
+
+function assertStreamData(value: unknown): StreamEvent["data"] {
+  const record = assertRecord(value);
+  const type = assertString(record.type, "type");
+  if (type === "result") return assertAgentResultStreamEvent(record);
+  if (type === "turn.done" || type === "turn.completed") {
+    return assertAgentTurnDoneStreamEvent(record);
+  }
+  if (type === "execution.state") return assertAgentExecutionStateEvent(record);
+  if (type === "final_delivery.ready") return assertFinalDeliveryReadyEvent(record);
+  return record as StreamEvent["data"];
+}
+
+function assertRecord(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("expected object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function assertAgentResultStreamEvent(record: Record<string, unknown>): AgentResultStreamEvent {
+  return {
+    ...record,
+    type: "result",
+    text: optionalString(record.text, "text"),
+    result: optionalString(record.result, "result"),
+    result_text: optionalString(record.result_text, "result_text"),
+    error: optionalString(record.error, "error"),
+    is_error: optionalBoolean(record.is_error, "is_error"),
+  };
+}
+
+function assertAgentTurnDoneStreamEvent(record: Record<string, unknown>): AgentTurnDoneStreamEvent {
+  const type = assertString(record.type, "type");
+  if (type !== "turn.done" && type !== "turn.completed") {
+    throw new Error("expected turn completion event");
+  }
+  return {
+    ...record,
+    type,
+    turn_id: optionalNumber(record.turn_id, "turn_id"),
+    result: optionalString(record.result, "result"),
+    result_text: optionalString(record.result_text, "result_text"),
+    text: optionalString(record.text, "text"),
+    error: optionalString(record.error, "error"),
+    is_error: optionalBoolean(record.is_error, "is_error"),
+  };
+}
+
+function assertAgentExecutionStateEvent(
+  record: Record<string, unknown>,
+): AgentExecutionStateEvent {
+  return {
+    ...record,
+    type: "execution.state",
+    execution_id: assertString(record.execution_id, "execution_id"),
+    thread_key: assertString(record.thread_key, "thread_key"),
+    status: assertExecutionStatus(record.status),
+    terminal_reason: optionalTerminalReason(record.terminal_reason, "terminal_reason"),
+    result_text: optionalString(record.result_text, "result_text"),
+    error_text: optionalString(record.error_text, "error_text"),
+    agent_thread_id: optionalString(record.agent_thread_id, "agent_thread_id"),
+  };
+}
+
+function assertFinalDeliveryReadyEvent(record: Record<string, unknown>): FinalDeliveryReadyEvent {
+  return {
+    ...record,
+    type: "final_delivery.ready",
+    execution_id: assertString(record.execution_id, "execution_id"),
+    thread_key: assertString(record.thread_key, "thread_key"),
+    status: assertExecutionStatus(record.status),
+    terminal_reason: optionalTerminalReason(record.terminal_reason, "terminal_reason"),
+    result_text: optionalString(record.result_text, "result_text"),
+    result: optionalString(record.result, "result"),
+    text: optionalString(record.text, "text"),
+    final_text: optionalString(record.final_text, "final_text"),
+    message: optionalString(record.message, "message"),
+    error_text: optionalString(record.error_text, "error_text"),
+  };
+}
+
+function assertExecutionStatus(value: unknown): AgentExecutionStateEvent["status"] {
+  const status = assertString(value, "status");
+  if (
+    status === "queued" ||
+    status === "running" ||
+    status === "retry_wait" ||
+    status === "cancel_requested" ||
+    status === "completed" ||
+    status === "failed_permanent" ||
+    status === "cancelled"
+  ) {
+    return status;
+  }
+  throw new Error(`invalid execution status: ${status}`);
+}
+
+function optionalTerminalReason(
+  value: unknown,
+  field: string,
+): AgentExecutionStateEvent["terminal_reason"] {
+  if (value === undefined || value === null) return undefined;
+  const reason = assertString(value, field);
+  if (
+    reason === "completed" ||
+    reason === "cancel_requested" ||
+    reason === "cancelled" ||
+    reason === "released" ||
+    reason === "harness_error" ||
+    reason === "harness_auth_failed" ||
+    reason === "amp_reconnect_timeout" ||
+    reason === "assignment_missing" ||
+    reason === "execution_error" ||
+    reason === "stream_ended_without_turn_done" ||
+    reason === "hard_deadline_exceeded" ||
+    reason === "silence_deadline_exceeded"
+  ) {
+    return reason;
+  }
+  throw new Error(`invalid terminal reason: ${reason}`);
+}
+
+function optionalString(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return assertString(value, field);
+}
+
+function optionalNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number") throw new Error(`${field} must be a number`);
+  return value;
+}
+
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") throw new Error(`${field} must be a boolean`);
+  return value;
+}
+
+function assertString(value: unknown, field: string): string {
+  if (typeof value !== "string") throw new Error(`${field} must be a string`);
+  return value;
 }

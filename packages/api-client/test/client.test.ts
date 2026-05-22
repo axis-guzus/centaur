@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CentaurClient, type StreamEvent } from "../src/client";
+import { statusFromStreamData, textFromStreamData, type AgentStreamData } from "../src";
 
 async function collectEvents(events: AsyncIterable<StreamEvent>): Promise<StreamEvent[]> {
   const collected: StreamEvent[] = [];
@@ -45,6 +46,9 @@ describe("CentaurClient", () => {
       "id: 13",
       "data: not-json",
       "",
+      "id: 14",
+      'data: {"type":"result","result":{"nested":"not terminal text"}}',
+      "",
       "",
     ].join("\n")));
     vi.stubGlobal("fetch", fetchMock);
@@ -64,6 +68,14 @@ describe("CentaurClient", () => {
         eventId: 13,
         eventKind: "message",
         data: { type: "unknown", raw: "not-json" },
+      },
+      {
+        eventId: 14,
+        eventKind: "message",
+        data: {
+          type: "unknown",
+          raw: '{"type":"result","result":{"nested":"not terminal text"}}',
+        },
       },
     ]);
   });
@@ -229,5 +241,42 @@ describe("CentaurClient", () => {
         error_class: "slack_rate_limit",
       },
     );
+  });
+});
+
+describe("stream payload helpers", () => {
+  it("extracts text from typed assistant, result, and execution-state events", () => {
+    expect(textFromStreamData({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "assistant text" }] },
+    })).toBe("assistant text");
+    expect(textFromStreamData({ type: "result", result: "terminal text" })).toBe(
+      "terminal text",
+    );
+    expect(textFromStreamData({
+      type: "execution.state",
+      execution_id: "exe-1",
+      thread_key: "thread-1",
+      status: "completed",
+      result_text: "state text",
+    })).toBe("state text");
+  });
+
+  it("does not stringify non-string result payloads as final text", () => {
+    const data = {
+      type: "result",
+      result: { nested: "not terminal text" },
+    } as AgentStreamData;
+    expect(textFromStreamData(data)).toBe("");
+  });
+
+  it("extracts execution status only from execution-state events", () => {
+    expect(statusFromStreamData({
+      type: "execution.state",
+      execution_id: "exe-1",
+      thread_key: "thread-1",
+      status: "running",
+    })).toBe("running");
+    expect(statusFromStreamData({ type: "result", result: "done" })).toBe("");
   });
 });

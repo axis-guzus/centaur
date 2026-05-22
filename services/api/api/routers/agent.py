@@ -16,8 +16,33 @@ from fastapi.responses import JSONResponse
 from typing import Any
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
+from api.agent_contracts import (
+    AgentExecutionRecord,
+    AgentInputContentBlock,
+    AgentStatus as AgentStatusResponse,
+    BatchMessageAccepted,
+    BatchMessageItem,
+    BatchMessageRequest,
+    ClaimFinalDeliveryRequest,
+    ExecuteRequest,
+    ExecutionAccepted,
+    ExecutionControlResult,
+    FinalDeliveryClaimResponse,
+    FinalDeliveryMutationResult,
+    MarkFinalDeliveredRequest,
+    MarkFinalFailedRequest,
+    MessageAccepted,
+    MessageRequest,
+    ReleaseRequest,
+    ReleaseThreadResult,
+    RenewFinalDeliveryLeaseRequest,
+    SpawnRequest,
+    SpawnResult,
+    SteerExecutionRequest,
+    ThreadExecutionList,
+)
 from api.agent import (
     get_status,
     stop_session,
@@ -69,7 +94,9 @@ def _enforce_sandbox_thread_scope(request: Request, thread_key: str) -> None:
         return
     allowed = claims.get("thread_key")
     if not sandbox_thread_in_scope(allowed, thread_key):
-        raise HTTPException(status_code=403, detail="Sandbox token is scoped to a different thread")
+        raise HTTPException(
+            status_code=403, detail="Sandbox token is scoped to a different thread"
+        )
 
 
 # ── Known harness flags ─────────────────────────────────────────────────────
@@ -85,7 +112,11 @@ _HARNESS_FLAGS: dict[str, str] = {
 
 _KNOWN_FLAGS = {
     *_HARNESS_FLAGS,
-    "opus", "sonnet", "haiku", "engine", "model",
+    "opus",
+    "sonnet",
+    "haiku",
+    "engine",
+    "model",
 }
 
 
@@ -115,10 +146,17 @@ def parse_harness_from_message(text: str) -> tuple[str | None, str, bool]:
 
     # 3. Strip legacy engine/model flags (no harness effect)
     cleaned = re.sub(
-        r"(^|\s)--(engine|model)\s+[A-Za-z0-9._-]+(?=\s|$)", " ", cleaned, flags=re.IGNORECASE
+        r"(^|\s)--(engine|model)\s+[A-Za-z0-9._-]+(?=\s|$)",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
     )
-    cleaned = re.sub(r"(^|\s)--(opus|sonnet|haiku)(?=\s|$)", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\bmodel\s*=\s*[A-Za-z0-9._-]+\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"(^|\s)--(opus|sonnet|haiku)(?=\s|$)", " ", cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r"\bmodel\s*=\s*[A-Za-z0-9._-]+\b", "", cleaned, flags=re.IGNORECASE
+    )
 
     # 4. Generic --flag → persona/harness name (any unknown flag)
     generic_re = re.compile(r"(^|\s)--([a-z][a-z0-9-]*)(?=\s|$)", re.IGNORECASE)
@@ -136,63 +174,46 @@ def parse_harness_from_message(text: str) -> tuple[str | None, str, bool]:
     return harness, cleaned, explicit
 
 
-class ExecuteRequest(BaseModel):
-    thread_key: str
-    assignment_generation: int | None = None
-    execute_id: str | None = None
-    harness: str | None = None
-    delivery: dict[str, Any] | None = None
-    platform: str | None = None
-    user_id: str | None = None
-    metadata: dict[str, Any] | None = None
-    # Convenience: if message is set and assignment_generation is omitted,
-    # the server auto-orchestrates spawn → message → execute.
-    message: str | None = None
-    engine: str | None = None
-    persona_id: str | None = None
+_AGENT_INPUT_CONTENT_BLOCKS = TypeAdapter(list[AgentInputContentBlock])
 
 
-class SpawnRequest(BaseModel):
-    thread_key: str
-    spawn_id: str | None = None
-    harness: str | None = None
-    engine: str | None = None
-    persona_id: str | None = None
-    agents_md_override: str | None = None
+def _contract_payload(annotation: Any, value: Any) -> Any:
+    adapter = TypeAdapter(annotation)
+    return adapter.dump_python(
+        adapter.validate_python(value), mode="json", exclude_none=True
+    )
 
 
-class MessageRequest(BaseModel):
-    thread_key: str
-    assignment_generation: int
-    message_id: str | None = None
-    event: dict[str, Any] | None = None
-    role: str | None = None
-    parts: list[dict[str, Any]] | None = None
-    user_id: str | None = None
-    metadata: dict[str, Any] | None = None
+def _contract_response(
+    annotation: Any, value: Any, *, status_code: int = 200
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code, content=_contract_payload(annotation, value)
+    )
 
 
-class SteerExecutionRequest(BaseModel):
-    content_blocks: list[dict[str, Any]] | None = None
-    message_id: str | None = None
-    user_id: str | None = None
-    metadata: dict[str, Any] | None = None
+def _dump_input_content_blocks(
+    parts: list[AgentInputContentBlock] | None,
+) -> list[dict[str, Any]]:
+    if not parts:
+        return []
+    return _AGENT_INPUT_CONTENT_BLOCKS.dump_python(
+        parts, mode="json", exclude_none=True
+    )
 
 
-def _normalize_message_event(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
-    if body.get("user_id"):
-        metadata = {**metadata, "user_id": body.get("user_id")}
+def _normalize_message_event(
+    body: MessageRequest | BatchMessageRequest | BatchMessageItem,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    metadata = dict(body.metadata or {})
+    if body.user_id:
+        metadata = {**metadata, "user_id": body.user_id}
 
-    raw_event = body.get("event")
-    if isinstance(raw_event, dict):
-        return raw_event, metadata
+    if body.event is not None:
+        return body.event.model_dump(mode="json", exclude_none=True), metadata
 
-    parts = body.get("parts")
-    if not isinstance(parts, list):
-        parts = []
-
-    role = body.get("role") if isinstance(body.get("role"), str) else "user"
+    parts = _dump_input_content_blocks(body.parts)
+    role = body.role or "user"
     event = {
         "type": "user",
         "message": {
@@ -248,9 +269,12 @@ def _overlay_runtime_payload() -> dict[str, Any]:
     }
 
 
-@router.post("/execute", dependencies=[Depends(require_scope("agent:execute"))])
-async def execute(request: Request):
-    body = ExecuteRequest.model_validate(await request.json())
+@router.post(
+    "/execute",
+    response_model=ExecutionAccepted,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
+async def execute(body: ExecuteRequest, request: Request):
     _enforce_sandbox_thread_scope(request, body.thread_key)
     pool = request.app.state.db_pool
 
@@ -270,11 +294,15 @@ async def execute(request: Request):
             return _json_error(exc.code, exc.message, exc.status_code)
 
     execute_id = body.execute_id or f"exec-{uuid.uuid4().hex[:16]}"
-    delivery = body.delivery or {
-        "channel": "slack",
-        "platform": body.platform or "slack",
-        "recipient_user_id": body.user_id,
-    }
+    delivery = (
+        body.delivery.model_dump(mode="json", exclude_none=True)
+        if body.delivery
+        else {
+            "channel": "slack",
+            "platform": body.platform or "slack",
+            "recipient_user_id": body.user_id,
+        }
+    )
     metadata = body.metadata or {}
     if body.user_id:
         metadata = {**metadata, "user_id": body.user_id}
@@ -292,7 +320,7 @@ async def execute(request: Request):
     except ControlPlaneError as exc:
         return _json_error(exc.code, exc.message, exc.status_code)
 
-    return JSONResponse(status_code=202, content=result)
+    return _contract_response(ExecutionAccepted, result, status_code=202)
 
 
 async def _auto_execute(pool, body: ExecuteRequest) -> JSONResponse:
@@ -339,11 +367,15 @@ async def _auto_execute(pool, body: ExecuteRequest) -> JSONResponse:
 
     # 3. Execute
     execute_id = body.execute_id or f"exec-{nonce}"
-    delivery = body.delivery or {
-        "channel": "dev",
-        "platform": body.platform or "dev",
-        "recipient_user_id": body.user_id,
-    }
+    delivery = (
+        body.delivery.model_dump(mode="json", exclude_none=True)
+        if body.delivery
+        else {
+            "channel": "dev",
+            "platform": body.platform or "dev",
+            "recipient_user_id": body.user_id,
+        }
+    )
 
     result = await enqueue_execution(
         pool,
@@ -355,16 +387,20 @@ async def _auto_execute(pool, body: ExecuteRequest) -> JSONResponse:
         metadata=metadata,
     )
 
-    return JSONResponse(status_code=202, content=result)
+    return _contract_response(ExecutionAccepted, result, status_code=202)
 
 
-@router.post("/spawn", dependencies=[Depends(require_scope("agent:execute"))])
+@router.post(
+    "/spawn",
+    response_model=SpawnResult,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
 async def spawn(req: SpawnRequest, request: Request):
     _enforce_sandbox_thread_scope(request, req.thread_key)
     pool = request.app.state.db_pool
     spawn_id = req.spawn_id or f"spawn-{uuid.uuid4().hex[:16]}"
     try:
-        return await spawn_assignment(
+        result = await spawn_assignment(
             pool,
             thread_key=req.thread_key,
             spawn_id=spawn_id,
@@ -373,19 +409,23 @@ async def spawn(req: SpawnRequest, request: Request):
             persona_id=req.persona_id,
             agents_md_override=req.agents_md_override,
         )
+        return _contract_payload(SpawnResult, result)
     except ControlPlaneError as exc:
         return _json_error(exc.code, exc.message, exc.status_code)
 
 
-@router.post("/message", dependencies=[Depends(require_scope("agent:execute"))])
-async def post_message(request: Request):
-    body = MessageRequest.model_validate(await request.json())
+@router.post(
+    "/message",
+    response_model=MessageAccepted,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
+async def post_message(body: MessageRequest, request: Request):
     _enforce_sandbox_thread_scope(request, body.thread_key)
-    event, metadata = _normalize_message_event(body.model_dump(exclude_none=True))
+    event, metadata = _normalize_message_event(body)
     message_id = body.message_id or f"msg-{uuid.uuid4().hex[:16]}"
     pool = request.app.state.db_pool
     try:
-        return await append_message(
+        result = await append_message(
             pool,
             thread_key=body.thread_key,
             assignment_generation=body.assignment_generation,
@@ -393,12 +433,16 @@ async def post_message(request: Request):
             event=event,
             metadata=metadata,
         )
+        return _contract_payload(MessageAccepted, result)
     except ControlPlaneError as exc:
         return _json_error(exc.code, exc.message, exc.status_code)
 
 
 async def _extract_attachments(
-    pool, thread_key: str, message_id: str, parts: list[dict],
+    pool,
+    thread_key: str,
+    message_id: str,
+    parts: list[dict],
 ) -> list[dict]:
     """Replace inline base64 image/document parts with attachment_ref parts.
 
@@ -418,22 +462,37 @@ async def _extract_attachments(
                 await pool.execute(
                     "INSERT INTO attachments (id, thread_key, message_id, name, mime_type, data) "
                     "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING",
-                    att_id, thread_key, message_id, name, mime_type, raw_bytes,
+                    att_id,
+                    thread_key,
+                    message_id,
+                    name,
+                    mime_type,
+                    raw_bytes,
                 )
-                out.append({
-                    "type": "attachment_ref",
-                    "id": att_id,
-                    "name": name,
-                    "mime_type": mime_type,
-                })
-                log.info("attachment_stored", id=att_id, name=name, mime_type=mime_type, size=len(raw_bytes))
+                out.append(
+                    {
+                        "type": "attachment_ref",
+                        "id": att_id,
+                        "name": name,
+                        "mime_type": mime_type,
+                    }
+                )
+                log.info(
+                    "attachment_stored",
+                    id=att_id,
+                    name=name,
+                    mime_type=mime_type,
+                    size=len(raw_bytes),
+                )
                 continue
         out.append(part)
     return out
 
 
 # URL patterns for auto-archiving
-_DOCSEND_RE = re.compile(r"https?://(?:[\w-]+\.)?docsend\.com/view/(?:s/)?([a-zA-Z0-9]+)")
+_DOCSEND_RE = re.compile(
+    r"https?://(?:[\w-]+\.)?docsend\.com/view/(?:s/)?([a-zA-Z0-9]+)"
+)
 _GDOC_RE = re.compile(
     r"https?://docs\.google\.com/(document|spreadsheets|presentation)/d/([a-zA-Z0-9_-]+)"
 )
@@ -444,7 +503,10 @@ _GDRIVE_FOLDER_RE = re.compile(
 
 _GDOC_EXPORT_FORMATS: dict[str, tuple[str, str]] = {
     "document": ("pdf", "application/pdf"),
-    "spreadsheets": ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "spreadsheets": (
+        "xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
     "presentation": ("pdf", "application/pdf"),
 }
 
@@ -474,7 +536,11 @@ async def _read_and_cleanup(path: str) -> bytes:
 
 
 async def _resolve_urls(
-    pool, thread_key: str, message_id: str, parts: list[dict], request: Request,
+    pool,
+    thread_key: str,
+    message_id: str,
+    parts: list[dict],
+    request: Request,
 ) -> list[dict]:
     """Scan text parts for DocSend / Google Docs / Google Drive URLs.
 
@@ -491,7 +557,9 @@ async def _resolve_urls(
         for m in _DOCSEND_RE.finditer(text):
             urls.append(("docsend", m.group(0), {"doc_id": m.group(1)}))
         for m in _GDOC_RE.finditer(text):
-            urls.append(("gdoc", m.group(0), {"doc_type": m.group(1), "file_id": m.group(2)}))
+            urls.append(
+                ("gdoc", m.group(0), {"doc_type": m.group(1), "file_id": m.group(2)})
+            )
         for m in _GDRIVE_RE.finditer(text):
             urls.append(("gdrive", m.group(0), {"file_id": m.group(1)}))
         for m in _GDRIVE_FOLDER_RE.finditer(text):
@@ -510,13 +578,19 @@ async def _resolve_urls(
             if kind == "docsend":
                 result = await tm.call_tool_raw("docsend", "download", {"url": url})
                 if not isinstance(result, dict):
-                    log.warning("url_resolve_failed", url=url, reason="unexpected result")
+                    log.warning(
+                        "url_resolve_failed", url=url, reason="unexpected result"
+                    )
                     continue
                 if result.get("error") and not result.get("data"):
                     log.warning("url_resolve_failed", url=url, reason=result["error"])
                     continue
                 if result.get("status") != "ok" or not result.get("data"):
-                    log.warning("url_resolve_failed", url=url, reason=result.get("error", "no data"))
+                    log.warning(
+                        "url_resolve_failed",
+                        url=url,
+                        reason=result.get("error", "no data"),
+                    )
                     continue
                 raw_bytes = base64.b64decode(result["data"])
                 filename = result.get("filename", f"docsend_{extra['doc_id']}.pdf")
@@ -525,9 +599,12 @@ async def _resolve_urls(
             elif kind == "gdoc":
                 doc_type = extra["doc_type"]
                 file_id = extra["file_id"]
-                fmt, mime_type = _GDOC_EXPORT_FORMATS.get(doc_type, ("pdf", "application/pdf"))
+                fmt, mime_type = _GDOC_EXPORT_FORMATS.get(
+                    doc_type, ("pdf", "application/pdf")
+                )
                 result = await tm.call_tool_raw(
-                    "gsuite", "drive_export",
+                    "gsuite",
+                    "drive_export",
                     {"file_id": file_id, "export_format": fmt},
                 )
                 if isinstance(result, dict) and result.get("error"):
@@ -540,7 +617,9 @@ async def _resolve_urls(
             elif kind == "gdrive":
                 file_id = extra["file_id"]
                 # Get file metadata first for name/mime
-                meta = await tm.call_tool_raw("gsuite", "drive_get", {"file_id": file_id})
+                meta = await tm.call_tool_raw(
+                    "gsuite", "drive_get", {"file_id": file_id}
+                )
                 if isinstance(meta, dict) and meta.get("error"):
                     log.warning("url_resolve_failed", url=url, reason=meta["error"])
                     continue
@@ -549,7 +628,8 @@ async def _resolve_urls(
 
                 tmp = tempfile.mktemp(prefix=f"gdrive_{file_id}_")
                 result = await tm.call_tool_raw(
-                    "gsuite", "drive_download",
+                    "gsuite",
+                    "drive_download",
                     {"file_id": file_id, "output_path": tmp},
                 )
                 if isinstance(result, dict) and result.get("error"):
@@ -562,19 +642,27 @@ async def _resolve_urls(
                 else:
                     mime_type = "application/octet-stream"
                     name = file_id
-                ext = _MIME_EXT.get(mime_type, mime_type.split("/")[-1] if "/" in mime_type else "bin")
+                ext = _MIME_EXT.get(
+                    mime_type, mime_type.split("/")[-1] if "/" in mime_type else "bin"
+                )
                 filename = f"{name}.{ext}" if "." not in name else name
 
             elif kind == "gdrive_folder":
                 folder_id = extra["folder_id"]
                 files = await tm.call_tool_raw(
-                    "gsuite", "drive_list", {"folder_id": folder_id, "max_results": 50},
+                    "gsuite",
+                    "drive_list",
+                    {"folder_id": folder_id, "max_results": 50},
                 )
                 if isinstance(files, dict) and files.get("error"):
                     log.warning("url_resolve_failed", url=url, reason=files["error"])
                     continue
                 if not isinstance(files, list) or not files:
-                    log.warning("url_resolve_failed", url=url, reason="empty folder or listing failed")
+                    log.warning(
+                        "url_resolve_failed",
+                        url=url,
+                        reason="empty folder or listing failed",
+                    )
                     continue
                 for f in files:
                     f_id = f.get("id", "")
@@ -586,7 +674,9 @@ async def _resolve_urls(
                     try:
                         # Google-native docs need export; binary files use download
                         if f_mime.startswith("application/vnd.google-apps."):
-                            gtype = f_mime.rsplit(".", 1)[-1]  # document, spreadsheet, etc.
+                            gtype = f_mime.rsplit(".", 1)[
+                                -1
+                            ]  # document, spreadsheet, etc.
                             fmt_key = {
                                 "document": "document",
                                 "spreadsheet": "spreadsheets",
@@ -594,13 +684,21 @@ async def _resolve_urls(
                             }.get(gtype)
                             if not fmt_key:
                                 continue
-                            fmt, m_type = _GDOC_EXPORT_FORMATS.get(fmt_key, ("pdf", "application/pdf"))
+                            fmt, m_type = _GDOC_EXPORT_FORMATS.get(
+                                fmt_key, ("pdf", "application/pdf")
+                            )
                             r = await tm.call_tool_raw(
-                                "gsuite", "drive_export",
+                                "gsuite",
+                                "drive_export",
                                 {"file_id": f_id, "export_format": fmt},
                             )
                             if isinstance(r, dict) and r.get("error"):
-                                log.warning("url_resolve_failed", url=url, file=f_name, reason=r["error"])
+                                log.warning(
+                                    "url_resolve_failed",
+                                    url=url,
+                                    file=f_name,
+                                    reason=r["error"],
+                                )
                                 continue
                             f_bytes = await _read_and_cleanup(str(r))
                             f_ext = "xlsx" if fmt == "xlsx" else "pdf"
@@ -610,33 +708,63 @@ async def _resolve_urls(
 
                             tmp = _tf.mktemp(prefix=f"gdrive_{f_id}_")
                             r = await tm.call_tool_raw(
-                                "gsuite", "drive_download",
+                                "gsuite",
+                                "drive_download",
                                 {"file_id": f_id, "output_path": tmp},
                             )
                             if isinstance(r, dict) and r.get("error"):
-                                log.warning("url_resolve_failed", url=url, file=f_name, reason=r["error"])
+                                log.warning(
+                                    "url_resolve_failed",
+                                    url=url,
+                                    file=f_name,
+                                    reason=r["error"],
+                                )
                                 continue
                             f_bytes = await _read_and_cleanup(str(r))
                             m_type = f_mime
-                            f_ext = _MIME_EXT.get(f_mime, f_mime.split("/")[-1] if "/" in f_mime else "bin")
-                            f_filename = f"{f_name}.{f_ext}" if "." not in f_name else f_name
+                            f_ext = _MIME_EXT.get(
+                                f_mime,
+                                f_mime.split("/")[-1] if "/" in f_mime else "bin",
+                            )
+                            f_filename = (
+                                f"{f_name}.{f_ext}" if "." not in f_name else f_name
+                            )
 
                         a_id = f"att-{uuid.uuid4().hex[:16]}"
                         await pool.execute(
                             "INSERT INTO attachments (id, thread_key, message_id, name, mime_type, data) "
                             "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING",
-                            a_id, thread_key, message_id, f_filename, m_type, f_bytes,
+                            a_id,
+                            thread_key,
+                            message_id,
+                            f_filename,
+                            m_type,
+                            f_bytes,
                         )
-                        new_refs.append({
-                            "type": "attachment_ref",
-                            "id": a_id,
-                            "name": f_filename,
-                            "mime_type": m_type,
-                            "source_url": url,
-                        })
-                        log.info("url_resolved", url=url, kind="gdrive_folder_file", att_id=a_id, size=len(f_bytes))
+                        new_refs.append(
+                            {
+                                "type": "attachment_ref",
+                                "id": a_id,
+                                "name": f_filename,
+                                "mime_type": m_type,
+                                "source_url": url,
+                            }
+                        )
+                        log.info(
+                            "url_resolved",
+                            url=url,
+                            kind="gdrive_folder_file",
+                            att_id=a_id,
+                            size=len(f_bytes),
+                        )
                     except Exception:
-                        log.warning("url_resolve_failed", url=url, file=f_name, kind="gdrive_folder_file", exc_info=True)
+                        log.warning(
+                            "url_resolve_failed",
+                            url=url,
+                            file=f_name,
+                            kind="gdrive_folder_file",
+                            exc_info=True,
+                        )
                 continue
 
             else:
@@ -646,16 +774,25 @@ async def _resolve_urls(
             await pool.execute(
                 "INSERT INTO attachments (id, thread_key, message_id, name, mime_type, data) "
                 "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING",
-                att_id, thread_key, message_id, filename, mime_type, raw_bytes,
+                att_id,
+                thread_key,
+                message_id,
+                filename,
+                mime_type,
+                raw_bytes,
             )
-            new_refs.append({
-                "type": "attachment_ref",
-                "id": att_id,
-                "name": filename,
-                "mime_type": mime_type,
-                "source_url": url,
-            })
-            log.info("url_resolved", url=url, kind=kind, att_id=att_id, size=len(raw_bytes))
+            new_refs.append(
+                {
+                    "type": "attachment_ref",
+                    "id": att_id,
+                    "name": filename,
+                    "mime_type": mime_type,
+                    "source_url": url,
+                }
+            )
+            log.info(
+                "url_resolved", url=url, kind=kind, att_id=att_id, size=len(raw_bytes)
+            )
 
         except Exception:
             log.warning("url_resolve_failed", url=url, kind=kind, exc_info=True)
@@ -663,41 +800,43 @@ async def _resolve_urls(
     return [*parts, *new_refs]
 
 
-@router.post("/messages", dependencies=[Depends(require_scope("agent:execute"))])
-async def post_messages(request: Request):
+@router.post(
+    "/messages",
+    response_model=BatchMessageAccepted,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
+async def post_messages(body: BatchMessageRequest, request: Request):
     """Batch variant of /agent/message."""
-    body = await request.json()
-    thread_key = body.get("thread_key")
-    if not thread_key:
-        raise HTTPException(status_code=422, detail="thread_key is required")
-    assignment_generation = body.get("assignment_generation")
-    if assignment_generation is None:
-        raise HTTPException(status_code=422, detail="assignment_generation is required")
+    thread_key = body.thread_key
+    assignment_generation = body.assignment_generation
 
-    raw_messages = body.get("messages") if isinstance(body.get("messages"), list) else None
+    raw_messages = body.messages
     if raw_messages is None:
-        raw_messages = [body]
+        raw_messages = [
+            BatchMessageItem(
+                assignment_generation=assignment_generation,
+                message_id=body.message_id,
+                event=body.event,
+                role=body.role,
+                parts=body.parts,
+                user_id=body.user_id,
+                metadata=body.metadata,
+            )
+        ]
 
     pool = request.app.state.db_pool
     inserted = 0
     stored: list[str] = []
 
     for msg in raw_messages:
-        if not isinstance(msg, dict):
-            continue
-        normalized = {
-            **body,
-            **msg,
-            "thread_key": thread_key,
-            "assignment_generation": msg.get("assignment_generation", assignment_generation),
-        }
-        event, metadata = _normalize_message_event(normalized)
-        message_id = str(msg.get("message_id") or f"msg-{uuid.uuid4().hex[:16]}")
+        msg_generation = msg.assignment_generation or assignment_generation
+        event, metadata = _normalize_message_event(msg)
+        message_id = msg.message_id or f"msg-{uuid.uuid4().hex[:16]}"
         try:
             result = await append_message(
                 pool,
                 thread_key=thread_key,
-                assignment_generation=int(normalized["assignment_generation"]),
+                assignment_generation=msg_generation,
                 message_id=message_id,
                 event=event,
                 metadata=metadata,
@@ -707,12 +846,22 @@ async def post_messages(request: Request):
         except ControlPlaneError as exc:
             return _json_error(exc.code, exc.message, exc.status_code)
 
-    log.info("message_buffered", thread_key=thread_key, message_count=len(raw_messages), inserted=inserted)
-    return {"ok": True, "inserted": inserted, "message_ids": stored}
+    log.info(
+        "message_buffered",
+        thread_key=thread_key,
+        message_count=len(raw_messages),
+        inserted=inserted,
+    )
+    return _contract_payload(
+        BatchMessageAccepted,
+        {"ok": True, "inserted": inserted, "message_ids": stored},
+    )
 
 
 @router.get("/messages", dependencies=[Depends(require_scope("agent:execute"))])
-async def get_messages(request: Request, thread_key: str, cursor: str | None = None, limit: int = 50):
+async def get_messages(
+    request: Request, thread_key: str, cursor: str | None = None, limit: int = 50
+):
     """Paginated chat_messages for a thread."""
     _enforce_sandbox_thread_scope(request, thread_key)
     pool = request.app.state.db_pool
@@ -751,14 +900,18 @@ async def get_messages(request: Request, thread_key: str, cursor: str | None = N
         meta = row["metadata"]
         if isinstance(meta, str):
             meta = _json.loads(meta)
-        messages.append({
-            "id": row["id"],
-            "role": row["role"],
-            "parts": parts,
-            "user_id": row["user_id"],
-            "metadata": meta,
-            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-        })
+        messages.append(
+            {
+                "id": row["id"],
+                "role": row["role"],
+                "parts": parts,
+                "user_id": row["user_id"],
+                "metadata": meta,
+                "created_at": row["created_at"].isoformat()
+                if row["created_at"]
+                else None,
+            }
+        )
 
     return {
         "messages": messages,
@@ -795,7 +948,11 @@ async def set_title(req: TitleRequest, request: Request):
     return {"ok": True}
 
 
-@router.get("/status", dependencies=[Depends(require_scope("agent:status"))])
+@router.get(
+    "/status",
+    response_model=AgentStatusResponse,
+    dependencies=[Depends(require_scope("agent:status"))],
+)
 async def status(request: Request, key: str):
     _enforce_sandbox_thread_scope(request, key)
     result = await get_status(key)
@@ -809,13 +966,15 @@ async def status(request: Request, key: str):
             last_id = session_row["last_delivered_id"]
             if last_id is None:
                 count_row = await pool.fetchrow(
-                    "SELECT COUNT(*) as cnt FROM chat_messages WHERE thread_key = $1", key
+                    "SELECT COUNT(*) as cnt FROM chat_messages WHERE thread_key = $1",
+                    key,
                 )
             else:
                 count_row = await pool.fetchrow(
                     "SELECT COUNT(*) as cnt FROM chat_messages WHERE thread_key = $1 "
                     "AND created_at > (SELECT created_at FROM chat_messages WHERE id = $2)",
-                    key, last_id,
+                    key,
+                    last_id,
                 )
             result["pending_messages"] = count_row["cnt"] if count_row else 0
         else:
@@ -840,7 +999,7 @@ async def status(request: Request, key: str):
             }
     except Exception:
         pass
-    return result
+    return _contract_payload(AgentStatusResponse, result)
 
 
 @router.get("/runtime", dependencies=[Depends(require_scope("agent:status"))])
@@ -850,7 +1009,9 @@ async def runtime(request: Request, key: str):
     persona_id = active["persona_id"] if active else None
     return {
         "thread_key": key,
-        "assignment_generation": int(active["assignment_generation"]) if active else None,
+        "assignment_generation": int(active["assignment_generation"])
+        if active
+        else None,
         "runtime_id": active["runtime_id"] if active else None,
         "harness": active["harness"] if active else None,
         "engine": active["engine"] if active else None,
@@ -861,27 +1022,41 @@ async def runtime(request: Request, key: str):
     }
 
 
-@router.get("/executions/{execution_id}", dependencies=[Depends(require_scope("agent:execute"))])
+@router.get(
+    "/executions/{execution_id}",
+    response_model=AgentExecutionRecord,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
 async def execution_status(request: Request, execution_id: str):
     pool = request.app.state.db_pool
     result = await get_execution(pool, execution_id)
     if not result:
         raise HTTPException(status_code=404, detail="execution not found")
     _enforce_sandbox_thread_scope(request, result["thread_key"])
-    return result
+    return _contract_payload(AgentExecutionRecord, result)
 
 
-@router.get("/threads/{thread_key}/executions", dependencies=[Depends(require_scope("agent:execute"))])
+@router.get(
+    "/threads/{thread_key}/executions",
+    response_model=ThreadExecutionList,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
 async def thread_executions(request: Request, thread_key: str, limit: int = 20):
     _enforce_sandbox_thread_scope(request, thread_key)
     pool = request.app.state.db_pool
-    return {
-        "thread_key": thread_key,
-        "executions": await list_thread_executions(pool, thread_key, limit),
-    }
+    return _contract_payload(
+        ThreadExecutionList,
+        {
+            "thread_key": thread_key,
+            "executions": await list_thread_executions(pool, thread_key, limit),
+        },
+    )
 
 
-@router.get("/threads/{thread_key}/events", dependencies=[Depends(require_scope("agent:execute"))])
+@router.get(
+    "/threads/{thread_key}/events",
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
 async def thread_events(
     request: Request,
     thread_key: str,
@@ -921,7 +1096,10 @@ async def thread_events(
             if not rows:
                 if execution_id:
                     snapshot = await get_execution_terminal_snapshot(pool, execution_id)
-                    if snapshot and snapshot["event_json"].get("thread_key") == thread_key:
+                    if (
+                        snapshot
+                        and snapshot["event_json"].get("thread_key") == thread_key
+                    ):
                         if emitted_rows:
                             return
                         payload = snapshot["event_json"]
@@ -957,28 +1135,32 @@ async def thread_events(
     )
 
 
-class ReleaseRequest(BaseModel):
-    release_id: str | None = None
-    cancel_inflight: bool = False
-
-
-@router.post("/threads/{thread_key}/release", dependencies=[Depends(require_scope("agent:execute"))])
+@router.post(
+    "/threads/{thread_key}/release",
+    response_model=ReleaseThreadResult,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
 async def release_thread(request: Request, thread_key: str, body: ReleaseRequest):
     _enforce_sandbox_thread_scope(request, thread_key)
     pool = request.app.state.db_pool
     release_id = body.release_id or f"rel-{uuid.uuid4().hex[:16]}"
     try:
-        return await release_assignment(
+        result = await release_assignment(
             pool,
             thread_key=thread_key,
             release_id=release_id,
             cancel_inflight=body.cancel_inflight,
         )
+        return _contract_payload(ReleaseThreadResult, result)
     except ControlPlaneError as exc:
         return _json_error(exc.code, exc.message, exc.status_code)
 
 
-@router.post("/executions/{execution_id}/cancel", dependencies=[Depends(require_scope("agent:execute"))])
+@router.post(
+    "/executions/{execution_id}/cancel",
+    response_model=ExecutionControlResult,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
 async def execution_cancel(request: Request, execution_id: str):
     pool = request.app.state.db_pool
     # Resolve the execution's thread first so a sandbox token cannot cancel an
@@ -996,11 +1178,19 @@ async def execution_cancel(request: Request, execution_id: str):
         thread_key=result.get("thread_key"),
         status=result.get("status"),
     )
-    return result
+    return _contract_payload(ExecutionControlResult, result)
 
 
-@router.post("/executions/{execution_id}/steer", dependencies=[Depends(require_scope("agent:execute"))])
-async def steer_execution_endpoint(execution_id: str, request: Request):
+@router.post(
+    "/executions/{execution_id}/steer",
+    response_model=ExecutionControlResult,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
+async def steer_execution_endpoint(
+    execution_id: str,
+    request: Request,
+    body: SteerExecutionRequest | None = None,
+):
     """Steer a running execution with a new user message.
 
     Injects a steer message into the sandbox's stdin, causing Amp to
@@ -1014,36 +1204,34 @@ async def steer_execution_endpoint(execution_id: str, request: Request):
     if not existing:
         raise HTTPException(status_code=404, detail="Execution not found")
     _enforce_sandbox_thread_scope(request, existing["thread_key"])
-    raw_bytes = await request.body()
-    raw_body = _json.loads(raw_bytes) if raw_bytes else {}
-    body = SteerExecutionRequest.model_validate(raw_body)
+    body = body or SteerExecutionRequest()
     metadata = body.metadata or {}
     if body.user_id and "user_id" not in metadata:
         metadata = {**metadata, "user_id": body.user_id}
+    content_blocks = _dump_input_content_blocks(body.content_blocks)
     result = await steer_execution(
         pool,
         execution_id,
-        content_blocks=body.content_blocks,
+        content_blocks=content_blocks if body.content_blocks is not None else None,
         message_id=body.message_id,
         metadata=metadata,
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Execution not found")
-    return JSONResponse(status_code=200, content=result)
+    return _contract_response(ExecutionControlResult, result)
 
 
-class ClaimFinalDeliveryRequest(BaseModel):
-    consumer_id: str
-    limit: int = 1
-    lease_seconds: int = 60
-    platform: str | None = None
-
-
-@router.post("/final-deliveries/claim", dependencies=[Depends(require_scope("agent:execute"))])
+@router.post(
+    "/final-deliveries/claim",
+    response_model=FinalDeliveryClaimResponse,
+    dependencies=[Depends(require_scope("agent:execute"))],
+)
 async def claim_final_delivery(request: Request, body: ClaimFinalDeliveryRequest):
     claims = get_sandbox_claims(request)
     if claims is not None:
-        raise HTTPException(status_code=403, detail="Sandbox tokens cannot claim final deliveries")
+        raise HTTPException(
+            status_code=403, detail="Sandbox tokens cannot claim final deliveries"
+        )
     pool = request.app.state.db_pool
     limit = max(1, min(body.limit, 20))
     lease_seconds = max(15, min(body.lease_seconds, 600))
@@ -1103,18 +1291,16 @@ async def claim_final_delivery(request: Request, body: ClaimFinalDeliveryRequest
             trace_id=row["trace_id"],
             consumer_id=body.consumer_id,
             attempt_count=int(row["attempt_count"]),
-            platform=(delivery or {}).get("platform") if isinstance(delivery, dict) else None,
+            platform=(delivery or {}).get("platform")
+            if isinstance(delivery, dict)
+            else None,
         )
-    return {"deliveries": deliveries}
-
-
-class RenewFinalDeliveryLeaseRequest(BaseModel):
-    consumer_id: str
-    lease_seconds: int = 60
+    return _contract_payload(FinalDeliveryClaimResponse, {"deliveries": deliveries})
 
 
 @router.post(
     "/final-deliveries/{execution_id}/heartbeat",
+    response_model=FinalDeliveryMutationResult,
     dependencies=[Depends(require_scope("agent:execute"))],
 )
 async def renew_final_delivery_lease(
@@ -1138,15 +1324,15 @@ async def renew_final_delivery_lease(
     )
     if not row:
         raise HTTPException(status_code=409, detail="delivery not claimable")
-    return {"ok": True, "execution_id": execution_id}
-
-
-class MarkFinalDeliveredRequest(BaseModel):
-    consumer_id: str | None = None
+    return _contract_payload(
+        FinalDeliveryMutationResult,
+        {"ok": True, "execution_id": execution_id},
+    )
 
 
 @router.post(
     "/final-deliveries/{execution_id}/delivered",
+    response_model=FinalDeliveryMutationResult,
     dependencies=[Depends(require_scope("agent:execute"))],
 )
 async def mark_final_delivered(
@@ -1177,7 +1363,10 @@ async def mark_final_delivered(
             execution_id,
         )
         if existing and existing["state"] == "delivered":
-            return {"ok": True, "execution_id": execution_id, "idempotent": True}
+            return _contract_payload(
+                FinalDeliveryMutationResult,
+                {"ok": True, "execution_id": execution_id, "idempotent": True},
+            )
         raise HTTPException(status_code=409, detail="delivery not claimable")
 
     await pool.execute(
@@ -1199,19 +1388,15 @@ async def mark_final_delivered(
         thread_key=row["thread_key"],
         consumer_id=body.consumer_id,
     )
-    return {"ok": True, "execution_id": execution_id}
-
-
-class MarkFinalFailedRequest(BaseModel):
-    consumer_id: str | None = None
-    error: str
-    retry_after_seconds: int = 15
-    non_retryable: bool = False
-    error_class: str | None = None
+    return _contract_payload(
+        FinalDeliveryMutationResult,
+        {"ok": True, "execution_id": execution_id},
+    )
 
 
 @router.post(
     "/final-deliveries/{execution_id}/failed",
+    response_model=FinalDeliveryMutationResult,
     dependencies=[Depends(require_scope("agent:execute"))],
 )
 async def mark_final_failed(
@@ -1227,7 +1412,10 @@ async def mark_final_failed(
         error_class=body.error_class,
     )
     if active_lease_required and not body.consumer_id:
-        raise HTTPException(status_code=409, detail="non-retryable delivery failures require an active lease")
+        raise HTTPException(
+            status_code=409,
+            detail="non-retryable delivery failures require an active lease",
+        )
     owner_check = ""
     params: list[Any] = [execution_id, last_error]
     if body.consumer_id:
@@ -1290,7 +1478,10 @@ async def mark_final_failed(
             error_class=body.error_class,
             non_retryable=body.non_retryable,
         )
-    return {"ok": True, "execution_id": execution_id}
+    return _contract_payload(
+        FinalDeliveryMutationResult,
+        {"ok": True, "execution_id": execution_id},
+    )
 
 
 @router.get("/pool", dependencies=[Depends(require_scope("admin"))])
@@ -1311,7 +1502,9 @@ async def list_threads(request: Request, limit: int = 200):
     """List threads with summary info."""
     claims = get_sandbox_claims(request)
     if claims is not None:
-        raise HTTPException(status_code=403, detail="Sandbox tokens cannot list all threads")
+        raise HTTPException(
+            status_code=403, detail="Sandbox tokens cannot list all threads"
+        )
     pool = request.app.state.db_pool
     limit = min(limit, 500)
     rows = await pool.fetch(
@@ -1354,17 +1547,23 @@ async def list_threads(request: Request, limit: int = 200):
 
     threads = []
     for row in rows:
-        threads.append({
-            "slack_thread_key": row["thread_key"],
-            "harness": row["harness"],
-            "state": row["state"],
-            "created_at": row["created_at"].timestamp() if row["created_at"] else None,
-            "last_activity": row["last_activity"].timestamp() if row["last_activity"] else None,
-            "turn_count": row["message_count"],
-            "first_message": _extract_text(row["first_user_parts"]),
-            "last_user_message": _extract_text(row["last_user_parts"]),
-            "thread_name": row["thread_name"],
-        })
+        threads.append(
+            {
+                "slack_thread_key": row["thread_key"],
+                "harness": row["harness"],
+                "state": row["state"],
+                "created_at": row["created_at"].timestamp()
+                if row["created_at"]
+                else None,
+                "last_activity": row["last_activity"].timestamp()
+                if row["last_activity"]
+                else None,
+                "turn_count": row["message_count"],
+                "first_message": _extract_text(row["first_user_parts"]),
+                "last_user_message": _extract_text(row["last_user_parts"]),
+                "thread_name": row["thread_name"],
+            }
+        )
 
     return {"threads": threads}
 
@@ -1419,7 +1618,9 @@ async def thread_detail(request: Request, key: str):
         "harness": row["harness"],
         "state": row["state"],
         "created_at": row["created_at"].timestamp() if row["created_at"] else None,
-        "last_activity": row["last_activity"].timestamp() if row["last_activity"] else None,
+        "last_activity": row["last_activity"].timestamp()
+        if row["last_activity"]
+        else None,
         "message_count": row["message_count"],
         "last_user_message": _extract_text(row["last_user_parts"]),
         "thread_name": row["thread_name"],
@@ -1482,7 +1683,7 @@ async def thread_detail(request: Request, key: str):
                     c = tu.get("cost_usd")
                     if isinstance(c, (int, float)):
                         total_cost += c
-                    for m in (tu.get("models") or []):
+                    for m in tu.get("models") or []:
                         if isinstance(m, str):
                             models.add(m)
 
@@ -1490,7 +1691,10 @@ async def thread_detail(request: Request, key: str):
             for part in parts:
                 if not isinstance(part, dict):
                     continue
-                if part.get("type") == "data-user-message" or part.get("type") == "data-context-message":
+                if (
+                    part.get("type") == "data-user-message"
+                    or part.get("type") == "data-context-message"
+                ):
                     data = part.get("data") or {}
                     uid = data.get("user_id")
                     if uid and isinstance(uid, str) and uid.strip():
@@ -1498,7 +1702,9 @@ async def thread_detail(request: Request, key: str):
                         if uid not in participants:
                             participants[uid] = {
                                 "id": uid,
-                                "name": data.get("user_name") or data.get("name") or uid,
+                                "name": data.get("user_name")
+                                or data.get("name")
+                                or uid,
                                 "username": data.get("username"),
                                 "avatar_url": data.get("avatar_url"),
                             }
@@ -1517,18 +1723,22 @@ async def thread_detail(request: Request, key: str):
                         c = tu.get("cost_usd")
                         if isinstance(c, (int, float)):
                             total_cost += c
-                        for m in (tu.get("models") or []):
+                        for m in tu.get("models") or []:
                             if isinstance(m, str):
                                 models.add(m)
 
     detail["participants"] = list(participants.values())
-    detail["token_usage"] = {
-        "total_tokens": total_tokens,
-        "input_tokens": total_input or None,
-        "output_tokens": total_output or None,
-        "cost_usd": total_cost if total_cost > 0 else None,
-        "models": sorted(models),
-    } if has_usage else None
+    detail["token_usage"] = (
+        {
+            "total_tokens": total_tokens,
+            "input_tokens": total_input or None,
+            "output_tokens": total_output or None,
+            "cost_usd": total_cost if total_cost > 0 else None,
+            "models": sorted(models),
+        }
+        if has_usage
+        else None
+    )
 
     return detail
 
@@ -1536,13 +1746,29 @@ async def thread_detail(request: Request, key: str):
 # ── Internal DB query (read-only) ───────────────────────────────────────────
 
 _ALLOWED_TABLES = {
-    "chat_messages", "sandbox_sessions", "attachments", "api_keys",
-    "agent_runtime_assignments", "agent_message_requests",
-    "agent_execution_requests", "agent_execution_events",
-    "agent_final_delivery_outbox", "agent_spawn_requests",
+    "chat_messages",
+    "sandbox_sessions",
+    "attachments",
+    "api_keys",
+    "agent_runtime_assignments",
+    "agent_message_requests",
+    "agent_execution_requests",
+    "agent_execution_events",
+    "agent_final_delivery_outbox",
+    "agent_spawn_requests",
     "agent_release_requests",
 }
-_BLOCKED_PATTERNS = {"drop ", "delete ", "insert ", "update ", "alter ", "create ", "truncate ", "grant ", "revoke "}
+_BLOCKED_PATTERNS = {
+    "drop ",
+    "delete ",
+    "insert ",
+    "update ",
+    "alter ",
+    "create ",
+    "truncate ",
+    "grant ",
+    "revoke ",
+}
 
 
 @router.post("/query", dependencies=[Depends(verify_api_key)])
@@ -1553,7 +1779,9 @@ async def query_db(request: Request):
     """
     claims = get_sandbox_claims(request)
     if claims is not None:
-        raise HTTPException(status_code=403, detail="Sandbox tokens cannot run direct queries")
+        raise HTTPException(
+            status_code=403, detail="Sandbox tokens cannot run direct queries"
+        )
     body = await request.json()
     sql = (body.get("sql") or "").strip()
     if not sql:
@@ -1564,7 +1792,9 @@ async def query_db(request: Request):
         raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
     for pat in _BLOCKED_PATTERNS:
         if pat in sql_lower:
-            raise HTTPException(status_code=400, detail=f"Query contains blocked keyword: {pat.strip()}")
+            raise HTTPException(
+                status_code=400, detail=f"Query contains blocked keyword: {pat.strip()}"
+            )
 
     pool = request.app.state.db_pool
     try:

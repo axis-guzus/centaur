@@ -1,11 +1,5 @@
 import type { SlackEnvelope } from './types'
 
-type SlackEventWithTeam = {
-  team?: unknown
-  user_team?: unknown
-  source_team?: unknown
-}
-
 export type SlackOrgAuthorizationDecision = {
   ok: boolean
   externalTeamId?: string
@@ -31,9 +25,9 @@ export function authorizeSlackOrg(opts: {
 
 function externalSlackTeamId(envelope: SlackEnvelope): string | undefined {
   const homeTeamId = envelope.team_id
-  if (!homeTeamId || !isRecord(envelope.event)) return undefined
+  const event = envelope.event
+  if (!homeTeamId || !event) return undefined
 
-  const event = envelope.event as SlackEventWithTeam
   const candidates = [event.user_team, event.source_team, event.team]
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate && candidate !== homeTeamId) {
@@ -41,8 +35,4 @@ function externalSlackTeamId(envelope: SlackEnvelope): string | undefined {
     }
   }
   return undefined
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }

@@ -1,23 +1,12 @@
 import type { WebClient } from '@slack/web-api'
-import type { NormalizedPart, NormalizedSlackEvent, SlackEnvelope, SlackMessageFile } from './types'
-
-type SlackMessageEvent = {
-  type?: string
-  subtype?: string
-  user?: string
-  user_team?: string
-  source_team?: string
-  bot_id?: string
-  channel?: string
-  channel_type?: string
-  team?: string
-  text?: string
-  ts?: string
-  thread_ts?: string
-  event_ts?: string
-  blocks?: unknown[]
-  files?: SlackMessageFile[]
-}
+import type { AnyBlock } from '@slack/types'
+import type {
+  NormalizedPart,
+  NormalizedSlackEvent,
+  SlackEnvelope,
+  SlackEnvelopeEvent,
+  SlackMessageFile
+} from './types'
 
 type SlackThreadMessage = {
   type?: string
@@ -26,7 +15,7 @@ type SlackThreadMessage = {
   bot_id?: string
   text?: string
   ts?: string
-  blocks?: unknown[]
+  blocks?: AnyBlock[]
   files?: SlackMessageFile[]
 }
 
@@ -38,7 +27,7 @@ export async function normalizeSlackEnvelope(opts: {
   client: WebClient
 }): Promise<NormalizedSlackEvent | null> {
   if (opts.envelope.type !== 'event_callback') return null
-  const event = opts.envelope.event as SlackMessageEvent | undefined
+  const event = opts.envelope.event
   if (!event || !isMessageLikeEvent(event)) return null
   if (event.type === 'message' && event.subtype === 'file_share') return null
   if (event.subtype && event.subtype !== 'file_share') return null
@@ -95,14 +84,14 @@ export async function normalizeSlackEnvelope(opts: {
   }
 }
 
-function recipientSlackTeamId(event: SlackMessageEvent): string | undefined {
+function recipientSlackTeamId(event: SlackEnvelopeEvent): string | undefined {
   for (const candidate of [event.user_team, event.source_team, event.team]) {
     if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
   }
   return undefined
 }
 
-function isMessageLikeEvent(event: SlackMessageEvent): boolean {
+function isMessageLikeEvent(event: SlackEnvelopeEvent): boolean {
   return event.type === 'message' || event.type === 'app_mention'
 }
 
@@ -213,53 +202,68 @@ export function normalizeSlackText(input: string, botUserId?: string): string {
     .trim()
 }
 
-function normalizeRichTextBlocks(blocks: unknown[] | undefined): string {
+function normalizeRichTextBlocks(blocks: AnyBlock[] | undefined): string {
   if (!Array.isArray(blocks)) return ''
   return blocks.map(normalizeBlock).filter(Boolean).join('\n').trim()
 }
 
-function normalizeBlock(block: unknown): string {
-  if (!isRecord(block)) return ''
-  if (block.type === 'rich_text' && Array.isArray(block.elements)) {
-    return block.elements.map(normalizeRichTextContainer).filter(Boolean).join('\n')
+function normalizeBlock(block: AnyBlock): string {
+  let record: Record<string, unknown>
+  try {
+    record = assertRecord(block)
+  } catch {
+    return ''
+  }
+  if (record.type === 'rich_text' && Array.isArray(record.elements)) {
+    return record.elements.map(normalizeRichTextContainer).filter(Boolean).join('\n')
   }
   return ''
 }
 
 function normalizeRichTextContainer(container: unknown): string {
-  if (!isRecord(container)) return ''
-  if (container.type === 'rich_text_section' && Array.isArray(container.elements)) {
-    return container.elements.map(normalizeRichTextElement).join('')
+  let record: Record<string, unknown>
+  try {
+    record = assertRecord(container)
+  } catch {
+    return ''
   }
-  if (container.type === 'rich_text_list' && Array.isArray(container.elements)) {
-    return container.elements.map(element => `- ${normalizeRichTextContainer(element)}`).join('\n')
+  if (record.type === 'rich_text_section' && Array.isArray(record.elements)) {
+    return record.elements.map(normalizeRichTextElement).join('')
   }
-  if (container.type === 'rich_text_quote' && Array.isArray(container.elements)) {
-    return container.elements.map(normalizeRichTextElement).join('')
+  if (record.type === 'rich_text_list' && Array.isArray(record.elements)) {
+    return record.elements.map(element => `- ${normalizeRichTextContainer(element)}`).join('\n')
   }
-  if (container.type === 'rich_text_preformatted' && Array.isArray(container.elements)) {
-    return container.elements.map(normalizeRichTextElement).join('')
+  if (record.type === 'rich_text_quote' && Array.isArray(record.elements)) {
+    return record.elements.map(normalizeRichTextElement).join('')
+  }
+  if (record.type === 'rich_text_preformatted' && Array.isArray(record.elements)) {
+    return record.elements.map(normalizeRichTextElement).join('')
   }
   return ''
 }
 
 function normalizeRichTextElement(element: unknown): string {
-  if (!isRecord(element)) return ''
-  switch (element.type) {
+  let record: Record<string, unknown>
+  try {
+    record = assertRecord(element)
+  } catch {
+    return ''
+  }
+  switch (record.type) {
     case 'text':
-      return typeof element.text === 'string' ? element.text : ''
+      return typeof record.text === 'string' ? record.text : ''
     case 'link':
-      return typeof element.text === 'string'
-        ? `${element.text} (${stringField(element.url)})`
-        : stringField(element.url)
+      return typeof record.text === 'string'
+        ? `${record.text} (${stringField(record.url)})`
+        : stringField(record.url)
     case 'user':
-      return `@${stringField(element.user_id)}`
+      return `@${stringField(record.user_id)}`
     case 'channel':
-      return `#${stringField(element.channel_id)}`
+      return `#${stringField(record.channel_id)}`
     case 'emoji':
-      return `:${stringField(element.name)}:`
+      return `:${stringField(record.name)}:`
     case 'broadcast':
-      return `@${stringField(element.range)}`
+      return `@${stringField(record.range)}`
     default:
       return ''
   }
@@ -316,10 +320,22 @@ function isDocumentMime(mimeType: string): boolean {
   )
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
+function assertRecord(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('expected object')
+  }
+  return value as Record<string, unknown>
 }
 
 function stringField(value: unknown): string {
-  return typeof value === 'string' ? value : ''
+  try {
+    return assertString(value)
+  } catch {
+    return ''
+  }
+}
+
+function assertString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('expected string')
+  return value
 }

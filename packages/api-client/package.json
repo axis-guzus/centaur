@@ -5,6 +5,7 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
+    "generate:types": "UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/uv-cache} uv run --no-project --with pydantic python scripts/generate-agent-types.py",
     "test": "vitest run",
     "test:watch": "vitest"
   },

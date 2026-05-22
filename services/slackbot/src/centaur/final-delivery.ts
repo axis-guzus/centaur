@@ -1,4 +1,9 @@
 import type { WebClient } from "@slack/web-api";
+import type {
+  FinalDeliveryClaimResponse,
+  FinalDeliveryPayload,
+  FinalDeliveryRecord,
+} from "@centaur/api-client";
 import { centaurApiKey, type AppConfig } from "../config";
 import { slackReplyLimits } from "../constants";
 import { logError } from "../logging";
@@ -21,6 +26,16 @@ const NON_RETRYABLE_SLACK_ERRORS = new Set([
   "channel_type_not_supported",
 ]);
 
+type SlackMessageMetadata = {
+  event_type?: string;
+  event_payload?: {
+    execution_id?: string;
+    chunk_index?: number | string;
+    chunk_count?: number | string;
+  };
+};
+type ApiBody = Record<string, unknown>;
+
 export function startFinalDeliveryPoller(
   config: AppConfig,
   client: WebClient,
@@ -41,15 +56,13 @@ export async function pollFinalDeliveriesOnce(
   config: AppConfig,
   client: WebClient,
 ): Promise<void> {
-  const claimed = await centaur(config, "/agent/final-deliveries/claim", {
+  const claimed = await centaur<FinalDeliveryClaimResponse>(config, "/agent/final-deliveries/claim", {
     consumer_id: CONSUMER_ID,
     platform: "slack",
     limit: 5,
     lease_seconds: 60,
   });
-  const deliveries = Array.isArray(claimed.deliveries)
-    ? claimed.deliveries
-    : [];
+  const deliveries = Array.isArray(claimed.deliveries) ? claimed.deliveries : [];
   for (const delivery of deliveries) {
     await withLaminarSpan(
       "centaur.slackbot.final_delivery",
@@ -90,9 +103,9 @@ export async function pollFinalDeliveriesOnce(
   }
 }
 
-async function deliver(client: WebClient, delivery: any): Promise<void> {
+async function deliver(client: WebClient, delivery: FinalDeliveryRecord): Promise<void> {
   const meta = delivery.delivery ?? {};
-  const payload = delivery.final_payload ?? {};
+  const payload: FinalDeliveryPayload = delivery.final_payload ?? {};
   const target = targetFromDelivery(delivery);
   const channel = meta.channel_id ?? meta.channel ?? target.channel;
   const threadTs = meta.thread_ts ?? target.threadTs;
@@ -108,8 +121,8 @@ async function deliver(client: WebClient, delivery: any): Promise<void> {
   );
 }
 
-function executionId(delivery: any): string {
-  return String(delivery?.execution_id ?? "");
+function executionId(delivery: FinalDeliveryRecord): string {
+  return delivery.execution_id;
 }
 
 async function postFollowups(
@@ -157,15 +170,10 @@ async function postedChunkIndexes(
     });
     if (!response.ok || !Array.isArray(response.messages)) return new Set();
     const indexes = response.messages
-      .map((message: any) => message?.metadata)
-      .filter(
-        (metadata: any) => metadata?.event_type === FINAL_DELIVERY_CHUNK_EVENT,
-      )
-      .filter(
-        (metadata: any) =>
-          metadata?.event_payload?.execution_id === executionId,
-      )
-      .map((metadata: any) => Number(metadata.event_payload.chunk_index))
+      .map(message => metadataFromSlackMessage(message))
+      .filter(metadata => metadata?.event_type === FINAL_DELIVERY_CHUNK_EVENT)
+      .filter(metadata => metadata?.event_payload?.execution_id === executionId)
+      .map(metadata => Number(metadata?.event_payload?.chunk_index))
       .filter((index: number) => Number.isInteger(index) && index >= 0);
     return new Set(indexes);
   } catch {
@@ -189,32 +197,31 @@ function chunkMetadata(
   };
 }
 
-function extractText(payload: any): string {
+function extractText(payload: FinalDeliveryPayload | ApiBody): string {
   const value = firstNonEmpty(
-    payload?.result_text,
-    payload?.result,
-    payload?.text,
-    payload?.final_text,
-    payload?.message,
+    stringField(payload.result_text),
+    stringField(payload.result),
+    stringField(payload.text),
+    stringField(payload.final_text),
+    stringField(payload.message),
   );
   if (value) return value;
 
-  const executionId = String(payload?.execution_id ?? "").trim();
+  const executionId = (stringField(payload.execution_id) ?? "").trim();
   const suffix = executionId ? ` Execution: \`${executionId}\`.` : "";
   return `Execution completed, but no final text was captured.${suffix}`;
 }
 
-function firstNonEmpty(...values: unknown[]): string {
+function firstNonEmpty(...values: Array<string | undefined>): string {
   for (const value of values) {
-    const text =
-      value === undefined || value === null ? "" : String(value).trim();
+    const text = value === undefined ? "" : value.trim();
     if (text) return text;
   }
   return "";
 }
 
-function continuationText(payload: any, text: string): string | null {
-  const rawOffset = Number(payload?.slackbot_streamed_answer_chars);
+function continuationText(payload: FinalDeliveryPayload | ApiBody, text: string): string | null {
+  const rawOffset = Number(payload.slackbot_streamed_answer_chars);
   if (!Number.isFinite(rawOffset) || rawOffset <= 0) return null;
   const offset = Math.floor(rawOffset);
   if (offset >= text.length) return null;
@@ -258,17 +265,17 @@ function slackDeliveryErrorClass(error: unknown): string | null {
 
 function slackDeliveryErrorFingerprint(error: unknown): string {
   const parts = [slackDeliveryErrorMessage(error)];
-  const data = (error as { data?: unknown })?.data;
-  if (data && typeof data === "object") {
-    const slackError = (data as { error?: unknown }).error;
-    if (slackError) parts.push(String(slackError));
+  const data = errorData(error);
+  if (data) {
+    const slackError = data.error;
+    if (slackError !== undefined) parts.push(String(slackError));
   }
-  const code = (error as { code?: unknown })?.code;
-  if (code) parts.push(String(code));
+  const code = errorCode(error);
+  if (code !== undefined) parts.push(String(code));
   return parts.join(" ");
 }
 
-function targetFromDelivery(delivery: any): {
+function targetFromDelivery(delivery: FinalDeliveryRecord): {
   teamId?: string;
   channel?: string;
   threadTs?: string;
@@ -288,9 +295,21 @@ function targetFromDelivery(delivery: any): {
 async function centaur(
   config: AppConfig,
   path: string,
-  body: unknown,
-  trace?: any,
-): Promise<any> {
+  body: ApiBody,
+  trace?: FinalDeliveryRecord,
+): Promise<ApiBody>;
+async function centaur<T>(
+  config: AppConfig,
+  path: string,
+  body: ApiBody,
+  trace?: FinalDeliveryRecord,
+): Promise<T>;
+async function centaur<T>(
+  config: AppConfig,
+  path: string,
+  body: ApiBody,
+  trace?: FinalDeliveryRecord,
+): Promise<T> {
   const apiKey = centaurApiKey(config);
   const traceHeaders = centaurTraceHeaders(trace);
   const response = await fetch(new URL(path, config.CENTAUR_API_URL), {
@@ -303,18 +322,16 @@ async function centaur(
     body: JSON.stringify(body),
   });
   const text = await response.text();
-  const parsed: any = text ? JSON.parse(text) : {};
+  const parsed = parseApiBody(text);
   if (!response.ok)
     throw new Error(
-      parsed?.detail?.message ??
-        parsed?.detail ??
-        parsed?.error ??
+      errorMessageFromCentaurBody(parsed) ??
         response.statusText,
     );
-  return parsed;
+  return parsed as T;
 }
 
-function centaurTraceHeaders(trace: any): Record<string, string> {
+function centaurTraceHeaders(trace: FinalDeliveryRecord | undefined): Record<string, string> {
   const traceId = String(trace?.trace_id ?? "").trim();
   const threadKey = String(trace?.thread_key ?? "").trim();
   const traceparent = String(trace?.traceparent ?? "").trim();
@@ -323,4 +340,76 @@ function centaurTraceHeaders(trace: any): Record<string, string> {
     ...(threadKey ? { "X-Centaur-Thread-Key": threadKey } : {}),
     ...(traceparent ? { traceparent } : {}),
   };
+}
+
+function metadataFromSlackMessage(message: { metadata?: SlackMessageMetadata } | undefined): SlackMessageMetadata | undefined {
+  return message?.metadata;
+}
+
+function stringField(value: unknown): string | undefined {
+  try {
+    return assertString(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function errorData(error: unknown): ApiBody | null {
+  try {
+    return assertApiBody(assertApiBody(error).data);
+  } catch {
+    return null;
+  }
+}
+
+function errorCode(error: unknown): string | number | boolean | null | undefined {
+  let code: unknown;
+  try {
+    code = assertApiBody(error).code;
+  } catch {
+    return undefined;
+  }
+  if (
+    typeof code === "string" ||
+    typeof code === "number" ||
+    typeof code === "boolean" ||
+    code === null
+  ) {
+    return code;
+  }
+  return undefined;
+}
+
+function parseApiBody(text: string): ApiBody {
+  if (!text) return {};
+  try {
+    return assertApiBody(JSON.parse(text) as unknown);
+  } catch {
+    return {};
+  }
+}
+
+function errorMessageFromCentaurBody(body: ApiBody): string | undefined {
+  const detail = body.detail;
+  if (typeof detail === "string") return detail;
+  try {
+    const detailBody = assertApiBody(detail);
+    const message = detailBody.message;
+    if (typeof message === "string") return message;
+  } catch {
+    // detail may be a non-object API error shape
+  }
+  return typeof body.error === "string" ? body.error : undefined;
+}
+
+function assertApiBody(value: unknown): ApiBody {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("expected API body object");
+  }
+  return value as ApiBody;
+}
+
+function assertString(value: unknown): string {
+  if (typeof value !== "string") throw new Error("expected string");
+  return value;
 }
