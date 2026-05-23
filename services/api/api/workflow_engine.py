@@ -51,6 +51,7 @@ from api.vm_metrics import (
     record_workflow_run_enqueued,
     record_workflow_run_terminal,
 )
+from api.webhooks import clear_webhook_specs, register_workflow_webhooks
 from api.laminar_tracing import set_trace_context, start_span
 from api.trace_context import get_or_create_thread_trace_id
 
@@ -1482,6 +1483,19 @@ def _load_workflow_file(
             schedule=schedule,
         )
         discovered[wf_name] = str(py_file)
+        try:
+            register_workflow_webhooks(
+                wf_name,
+                str(py_file),
+                getattr(mod, "WEBHOOKS", None),
+            )
+        except Exception:
+            log.warning(
+                "workflow_webhook_registration_failed",
+                workflow_name=wf_name,
+                file=str(py_file),
+                exc_info=True,
+            )
     except Exception:
         log.warning("workflow_handler_load_failed", file=str(py_file), exc_info=True)
 
@@ -1505,6 +1519,7 @@ def discover_workflow_handlers() -> dict[str, str]:
     """
     global _WORKFLOW_HANDLERS
     _WORKFLOW_HANDLERS.clear()
+    clear_webhook_specs()
     discovered: dict[str, str] = {}
 
     # 1. Built-in workflows (api.workflows package)
