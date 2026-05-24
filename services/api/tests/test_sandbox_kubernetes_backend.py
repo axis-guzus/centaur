@@ -255,7 +255,10 @@ def test_container_env_passes_proxy_local_auth_only_when_enabled(
     )
 
     assert codex_env["CODEX_USE_LOCAL_AUTH"] == "true"
-    assert codex_env["CODEX_AUTH_JSON_FILE"] == "/harness-auth/codex-auth.json"
+    assert codex_env["CODEX_PROXY_AUTH"] == "true"
+    assert codex_env["OPENAI_API_KEY"] == ""
+    assert codex_env["CODEX_API_KEY"] == ""
+    assert "CODEX_AUTH_JSON_FILE" not in codex_env
     assert "CLAUDE_USE_LOCAL_AUTH" not in codex_env
     assert "CODEX_USE_LOCAL_AUTH" not in claude_env
     assert claude_env["CLAUDE_USE_LOCAL_AUTH"] == "true"
@@ -305,6 +308,7 @@ def test_container_env_filters_raw_local_auth_from_extra_env(
     local_auth_env = {
         "CODEX_USE_LOCAL_AUTH": "true",
         "CODEX_AUTH_JSON": "codex-secret",
+        "CODEX_AUTH_JSON_SECRET_REF": "op://vault/item/field",
         "CODEX_ACCESS_TOKEN": "codex-token",
         "CODEX_PROXY_AUTH": "true",
         "CLAUDE_USE_LOCAL_AUTH": "true",
@@ -348,9 +352,7 @@ def test_harness_auth_secret_sources_are_engine_scoped(
     monkeypatch.setenv("CODEX_USE_LOCAL_AUTH", "true")
     monkeypatch.setenv("CLAUDE_USE_LOCAL_AUTH", "true")
 
-    assert secret_items("codex") == [
-        ("custom-harness-auth", "CODEX_AUTH_JSON", "codex-auth.json")
-    ]
+    assert secret_items("codex") == []
     assert secret_items("claude-code") == []
     assert secret_items("amp") == []
 
@@ -372,7 +374,10 @@ def test_harness_auth_secret_sources_are_engine_scoped(
 def test_harness_proxy_auth_secrets_are_engine_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from api.sandbox.kubernetes import _harness_proxy_auth_secrets
+    from api.sandbox.kubernetes import (
+        _harness_codex_auth_json_secret_ref,
+        _harness_proxy_auth_secrets,
+    )
 
     monkeypatch.setenv("CODEX_USE_LOCAL_AUTH", "true")
     monkeypatch.setenv("CLAUDE_USE_LOCAL_AUTH", "true")
@@ -380,6 +385,7 @@ def test_harness_proxy_auth_secrets_are_engine_scoped(
     claude = _harness_proxy_auth_secrets("claude-code")
 
     assert _harness_proxy_auth_secrets("codex") == []
+    assert _harness_codex_auth_json_secret_ref("codex") == "CODEX_AUTH_JSON"
     assert len(claude) == 1
     secret = claude[0]
     assert secret.name == "CLAUDE_CODE_OAUTH"
@@ -396,6 +402,7 @@ def test_harness_proxy_auth_secrets_are_engine_scoped(
 
     monkeypatch.setenv("HARNESS_LOCAL_AUTH_TRANSPORT", "file")
     assert _harness_proxy_auth_secrets("codex") == []
+    assert _harness_codex_auth_json_secret_ref("codex") is None
 
 
 def test_proxy_pod_spec_can_receive_harness_auth_keys(

@@ -48,10 +48,9 @@ Secret from your shell environment.
 
 Most harness credentials should stay in [iron-proxy](https://docs.iron.sh)'s
 secret source as API keys. Codex and Claude Code local OAuth/subscription auth
-is different: Codex requires a local auth file, while Claude Code can use a
-refresh token minted by iron-proxy. When enabled, Centaur reads opaque auth
-payloads from a separate harness auth Secret and scopes them to the matching
-provider runtime.
+is different: Codex proxy auth keeps the real auth file in a writable 1Password
+field owned by iron-proxy, while Claude Code can use a refresh token minted by
+iron-proxy. File transport remains available for local fallback.
 
 Use `bun run auth:bootstrap` to import local payloads into `.env.local`, then
 `source .env.local` before `just bootstrap-secrets`. Use
@@ -62,7 +61,7 @@ Optional payload keys:
 
 | Secret | Notes |
 |--------|-------|
-| `CODEX_AUTH_JSON` | Copied from `~/.codex/auth.json`. |
+| `CODEX_AUTH_JSON` | Copied from `~/.codex/auth.json`; for proxy transport, store this in the configured 1Password field for iron-proxy writeback. |
 | `CLAUDE_CODE_OAUTH_CLIENT_ID` | Claude Code public OAuth client id for iron-proxy. |
 | `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` | Claude Code OAuth refresh token imported from macOS Keychain, `$CLAUDE_CONFIG_DIR/.credentials.json`, or `~/.claude/.credentials.json`. |
 | `CLAUDE_CREDENTIALS_JSON` | Optional Claude Code credentials payload for file transport. |
@@ -72,9 +71,9 @@ Optional payload keys:
 through its `envFrom` import.
 
 Enable use with sandbox flags such as `CODEX_USE_LOCAL_AUTH=true` and
-`CLAUDE_USE_LOCAL_AUTH=true`. Codex auth is intentionally available inside the
-selected Codex sandbox. Claude proxy auth is available to that sandbox's
-iron-proxy sidecar instead of the sandbox container itself.
+`CLAUDE_USE_LOCAL_AUTH=true`. With proxy transport, Codex and Claude auth are
+available to that sandbox's iron-proxy sidecar instead of the sandbox container
+itself.
 
 Claude Code subscription credentials contain a refresh token that can rotate.
 Use Console API keys or an auth helper/gateway for fleet-style concurrency.

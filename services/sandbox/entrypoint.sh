@@ -209,7 +209,15 @@ fi
 
 CODEX_LOCAL_AUTH_LOADED=0
 if truthy_env "${CODEX_USE_LOCAL_AUTH:-}"; then
-    if [ -n "${CODEX_AUTH_JSON_FILE:-}" ] && [ -r "$CODEX_AUTH_JSON_FILE" ]; then
+    if truthy_env "${CODEX_PROXY_AUTH:-}"; then
+        mkdir -p "$HOME_DIR/.codex"
+        cat > "$HOME_DIR/.codex/auth.json" <<'JSON'
+{"auth_mode":"chatgpt","last_refresh":"1970-01-01T00:00:00Z","tokens":{"access_token":"iron-proxy-codex-stub-token","refresh_token":"iron-proxy-codex-stub-refresh-token","id_token":"iron-proxy-codex-stub-id-token","account_id":"iron-proxy-codex-stub-account"}}
+JSON
+        chmod 600 "$HOME_DIR/.codex/auth.json"
+        CODEX_LOCAL_AUTH_LOADED=1
+        unset CODEX_API_KEY OPENAI_API_KEY
+    elif [ -n "${CODEX_AUTH_JSON_FILE:-}" ] && [ -r "$CODEX_AUTH_JSON_FILE" ]; then
         mkdir -p "$HOME_DIR/.codex"
         cat "$CODEX_AUTH_JSON_FILE" > "$HOME_DIR/.codex/auth.json"
         chmod 600 "$HOME_DIR/.codex/auth.json"
@@ -219,7 +227,7 @@ if truthy_env "${CODEX_USE_LOCAL_AUTH:-}"; then
         echo "CODEX_USE_LOCAL_AUTH=true but Codex local auth file is missing; falling back to API-key auth. Run codex login --device-auth on the host, then bun run auth:bootstrap." >&2
     fi
 fi
-unset CODEX_AUTH_JSON CODEX_AUTH_JSON_FILE CODEX_ACCESS_TOKEN
+unset CODEX_AUTH_JSON CODEX_AUTH_JSON_FILE CODEX_ACCESS_TOKEN CODEX_PROXY_AUTH
 
 # Codex reads its auth file when the app server starts. Complete this before
 # signaling readiness, otherwise warm pods can be claimed with no auth loaded.

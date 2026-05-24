@@ -75,12 +75,12 @@ def _harness_auth_secret_sources(engine: str) -> list[dict[str, Any]]:
             }
         }
 
+    if local_auth_uses_proxy():
+        return []
     if engine == "codex" and sandbox_env_flag("CODEX_USE_LOCAL_AUTH"):
         return [
             source("CODEX_AUTH_JSON", "codex-auth.json"),
         ]
-    if local_auth_uses_proxy():
-        return []
     if engine == "claude-code" and sandbox_env_flag("CLAUDE_USE_LOCAL_AUTH"):
         return [
             source("CLAUDE_CREDENTIALS_JSON", "claude-credentials.json"),
@@ -91,9 +91,15 @@ def _harness_auth_secret_sources(engine: str) -> list[dict[str, Any]]:
 def _harness_uses_proxy_auth(engine: str) -> bool:
     if not local_auth_uses_proxy():
         return False
+    if engine == "codex":
+        return sandbox_env_flag("CODEX_USE_LOCAL_AUTH")
     if engine == "claude-code":
         return sandbox_env_flag("CLAUDE_USE_LOCAL_AUTH")
     return False
+
+
+def _codex_auth_json_secret_ref() -> str:
+    return (os.getenv("CODEX_AUTH_JSON_SECRET_REF") or "CODEX_AUTH_JSON").strip()
 
 
 def _harness_proxy_auth_secrets(engine: str) -> list[SecretDef]:
@@ -131,6 +137,12 @@ def _harness_proxy_auth_env_keys(engine: str) -> tuple[str, ...]:
     if engine == "claude-code":
         return ("CLAUDE_CODE_OAUTH_CLIENT_ID", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
     return ()
+
+
+def _harness_codex_auth_json_secret_ref(engine: str) -> str | None:
+    if engine == "codex" and _harness_uses_proxy_auth(engine):
+        return _codex_auth_json_secret_ref()
+    return None
 
 
 def _get_rt(session: SandboxSession):
@@ -663,9 +675,14 @@ class KubernetesExecutorBackend(SandboxBackend):
         sandbox_id: str,
         secrets: list[SecretDef],
         pg_listen_ports: dict[str, int],
+        *,
+        codex_auth_json_secret_ref: str | None = None,
     ) -> None:
         rendered = render_proxy_yaml(
-            secrets, base_config=None, pg_listen_ports=pg_listen_ports
+            secrets,
+            base_config=None,
+            pg_listen_ports=pg_listen_ports,
+            codex_auth_json_secret_ref=codex_auth_json_secret_ref,
         )
         name = _proxy_configmap_name(sandbox_id)
         await self._delete_configmap(name)
@@ -1365,7 +1382,12 @@ class KubernetesExecutorBackend(SandboxBackend):
         await self._delete_proxy_resources(pod_name)
         try:
             await self._create_prompt_secret(secret_name, persona)
-            await self._create_proxy_configmap(pod_name, secrets, pg_listen_ports)
+            await self._create_proxy_configmap(
+                pod_name,
+                secrets,
+                pg_listen_ports,
+                codex_auth_json_secret_ref=_harness_codex_auth_json_secret_ref(engine),
+            )
             await self._create_proxy_service(pod_name, pg_listen_ports)
             await self._create_proxy_network_policies(pod_name, pg_listen_ports)
             proxy_pod_name = await self._create_proxy_pod(

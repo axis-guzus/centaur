@@ -82,9 +82,10 @@ CLI auth state explicitly:
 bun run auth:bootstrap
 ```
 
-The command writes only secret payload values to `.env.local`. Source that file
-before `just bootstrap-secrets` so `CODEX_AUTH_JSON` and the Claude Code OAuth
-refresh-token fields, when present, are copied into the separate
+The command writes only secret payload values to `.env.local`. For proxy local
+auth, store Codex `CODEX_AUTH_JSON` in the configured 1Password field used by
+iron-proxy. Source `.env.local` before `just bootstrap-secrets` so the Claude
+Code OAuth refresh-token fields, when present, are copied into the separate
 `centaur-harness-auth` Secret. They are not added to `centaur-infra-env`,
 which the API consumes with `envFrom`.
 
@@ -109,11 +110,11 @@ sandbox:
     CLAUDE_USE_LOCAL_AUTH: "true"
 ```
 
-The API scopes auth payloads to the matching engine: Codex pods receive Codex
-auth, Claude proxy pods receive Claude refresh-token material, and Amp pods
-receive neither. This is less isolated than the default [iron-proxy](https://docs.iron.sh)
-API-key path because provider CLI login state is available to the provider
-runtime instead of staying solely in the normal API-key secret source.
+The API scopes auth payloads to the matching engine: Codex proxy auth stays in
+iron-proxy, Claude proxy pods receive Claude refresh-token material, and Amp
+pods receive neither. This is less isolated than the default [iron-proxy](https://docs.iron.sh)
+API-key path because provider CLI login state is still used instead of normal
+provider API keys.
 
 The default harness is `codex`, so `OPENAI_API_KEY` must exist in the configured
 secret source before Slack agent turns can complete. Use explicit harness

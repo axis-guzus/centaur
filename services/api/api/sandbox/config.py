@@ -46,6 +46,7 @@ _LOCAL_AUTH_EXTRA_ENV_KEYS = {
     "CODEX_USE_LOCAL_AUTH",
     "CODEX_AUTH_JSON",
     "CODEX_AUTH_JSON_FILE",
+    "CODEX_AUTH_JSON_SECRET_REF",
     "CODEX_ACCESS_TOKEN",
     "CODEX_PROXY_AUTH",
     "CLAUDE_USE_LOCAL_AUTH",
@@ -186,7 +187,12 @@ def container_env(
     use_proxy_local_auth = local_auth_uses_proxy(extra_env)
     if engine == "codex" and sandbox_env_flag("CODEX_USE_LOCAL_AUTH", extra_env):
         env.append("CODEX_USE_LOCAL_AUTH=true")
-        env.append("CODEX_AUTH_JSON_FILE=/harness-auth/codex-auth.json")
+        if use_proxy_local_auth:
+            env.append("CODEX_PROXY_AUTH=true")
+            _set_env(env, "OPENAI_API_KEY", "")
+            _set_env(env, "CODEX_API_KEY", "")
+        else:
+            env.append("CODEX_AUTH_JSON_FILE=/harness-auth/codex-auth.json")
     if engine == "claude-code" and sandbox_env_flag(
         "CLAUDE_USE_LOCAL_AUTH", extra_env
     ):

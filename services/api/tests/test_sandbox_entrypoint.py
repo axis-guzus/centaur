@@ -200,6 +200,42 @@ def test_sandbox_entrypoint_reconstructs_local_auth_payloads(tmp_path: Path) -> 
     assert result.stdout.splitlines()[-1] == "unset/unset/unset"
 
 
+def test_sandbox_entrypoint_writes_codex_proxy_auth_stub(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    harness_dir = _write_codex_harness_config(home)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ENTRYPOINT_SH),
+            "sh",
+            "-lc",
+            'printf "%s/%s/%s\\n" "${OPENAI_API_KEY-unset}" '
+            '"${CODEX_API_KEY-unset}" "${CODEX_PROXY_AUTH-unset}"',
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "CENTAUR_HARNESS_CONFIG_DIR": str(harness_dir),
+            "CODEX_USE_LOCAL_AUTH": "true",
+            "CODEX_PROXY_AUTH": "true",
+            "OPENAI_API_KEY": "OPENAI_API_KEY",
+            "CODEX_API_KEY": "CODEX_API_KEY",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    auth = json.loads((home / ".codex" / "auth.json").read_text())
+    assert auth["auth_mode"] == "chatgpt"
+    assert auth["tokens"]["access_token"] == "iron-proxy-codex-stub-token"
+    assert auth["tokens"]["refresh_token"] == "iron-proxy-codex-stub-refresh-token"
+    assert auth["tokens"]["account_id"] == "iron-proxy-codex-stub-account"
+    assert result.stdout.splitlines()[-1] == "unset/unset/unset"
+
+
 def test_sandbox_entrypoint_keeps_claude_api_key_without_credentials(
     tmp_path: Path,
 ) -> None:

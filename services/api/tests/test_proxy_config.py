@@ -1245,6 +1245,38 @@ def test_render_oauth_token_emits_token_endpoint_when_set() -> None:
     assert tokens[0]["token_endpoint"] == "https://login.example.com/oauth2/token"
 
 
+def test_render_codex_login_transform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+    monkeypatch.setenv("OP_VAULT", "ai-agents")
+    cfg = yaml.safe_load(
+        render_proxy_yaml([], codex_auth_json_secret_ref="CODEX_AUTH_JSON")
+    )
+
+    transform = next(t for t in cfg["transforms"] if t["name"] == "codex_login")
+    auth_json = transform["config"]["auth_json"]
+    assert auth_json["source"] == {
+        "type": "1password",
+        "secret_ref": "op://ai-agents/CODEX_AUTH_JSON/credential",
+        "ttl": "10m",
+    }
+    assert auth_json["writeback"] == {
+        "type": "1password",
+        "secret_ref": "op://ai-agents/CODEX_AUTH_JSON/credential",
+    }
+    assert transform["config"]["rules"] == [
+        {"host": "chatgpt.com", "paths": ["/backend-api/codex/*"]}
+    ]
+
+
+def test_render_codex_login_rejects_env_secret_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+
+    with pytest.raises(ValueError, match="codex_login requires"):
+        render_proxy_yaml([], codex_auth_json_secret_ref="CODEX_AUTH_JSON")
+
+
 _RENDER_JWT_BEARER_FIELDS = (
     ("issuer", OAuthFieldSource("DOCUSIGN_INTEGRATION_KEY")),
     ("private_key", OAuthFieldSource("DOCUSIGN_BUNDLE", "private_key")),
