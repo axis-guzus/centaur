@@ -1,7 +1,7 @@
 FROM golang:1.26.1-alpine AS iron-proxy-builder
 
 ARG IRON_PROXY_REPO=https://github.com/pseudolabel/iron-proxy.git
-ARG IRON_PROXY_REF=4d28af9d47f2f4bb35eed9122852c8b90e4a6cce
+ARG IRON_PROXY_REF=284e95e21432c415351264155e44c8d17cec35c6
 
 RUN apk add --no-cache build-base git
 RUN git init /src/iron-proxy \
