@@ -23,6 +23,7 @@
     "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@opentelemetry/sdk-trace-node": "^2.7.1",
     "@opentelemetry/semantic-conventions": "^1.41.1",
+    "@chat-adapter/slack": "^4.29.0",
     "@slack/types": "^2.19.0",
     "@slack/web-api": "^7.15.2",
     "@std/ulid": "npm:@jsr/std__ulid",

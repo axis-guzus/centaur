@@ -1,5 +1,4 @@
 import { createHash } from 'crypto'
-import type { WebClient } from '@slack/web-api'
 import { slackReplyLimits } from '../constants'
 import { logInfo } from '../logging'
 import { AgentSessionRenderer } from './agent-session'
@@ -65,8 +64,8 @@ const COMPLETED_STATE_TTL_MS = 10 * 60 * 1000
 export class CodexSessionRenderer {
   private readonly renderer: AgentSessionRenderer
 
-  constructor(client: WebClient) {
-    this.renderer = new AgentSessionRenderer(client)
+  constructor() {
+    this.renderer = new AgentSessionRenderer()
   }
 
   async event(
