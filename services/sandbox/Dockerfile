@@ -50,6 +50,7 @@ ARG CLAUDE_CODE_VERSION=2.1.143
 ARG CODEX_VERSION=0.130.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
 ARG NUSHELL_VERSION=0.112.2
+ARG KUBECTL_VERSION=v1.34.2
 
 # ── Nushell ─────────────────────────────────────────────────────────────────
 RUN set -eux; \
@@ -66,6 +67,20 @@ RUN set -eux; \
     install -m 0755 /tmp/nu/nu /usr/local/bin/nu; \
     rm -rf /tmp/nu /tmp/nu.tar.gz; \
     nu --version | grep -F "${NUSHELL_VERSION}"
+
+# ── kubectl ─────────────────────────────────────────────────────────────────
+RUN set -eux; \
+    kubectl_arch="$(case "$(dpkg --print-architecture)" in \
+      amd64) echo amd64 ;; \
+      arm64) echo arm64 ;; \
+      *) echo unsupported-architecture >&2; exit 1 ;; \
+    esac)"; \
+    curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${kubectl_arch}/kubectl"; \
+    curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${kubectl_arch}/kubectl.sha256"; \
+    echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -; \
+    install -m 0755 kubectl /usr/local/bin/kubectl; \
+    rm -f kubectl kubectl.sha256; \
+    kubectl version --client=true
 
 # ── Global npm CLIs (root) ──────────────────────────────────────────────────
 RUN npm install -g --prefer-online --force \
