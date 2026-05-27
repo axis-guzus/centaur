@@ -1,7 +1,9 @@
 import base64
+import urllib.request
 
 import pytest
 
+from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
 from gsuite import client
 
 
@@ -214,6 +216,45 @@ def test_drive_upload_accepts_attachment_id(monkeypatch):
     assert create_call["media_body"]["content"] == b"from-attachment"
     assert create_call["media_body"]["mimetype"] == "text/csv"
     assert result["id"] == "file-123"
+
+
+class _FakeHTTPResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_download_attachment_bytes_uses_default_api_url_when_env_missing(monkeypatch):
+    monkeypatch.delenv("CENTAUR_API_URL", raising=False)
+    seen_urls: list[str] = []
+
+    def fake_urlopen(req, *args, **kwargs):
+        seen_urls.append(req.full_url)
+        if req.full_url == (
+            "http://api:8000/agent/attachments/att-xyz/download"
+            "?thread_key=slack%3AC1%3A1.2"
+        ):
+            return _FakeHTTPResponse(b"attachment-bytes")
+        raise AssertionError(f"unexpected url {req.full_url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    token = set_tool_context(ToolContext(name="gsuite", thread_key="slack:C1:1.2"))
+    try:
+        body = client._download_attachment_bytes(attachment_id="att-xyz")
+    finally:
+        reset_tool_context(token)
+
+    assert body == b"attachment-bytes"
+    assert "CENTAUR_API_URL/agent/attachments" not in seen_urls
 
 
 def test_drive_create_folder_uses_folder_mime_type(monkeypatch):
