@@ -24,6 +24,20 @@ async function runCli(args: string[]) {
   return stdout
 }
 
+async function runCliWithExit(args: string[]) {
+  let stdout = ''
+  let exitCode = 0
+  await app.serve(args, {
+    stdout: chunk => {
+      stdout += chunk
+    },
+    exit: code => {
+      exitCode = code
+    },
+  })
+  return { stdout, exitCode }
+}
+
 function response(data: unknown, init?: ResponseInit) {
   return new Response(JSON.stringify(data), {
     status: 200,
@@ -105,12 +119,19 @@ describe('overlay scaffolding', () => {
       domain: 'centaur.acme.com',
       harness: 'codex',
       authMode: 'access_token',
+      secretBackend: 'onepassword',
     })
     writeSlackManifest(join(overlayPath, 'slack-app-manifest.json'), 'centaur', 'centaur.acme.com', false)
 
     expect(written.length).toBeGreaterThan(0)
     expect(readFileSync(join(overlayPath, 'values.centaur.yaml'), 'utf8')).toContain(
       'CODEX_AUTH_MODE: access_token',
+    )
+    expect(readFileSync(join(overlayPath, 'values.centaur.yaml'), 'utf8')).toContain(
+      'secretSource: onepassword',
+    )
+    expect(readFileSync(join(overlayPath, 'values.centaur.yaml'), 'utf8')).toContain(
+      'tokenBroker:\n  enabled: true',
     )
     const secrets = readFileSync(join(overlayPath, 'secrets.example.env'), 'utf8')
     expect(secrets).toContain('OPENAI_CODEX_CLIENT_ID=...')
@@ -141,6 +162,8 @@ describe('overlay scaffolding', () => {
       'codex',
       '--auth-mode',
       'access_token',
+      '--secret-backend',
+      'onepassword',
       '--json',
     ])
 
@@ -162,6 +185,12 @@ describe('overlay scaffolding', () => {
     expect(state.completedSteps).toContain('slack-manifest')
     expect(readFileSync(join(overlayPath, 'values.centaur.yaml'), 'utf8')).toContain(
       'CODEX_AUTH_MODE: access_token',
+    )
+    expect(readFileSync(join(overlayPath, 'values.centaur.yaml'), 'utf8')).toContain(
+      'secretSource: onepassword',
+    )
+    expect(readFileSync(join(overlayPath, 'values.centaur.yaml'), 'utf8')).toContain(
+      'tokenBroker:\n  enabled: true',
     )
   })
 
@@ -198,6 +227,43 @@ describe('overlay scaffolding', () => {
     expect(output.nextCommand).toContain('--harness claude-code')
     expect(output.nextCommand).toContain('--auth-mode access_token')
     expect(output.cta.commands[0].command).toContain('centaur secrets collect --backend kubernetes')
+  })
+
+  it('doctor rejects read-only secret backends for subscription auth', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'centaur-cli-doctor-'))
+    const overlayPath = join(root, 'org')
+    writeOverlay({
+      path: overlayPath,
+      org: 'acme',
+      assistantName: 'centaur',
+      domain: 'centaur.acme.com',
+      harness: 'codex',
+      authMode: 'access_token',
+      secretBackend: 'local-env',
+    })
+    writeSlackManifest(join(overlayPath, 'slack-app-manifest.json'), 'centaur', 'centaur.acme.com', false)
+
+    const { stdout } = await runCliWithExit([
+      'secrets',
+      'doctor',
+      '--backend',
+      'local-env',
+      '--harness',
+      'codex',
+      '--auth-mode',
+      'access_token',
+      '--overlay-path',
+      overlayPath,
+      '--json',
+    ])
+
+    const output = JSON.parse(stdout)
+    expect(output.ok).toBe(false)
+    const backendCheck = output.results.find(
+      (result: { name: string }) => result.name === 'backend:brokered-token-store',
+    )
+    expect(backendCheck.ok).toBe(false)
+    expect(backendCheck.repair).toContain('--secret-backend onepassword')
   })
 })
 

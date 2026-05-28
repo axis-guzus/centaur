@@ -6,6 +6,7 @@ import {
   CODEX_ACCESS_TOKEN_SECRETS,
   type AuthMode,
   type Harness,
+  type SecretBackend,
 } from './constants.js'
 import { expandPath } from './state.js'
 
@@ -30,6 +31,7 @@ export type OverlayOptions = {
   domain: string
   harness: Harness
   authMode: AuthMode
+  secretBackend?: SecretBackend
 }
 
 function publicBaseUrl(domain: string) {
@@ -194,8 +196,15 @@ function selectedApiExtraEnv(harness: Harness, authMode: AuthMode) {
     CLAUDE_CODE_AUTH_MODE: ${authMode}`
 }
 
+function helmSecretSource(secretBackend: SecretBackend | undefined) {
+  if (secretBackend === 'onepassword') return 'onepassword'
+  if (secretBackend === 'onepassword-connect') return 'onepassword-connect'
+  return 'env'
+}
+
 function overlayFiles(options: OverlayOptions) {
   const domain = hostName(options.domain)
+  const tokenBrokerEnabled = options.authMode === 'access_token'
   return {
     'AGENTS.md': `# ${options.assistantName}
 
@@ -244,8 +253,11 @@ GITHUB_TOKEN=...
   envPrefix: ""
 
 ironProxy:
-  secretSource: onepassword
+  secretSource: ${helmSecretSource(options.secretBackend)}
   secretTtl: 10m
+
+tokenBroker:
+  enabled: ${tokenBrokerEnabled ? 'true' : 'false'}
 
 api:
   defaultHarness: ${options.harness}

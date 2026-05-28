@@ -286,6 +286,23 @@ function deploymentCommandForInstallMode(installMode: string) {
   return installMode === 'local' || installMode === 'k3s' ? 'deploy k3s' : 'deploy k8s'
 }
 
+function supportsBrokeredTokenStore(secretBackend: string) {
+  return secretBackend === 'onepassword' || secretBackend === 'onepassword-connect'
+}
+
+function brokeredTokenBackendCheck(secretBackend: string, authMode: string) {
+  if (authMode !== 'access_token' || supportsBrokeredTokenStore(secretBackend)) return []
+  return [
+    {
+      name: 'backend:brokered-token-store',
+      ok: false,
+      detail: `${secretBackend} cannot store rotated subscription refresh tokens`,
+      repair:
+        'Use --secret-backend onepassword or --secret-backend onepassword-connect for access_token auth, or switch to --auth-mode api_key.',
+    },
+  ]
+}
+
 function runCommand(command: string[], inputBytes?: Buffer) {
   const proc = spawnSync(command[0]!, command.slice(1), {
     encoding: 'utf8',
@@ -517,6 +534,7 @@ const overlay = Cli.create('overlay', {
       domain: z.string().default('centaur.example.com').describe('Deployment domain'),
       harness: harnessSchema.default('codex').describe('Default harness'),
       authMode: authModeSchema.default('api_key').describe('Auth mode for the selected harness'),
+      secretBackend: secretBackendSchema.default('local-env').describe('Secret backend'),
       socketMode: z.boolean().default(false).describe('Generate Slack manifest for Socket Mode'),
     }),
     run(c) {
@@ -527,6 +545,7 @@ const overlay = Cli.create('overlay', {
         domain: c.options.domain,
         harness: c.options.harness,
         authMode: c.options.authMode,
+        secretBackend: c.options.secretBackend,
       })
       const manifestPath = writeSlackManifest(
         join(expandPath(c.options.path), 'slack-app-manifest.json'),
@@ -786,6 +805,7 @@ const secrets = Cli.create('secrets', {
           : process.env
       results = envChecks(env, { harness: c.options.harness, authMode: c.options.authMode })
     }
+    results.push(...brokeredTokenBackendCheck(c.options.backend, c.options.authMode))
     const ok = allOk(results)
     setFailedExit(ok)
     return { ok, results }
@@ -1162,6 +1182,7 @@ export const app = Cli.create('centaur', {
         domain: state.domain,
         harness: state.harness,
         authMode: state.authMode,
+        secretBackend: state.secretBackend,
       })
       writeSlackManifest(manifestPath, state.assistantName, state.domain, state.installMode === 'local')
       for (const step of ['local-state', 'overlay', 'slack-manifest', 'secrets-plan', 'deployment-plan']) {
@@ -1282,6 +1303,7 @@ export const app = Cli.create('centaur', {
             harness: c.options.harness,
             authMode: c.options.authMode,
           }),
+          ...brokeredTokenBackendCheck(c.options.secretBackend, c.options.authMode),
           dockerDaemonCheck(),
         )
         if (results.some(result => result.name === 'binary:kubectl' && result.ok)) {
