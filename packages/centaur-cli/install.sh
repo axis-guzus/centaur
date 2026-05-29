@@ -4,7 +4,6 @@ set -euo pipefail
 REPO_URL="${CENTAUR_REPO_URL:-https://github.com/paradigmxyz/centaur.git}"
 REF="${CENTAUR_REF:-main}"
 INSTALL_DIR="${CENTAUR_CLI_INSTALL_DIR:-$HOME/.centaur/cli}"
-BIN_DIR="${CENTAUR_BIN_DIR:-$HOME/.local/bin}"
 RUNTIME_DIR="${CENTAUR_CLI_RUNTIME_DIR:-$INSTALL_DIR/runtime}"
 
 die() {
@@ -18,6 +17,37 @@ require_cmd() {
 
 shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+path_contains_dir() {
+  case ":$PATH:" in
+    *":$1:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+default_bin_dir() {
+  local preferred="$HOME/.local/bin"
+  if path_contains_dir "$preferred"; then
+    printf '%s\n' "$preferred"
+    return
+  fi
+
+  local old_ifs="$IFS"
+  IFS=:
+  local dir
+  for dir in $PATH; do
+    [[ -n "$dir" && "$dir" = /* && -d "$dir" && -w "$dir" ]] || continue
+    case "$dir" in
+      /bin|/sbin|/usr/bin|/usr/sbin) continue ;;
+    esac
+    printf '%s\n' "$dir"
+    IFS="$old_ifs"
+    return
+  done
+  IFS="$old_ifs"
+
+  printf '%s\n' "$preferred"
 }
 
 node_major() {
@@ -71,6 +101,7 @@ fi
 
 SOURCE_DIR="$(checkout_source)"
 PACKAGE_DIR="$SOURCE_DIR/packages/centaur-cli"
+BIN_DIR="${CENTAUR_BIN_DIR:-$(default_bin_dir)}"
 
 echo "Installing Centaur CLI from $SOURCE_DIR"
 BUILD_DIR="$(mktemp -d)"
