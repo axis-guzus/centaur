@@ -126,7 +126,7 @@ JSON
 
 (
   cd "$BUILD_DIR"
-  npm install --package-lock=false --no-audit --no-fund
+  npm install --silent --package-lock=false --no-audit --no-fund
   ./node_modules/.bin/esbuild src/index.ts \
     --bundle \
     --platform=node \
@@ -134,6 +134,7 @@ JSON
     --format=esm \
     --outfile=dist/index.js \
     --legal-comments=none \
+    --log-level=warning \
     '--banner:js=import { createRequire } from "node:module";const require=createRequire(import.meta.url);'
   chmod +x dist/index.js
 )
