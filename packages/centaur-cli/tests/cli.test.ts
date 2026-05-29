@@ -401,7 +401,7 @@ describe('overlay scaffolding', () => {
     const output = JSON.parse(stdout)
     expect(output.commands).toHaveLength(7)
     expect(output.commands.every((command: string) => command.startsWith("'/tmp/Centaur CLI/centaur' "))).toBe(true)
-    expect(output.cta).toBeUndefined()
+    expect(output.cta.commands.map((command: { command: string }) => command.command)).toEqual(output.commands)
   })
 
   it('preserves custom overlay values paths in generated setup deploy commands', async () => {

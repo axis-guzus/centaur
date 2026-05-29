@@ -767,11 +767,16 @@ function setupPlan(options: SetupPlanOptions) {
 }
 
 function setupPlanCta(plan: ReturnType<typeof setupPlan>, bin?: string) {
-  if (bin && bin !== 'centaur') return undefined
   return {
     description: 'Run these setup commands in order:',
     commands: plan.commands.map(command => ({ command })),
   }
+}
+
+function setupPlanResult(plan: ReturnType<typeof setupPlan>, bin?: string) {
+  const cta = setupPlanCta(plan)
+  if (bin && bin !== 'centaur') return { data: { ...plan, cta }, metaCta: undefined }
+  return { data: plan, metaCta: cta }
 }
 
 function deployApplyCommandParts(
@@ -1981,7 +1986,8 @@ const integrations = Cli.create('integrations', {
     }),
     run(c) {
       const plan = setupPlan(c.options)
-      return c.ok(plan, { cta: setupPlanCta(plan, c.options.bin) })
+      const result = setupPlanResult(plan, c.options.bin)
+      return c.ok(result.data, { cta: result.metaCta })
     },
   })
 
@@ -2464,7 +2470,8 @@ export const app = Cli.create('centaur', {
     }),
     run(c) {
       const plan = setupPlan(c.options)
-      return c.ok(plan, { cta: setupPlanCta(plan, c.options.bin) })
+      const result = setupPlanResult(plan, c.options.bin)
+      return c.ok(result.data, { cta: result.metaCta })
     },
   })
   .command('run', {
