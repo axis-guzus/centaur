@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import subprocess
@@ -10,6 +11,35 @@ import asyncpg
 import structlog
 
 log = structlog.get_logger()
+
+
+class ProxySafeConnection(asyncpg.Connection):
+    """asyncpg connection whose pool-reset never sends a multi-statement query.
+
+    The per-sandbox iron-proxy rejects multi-statement queries, which is not
+    configurable on the proxy. asyncpg's default connection reset — run on every
+    release back to the pool — joins several reset commands
+    (``SELECT pg_advisory_unlock_all();``, ``CLOSE ALL;``, ``UNLISTEN *;``,
+    ``RESET ALL;``) into a single simple-query string. The proxy refuses it, so
+    the failure surfaces from the *next* pool operation (e.g. ``pool.fetchrow``)
+    even though that query itself is fine.
+
+    Run each reset statement as its own single-statement query instead.
+    """
+
+    async def reset(self, *, timeout: float | None = None) -> None:
+        async def _do_reset() -> None:
+            await self._reset()
+            reset_query = self.get_reset_query()
+            for statement in reset_query.split("\n"):
+                statement = statement.strip()
+                if statement:
+                    await self.execute(statement)
+
+        if timeout is None:
+            await _do_reset()
+        else:
+            await asyncio.wait_for(_do_reset(), timeout)
 
 BASE_MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
 BASE_MIGRATIONS_TABLE = "schema_migrations"
@@ -96,17 +126,26 @@ def _dbmate_url(database_url: str) -> str:
     return f"{database_url}{sep}sslmode=disable"
 
 
-async def create_pool(database_url: str, *, apply_migrations: bool = True) -> asyncpg.Pool:
+async def create_pool(
+    database_url: str,
+    *,
+    apply_migrations: bool = True,
+    via_proxy: bool = False,
+) -> asyncpg.Pool:
     # The sandbox tool-server sidecar reaches the DB through the per-sandbox
     # iron-proxy and is not a schema owner, so it opens a pool with
     # apply_migrations=False. The API (and shared tool-server) own migrations.
     if apply_migrations:
         run_migrations(database_url)
+    # Connections that traverse the iron-proxy need the multi-statement-safe
+    # reset; direct connections keep asyncpg's default (one round-trip) reset.
+    connection_class = ProxySafeConnection if via_proxy else asyncpg.Connection
     pool = await asyncpg.create_pool(
         database_url,
         min_size=2,
         max_size=10,
         command_timeout=60,
+        connection_class=connection_class,
     )
     assert pool is not None
     return pool

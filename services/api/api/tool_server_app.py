@@ -79,7 +79,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the core DB through the iron-proxy (DATABASE_URL points at the proxy's
     # core listener) and the shared tool-server Deployment runs alongside the
     # API. Open the pool without running migrations; the API owns migrations.
-    app.state.db_pool = await create_pool(settings.database_url, apply_migrations=False)
+    # via_proxy=True: the per-sandbox sidecar's DATABASE_URL points at the
+    # iron-proxy core listener, which rejects multi-statement queries. The
+    # proxy-safe connection runs asyncpg's reset one statement at a time. It is
+    # also correct (just slightly slower on release) for the shared tool-server
+    # Deployment that reaches Postgres directly.
+    app.state.db_pool = await create_pool(
+        settings.database_url, apply_migrations=False, via_proxy=True
+    )
     watcher_task = asyncio.create_task(_watch_tools(app.state.tool_manager))
     try:
         yield
