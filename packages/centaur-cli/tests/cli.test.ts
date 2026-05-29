@@ -39,16 +39,22 @@ async function runCli(args: string[]) {
 
 async function runCliWithExit(args: string[]) {
   let stdout = ''
-  let exitCode = 0
-  await app.serve(args, {
-    stdout: chunk => {
-      stdout += chunk
-    },
-    exit: code => {
-      exitCode = code
-    },
-  })
-  return { stdout, exitCode }
+  let exitCode: number | undefined
+  const previousExitCode = process.exitCode
+  process.exitCode = undefined
+  try {
+    await app.serve(args, {
+      stdout: chunk => {
+        stdout += chunk
+      },
+      exit: code => {
+        exitCode = code
+      },
+    })
+    return { stdout, exitCode: exitCode ?? Number(process.exitCode ?? 0) }
+  } finally {
+    process.exitCode = previousExitCode
+  }
 }
 
 async function runEntry(args: string[]) {
@@ -283,7 +289,7 @@ describe('overlay scaffolding', () => {
 
     const output = JSON.parse(stdout)
     expect(output.copied).toBe(false)
-    expect(output.nextCommand).toContain('secrets collect --backend kubernetes')
+    expect(output.nextCommand).toContain('centaur secrets collect --backend kubernetes')
     expect(output.nextCommand).toContain('--image-source ghcr')
     expect(output.nextCommand).toContain('--harness claude-code')
     expect(output.nextCommand).toContain('--auth-mode access_token')
@@ -895,6 +901,60 @@ describe('secret backends', () => {
       )
       expect(deploy.command).toContain(`--secrets-file ${localEnvPath}`)
       expect(deploy.command).not.toContain(join(overlayPath, 'secrets.local.env'))
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+
+  it('reports every missing from-env secret input with retry CTAs', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'centaur-cli-missing-env-'))
+    const overlayPath = join(root, 'org')
+    const localEnvPath = join(root, 'secrets.env')
+    const keys = [
+      'SLACK_BOT_TOKEN',
+      'SLACK_SIGNING_SECRET',
+      'SLACK_APP_TOKEN',
+      'OPENAI_API_KEY',
+    ]
+    const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+    for (const key of keys) delete process.env[key]
+
+    try {
+      const { stdout, exitCode } = await runCliWithExit([
+        'secrets',
+        'collect',
+        '--backend',
+        'local-env',
+        '--install-mode',
+        'local',
+        '--harness',
+        'codex',
+        '--auth-mode',
+        'api_key',
+        '--from-env',
+        '--local-env-path',
+        localEnvPath,
+        '--overlay-path',
+        overlayPath,
+        '--json',
+      ])
+      const output = JSON.parse(stdout)
+
+      expect(exitCode).toBe(1)
+      expect(output.code).toBe('MISSING_ENV')
+      expect(output.missing.map((item: { env: string }) => item.env)).toEqual([
+        'SLACK_BOT_TOKEN',
+        'SLACK_SIGNING_SECRET',
+        'SLACK_APP_TOKEN',
+        'OPENAI_API_KEY',
+      ])
+      expect(output.cta.commands[0].command).toContain('centaur secrets collect --backend local-env')
+      expect(output.cta.commands[0].command).toContain('--from-env')
+      expect(output.cta.commands[0].command).toContain(`--local-env-path ${localEnvPath}`)
+      expect(output.cta.commands[1].command).not.toContain('--from-env')
     } finally {
       for (const [key, value] of Object.entries(previous)) {
         if (value === undefined) delete process.env[key]

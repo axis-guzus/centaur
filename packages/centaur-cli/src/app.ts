@@ -1311,6 +1311,114 @@ function requireValue(name: string, value: string) {
 type CodexSubscriptionAuth = ReturnType<typeof readCodexSubscriptionAuth>
 type ClaudeSubscriptionAuth = ReturnType<typeof readClaudeSubscriptionAuth>
 
+type MissingSecretInput = {
+  env: string
+  alternatives?: string[]
+  source?: string
+}
+
+function secretsCollectCommandParts(options: {
+  backend: string
+  installMode: string
+  imageSource: ImageSource
+  harness: Harness
+  authMode: string
+  overlayPath: string
+  fromEnv?: boolean
+  localEnvPath?: string
+  kubernetesNamespace?: string
+  kubernetesSecretName?: string
+  onePasswordVault?: string
+  sopsPath?: string
+  vaultPath?: string
+}) {
+  const parts = [
+    'secrets',
+    'collect',
+    '--backend',
+    options.backend,
+    '--install-mode',
+    options.installMode,
+    '--image-source',
+    options.imageSource,
+    '--harness',
+    options.harness,
+    '--auth-mode',
+    options.authMode,
+    '--overlay-path',
+    options.overlayPath,
+  ]
+  if (options.fromEnv) parts.push('--from-env')
+  if (options.localEnvPath) parts.push('--local-env-path', options.localEnvPath)
+  if (options.kubernetesNamespace) parts.push('--kubernetes-namespace', options.kubernetesNamespace)
+  if (options.kubernetesSecretName) parts.push('--kubernetes-secret-name', options.kubernetesSecretName)
+  if (options.onePasswordVault) parts.push('--one-password-vault', options.onePasswordVault)
+  if (options.sopsPath) parts.push('--sops-path', options.sopsPath)
+  if (options.vaultPath) parts.push('--vault-path', options.vaultPath)
+  return parts
+}
+
+function missingSecretInputsFromEnv(state: {
+  installMode: string
+  harness: Harness
+  authMode: string
+}) {
+  const missing: MissingSecretInput[] = []
+  const requireEnvInput = (env: string, options: Omit<MissingSecretInput, 'env'> = {}) => {
+    if (!process.env[env]) missing.push({ env, ...options })
+  }
+
+  requireEnvInput('SLACK_BOT_TOKEN')
+  requireEnvInput('SLACK_SIGNING_SECRET')
+  if (state.installMode === 'local') requireEnvInput('SLACK_APP_TOKEN')
+
+  if (state.harness === 'codex' && state.authMode === 'api_key') {
+    requireEnvInput('OPENAI_API_KEY')
+  } else if (state.harness === 'codex') {
+    const auth = readCodexSubscriptionAuth()
+    const cliClientId = discoverCodexOAuthClientIdFromCli()
+    if (!(process.env.OPENAI_CODEX_CLIENT_ID || auth.clientId || cliClientId)) {
+      missing.push({
+        env: 'OPENAI_CODEX_CLIENT_ID',
+        source: 'installed codex CLI metadata can satisfy this automatically',
+      })
+    }
+    if (!(process.env.OPENAI_CODEX_BLOB || process.env.OPENAI_CODEX_REFRESH_TOKEN || auth.refreshToken)) {
+      missing.push({
+        env: 'OPENAI_CODEX_BLOB',
+        alternatives: ['OPENAI_CODEX_REFRESH_TOKEN'],
+        source: '~/.codex/auth.json refresh_token can satisfy this automatically',
+      })
+    }
+    if (!(process.env.OPENAI_CODEX_ACCOUNT_ID || auth.accountId)) {
+      missing.push({
+        env: 'OPENAI_CODEX_ACCOUNT_ID',
+        source: '~/.codex/auth.json account_id can satisfy this automatically',
+      })
+    }
+  } else if (state.authMode === 'api_key') {
+    requireEnvInput('ANTHROPIC_API_KEY')
+  } else {
+    const auth = readClaudeSubscriptionAuth()
+    const cliClientId = discoverClaudeOAuthClientIdFromCli()
+    if (!(process.env.CLAUDE_CODE_CLIENT_ID || auth.clientId || cliClientId)) {
+      missing.push({
+        env: 'CLAUDE_CODE_CLIENT_ID',
+        source: 'installed claude CLI metadata can satisfy this automatically',
+      })
+    }
+    if (!(process.env.CLAUDE_CODE_BLOB || process.env.CLAUDE_CODE_REFRESH_TOKEN || auth.refreshToken)) {
+      missing.push({
+        env: 'CLAUDE_CODE_BLOB',
+        alternatives: ['CLAUDE_CODE_REFRESH_TOKEN'],
+        source: 'local Claude Code credentials can satisfy this automatically',
+      })
+    }
+  }
+
+  return missing
+}
+
 export function codexSubscriptionSecretsFromSources(
   env: NodeJS.ProcessEnv,
   auth: CodexSubscriptionAuth,
@@ -1529,44 +1637,14 @@ const integrations = Cli.create('integrations', {
             : socketMode
               ? 'Open https://api.slack.com/apps, paste the manifest JSON or output file contents, then generate an app-level token for Socket Mode.'
               : 'Open https://api.slack.com/apps and paste the returned manifest JSON or the output file contents.',
-          nextCommand: commandLine([
-            'secrets',
-            'collect',
-            '--backend',
-            c.options.backend,
-            '--install-mode',
-            c.options.installMode,
-            '--image-source',
-            c.options.imageSource,
-            '--harness',
-            c.options.harness,
-            '--auth-mode',
-            c.options.authMode,
-            '--overlay-path',
-            c.options.overlayPath,
-          ]),
+          nextCommand: `centaur ${commandLine(secretsCollectCommandParts(c.options))}`,
         },
         {
           cta: {
             description: 'After installing the Slack app:',
             commands: [
               {
-                command: commandLine([
-                  'secrets',
-                  'collect',
-                  '--backend',
-                  c.options.backend,
-                  '--install-mode',
-                  c.options.installMode,
-                  '--image-source',
-                  c.options.imageSource,
-                  '--harness',
-                  c.options.harness,
-                  '--auth-mode',
-                  c.options.authMode,
-                  '--overlay-path',
-                  c.options.overlayPath,
-                ]),
+                command: commandLine(secretsCollectCommandParts(c.options)),
                 description: 'prompt for Slack, harness, and infra secrets and write them to the backend',
               },
             ],
@@ -1681,6 +1759,20 @@ const secrets = Cli.create('secrets', {
       harness: c.options.harness,
       authMode: c.options.authMode,
     }
+    const collectCommandOptions = {
+      backend: c.options.backend,
+      installMode: c.options.installMode,
+      imageSource: c.options.imageSource,
+      harness: c.options.harness,
+      authMode: c.options.authMode,
+      overlayPath: c.options.overlayPath,
+      localEnvPath: c.options.localEnvPath,
+      kubernetesNamespace: c.options.kubernetesNamespace,
+      kubernetesSecretName: c.options.kubernetesSecretName,
+      onePasswordVault: c.options.onePasswordVault,
+      sopsPath: c.options.sopsPath,
+      vaultPath: c.options.vaultPath,
+    }
     const promptUser = !c.options.fromEnv
     if (promptUser && (!input.isTTY || !output.isTTY || typeof input.setRawMode !== 'function')) {
       return c.error({
@@ -1691,47 +1783,43 @@ const secrets = Cli.create('secrets', {
           description: 'Run one of these:',
           commands: [
             {
-              command: commandLine([
-                'secrets',
-                'collect',
-                '--backend',
-                c.options.backend,
-                '--install-mode',
-                c.options.installMode,
-                '--image-source',
-                c.options.imageSource,
-                '--harness',
-                c.options.harness,
-                '--auth-mode',
-                c.options.authMode,
-                '--overlay-path',
-                c.options.overlayPath,
-              ]),
+              command: commandLine(secretsCollectCommandParts(collectCommandOptions)),
               description: 'run in a real terminal and type secrets into masked prompts',
             },
             {
-              command: commandLine([
-                'secrets',
-                'collect',
-                '--backend',
-                c.options.backend,
-                '--install-mode',
-                c.options.installMode,
-                '--image-source',
-                c.options.imageSource,
-                '--harness',
-                c.options.harness,
-                '--auth-mode',
-                c.options.authMode,
-                '--overlay-path',
-                c.options.overlayPath,
-                '--from-env',
-              ]),
+              command: commandLine(secretsCollectCommandParts({ ...collectCommandOptions, fromEnv: true })),
               description: 'let an agent populate required environment variables first',
             },
           ],
         },
       })
+    }
+    if (c.options.fromEnv) {
+      const missing = missingSecretInputsFromEnv(state)
+      if (missing.length > 0) {
+        setFailedExit(false)
+        return c.ok({
+          ok: false,
+          code: 'MISSING_ENV',
+          message: `Missing required secret inputs: ${missing.map(item => item.env).join(', ')}`,
+          retryable: true,
+          missing,
+        }, {
+          cta: {
+            description: 'Set the missing values or login with the selected harness CLI, then retry:',
+            commands: [
+              {
+                command: commandLine(secretsCollectCommandParts({ ...collectCommandOptions, fromEnv: true })),
+                description: 'retry non-interactively from environment variables and local harness auth state',
+              },
+              {
+                command: commandLine(secretsCollectCommandParts(collectCommandOptions)),
+                description: 'run interactive masked prompts and let the CLI drive harness login when needed',
+              },
+            ],
+          },
+        })
+      }
     }
     const secrets = c.options.fromEnv ? collectSecretsFromEnv(state) : await collectWizardSecrets(state, promptUser)
     const promptedBackendOptions = c.options.fromEnv
