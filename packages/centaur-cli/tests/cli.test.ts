@@ -358,6 +358,36 @@ describe('overlay scaffolding', () => {
     ])
     expect(output.cta.description).toBe('Run these setup commands in order:')
     expect(output.cta.commands.map((command: { command: string }) => command.command)).toEqual(output.commands)
+    expect(output.secretInputs.map((input: { env: string }) => input.env)).toEqual([
+      'SLACK_BOT_TOKEN',
+      'SLACK_SIGNING_SECRET',
+      'SLACK_APP_TOKEN',
+      'OPENAI_API_KEY',
+    ])
+  })
+
+  it('lists subscription secret inputs for only the selected setup harness', async () => {
+    const stdout = await runCli([
+      'setup',
+      '--harness',
+      'claude-code',
+      '--auth-mode',
+      'access_token',
+      '--json',
+    ])
+    const output = JSON.parse(stdout)
+    const secretInputs = output.secretInputs.map((input: { env: string }) => input.env)
+
+    expect(secretInputs).toEqual([
+      'SLACK_BOT_TOKEN',
+      'SLACK_SIGNING_SECRET',
+      'SLACK_APP_TOKEN',
+      'CLAUDE_CODE_CLIENT_ID',
+      'CLAUDE_CODE_BLOB',
+    ])
+    expect(JSON.stringify(output.secretInputs)).toContain('CLAUDE_CODE_REFRESH_TOKEN')
+    expect(secretInputs).not.toContain('OPENAI_CODEX_CLIENT_ID')
+    expect(secretInputs).not.toContain('OPENAI_API_KEY')
   })
 
   it('can prefix generated setup commands with the installed binary path', async () => {

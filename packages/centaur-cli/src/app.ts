@@ -623,6 +623,49 @@ type SetupPlanOptions = {
   bin?: string
 }
 
+function setupSecretInputs(options: Pick<SetupPlanOptions, 'installMode' | 'harness' | 'authMode'>) {
+  const inputs: MissingSecretInput[] = [
+    { env: 'SLACK_BOT_TOKEN' },
+    { env: 'SLACK_SIGNING_SECRET' },
+  ]
+  if (options.installMode === 'local') inputs.push({ env: 'SLACK_APP_TOKEN' })
+
+  if (options.harness === 'codex' && options.authMode === 'api_key') {
+    inputs.push({ env: 'OPENAI_API_KEY' })
+  } else if (options.harness === 'codex') {
+    inputs.push(
+      {
+        env: 'OPENAI_CODEX_CLIENT_ID',
+        source: 'installed codex CLI metadata can satisfy this automatically',
+      },
+      {
+        env: 'OPENAI_CODEX_BLOB',
+        alternatives: ['OPENAI_CODEX_REFRESH_TOKEN'],
+        source: '~/.codex/auth.json refresh_token can satisfy this automatically',
+      },
+      {
+        env: 'OPENAI_CODEX_ACCOUNT_ID',
+        source: '~/.codex/auth.json account_id can satisfy this automatically',
+      },
+    )
+  } else if (options.authMode === 'api_key') {
+    inputs.push({ env: 'ANTHROPIC_API_KEY' })
+  } else {
+    inputs.push(
+      {
+        env: 'CLAUDE_CODE_CLIENT_ID',
+        source: 'installed claude CLI metadata can satisfy this automatically',
+      },
+      {
+        env: 'CLAUDE_CODE_BLOB',
+        alternatives: ['CLAUDE_CODE_REFRESH_TOKEN'],
+        source: 'local Claude Code credentials can satisfy this automatically',
+      },
+    )
+  }
+  return inputs
+}
+
 function setupPlan(options: SetupPlanOptions) {
   const manifestPath = join(options.overlayPath, 'slack-app-manifest.json')
   const localSocketMode = options.installMode === 'local'
@@ -718,6 +761,7 @@ function setupPlan(options: SetupPlanOptions) {
     ],
     harness: options.harness,
     authMode: options.authMode,
+    secretInputs: setupSecretInputs(options),
     note: 'Use exactly one default harness for the deployment: codex or claude-code. The local run and Slackbot smoke commands run through the Kubernetes pods and do not need a port-forward or external API key.',
   }
 }
