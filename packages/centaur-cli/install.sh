@@ -16,6 +16,10 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 node_major() {
   node -p 'Number(process.versions.node.split(".")[0])'
 }
@@ -128,6 +132,7 @@ case ":$PATH:" in
     centaur_cmd="$BIN_DIR/centaur"
     ;;
 esac
+centaur_display="$(shell_quote "$centaur_cmd")"
 echo "Next:"
-echo "  $centaur_cmd --llms"
-echo "  $centaur_cmd setup --org acme --assistant-name centaur --domain centaur.example.com --backend local-env --install-mode local --harness codex --auth-mode api_key"
+echo "  $centaur_display --llms"
+echo "  $centaur_display setup --org acme --assistant-name centaur --domain centaur.example.com --backend local-env --install-mode local --harness codex --auth-mode api_key --bin $centaur_display"

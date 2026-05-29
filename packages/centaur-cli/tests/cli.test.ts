@@ -333,6 +333,19 @@ describe('overlay scaffolding', () => {
     ])
   })
 
+  it('can prefix generated setup commands with the installed binary path', async () => {
+    const stdout = await runCli([
+      'setup',
+      '--bin',
+      '/tmp/Centaur CLI/centaur',
+      '--json',
+    ])
+
+    const output = JSON.parse(stdout)
+    expect(output.commands).toHaveLength(7)
+    expect(output.commands.every((command: string) => command.startsWith("'/tmp/Centaur CLI/centaur' "))).toBe(true)
+  })
+
   it('doctor warns without blocking local subscription bootstrap on read-only backends', async () => {
     const root = mkdtempSync(join(tmpdir(), 'centaur-cli-doctor-'))
     const overlayPath = join(root, 'org')

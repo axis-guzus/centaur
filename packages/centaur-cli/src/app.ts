@@ -452,6 +452,7 @@ type SetupPlanOptions = {
   harness: Harness
   authMode: string
   overlayPath: string
+  bin?: string
 }
 
 function setupPlan(options: SetupPlanOptions) {
@@ -462,7 +463,7 @@ function setupPlan(options: SetupPlanOptions) {
     imageSource: options.imageSource,
     secretsFile: deploySecretsFileForBackend(options.backend, options.overlayPath),
   })
-  const centaurCommand = (command: string) => `centaur ${command}`
+  const centaurCommand = (command: string) => `${quotePart(options.bin || 'centaur')} ${command}`
   return {
     commands: [
       centaurCommand(commandLine([
@@ -1402,6 +1403,7 @@ const integrations = Cli.create('integrations', {
       harness: harnessSchema.default('codex').describe('Selected default harness'),
       authMode: authModeSchema.default('api_key').describe('Auth mode for the selected harness'),
       overlayPath: z.string().default('org').describe('Overlay directory'),
+      bin: z.string().default('centaur').describe('CLI executable to prefix in returned commands'),
     }),
     run(c) {
       return setupPlan(c.options)
@@ -1831,6 +1833,7 @@ export const app = Cli.create('centaur', {
       harness: harnessSchema.default('codex').describe('Selected default harness'),
       authMode: authModeSchema.default('api_key').describe('Auth mode for the selected harness'),
       overlayPath: z.string().default('org').describe('Overlay directory'),
+      bin: z.string().default('centaur').describe('CLI executable to prefix in returned commands'),
     }),
     run(c) {
       return setupPlan(c.options)
