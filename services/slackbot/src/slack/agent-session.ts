@@ -17,9 +17,7 @@ import {
 import { buildFinalFallbackText, sanitizeFinalMessagePayload } from './final-message'
 import {
   markdownToStreamChunks,
-  renderMarkdownBlocks,
-  shouldShowThinkingBlock,
-  thinkingContextBlock
+  renderMarkdownBlocks
 } from './render'
 import { clipLines } from './streaming'
 
@@ -32,13 +30,18 @@ type Segment = {
   planStarted: boolean
   headerEmitted: boolean
   pendingText: string
+  pendingTextSourceChars: number
   pendingTextPlanPrefix: boolean
   streamedText: string
+  streamedTextSourceChars: number
   pendingTextTimer?: ReturnType<typeof setTimeout>
   pendingTextFlush?: Promise<void>
   streamError?: Error
   closed: boolean
 }
+
+type BlocksChunk = { type: 'blocks'; blocks: AnyBlock[] }
+type SlackStreamChunk = AnyChunk | BlocksChunk
 
 type AgentSessionState = {
   id: string
@@ -48,10 +51,10 @@ type AgentSessionState = {
   recipientUserId: string
   title: string
   header?: string
-  finalCommentaryMarkdown?: string
   finalAnswerMarkdown?: string
   done: boolean
   statusCleared: boolean
+  statusUnsupported: boolean
   segments: Segment[]
 }
 
@@ -63,7 +66,7 @@ export type OpenAgentSessionInput = {
   title?: string
   /**
    * Italic one-line identifier rendered at the top of every assistant message (e.g. "base ·
-   * claude-opus-4-7", "legal · codex-gpt-5").
+   * claude-opus-4-8", "legal · codex-gpt-5").
    */
   header?: string
 }
@@ -90,7 +93,6 @@ export type TextOptions = {
 
 export type DoneOptions = {
   streamFinalUpdates?: boolean
-  commentaryMarkdown?: string
   answerMarkdown?: string
 }
 
@@ -114,6 +116,8 @@ const FINAL_PLAN_MAX_TASKS = slackReplyLimits.finalPlan.maxTasks
 const FINAL_PLAN_TITLE_CHARS = slackReplyLimits.finalPlan.taskTitleChars
 const FINAL_PLAN_DETAILS_LINES = slackReplyLimits.finalPlan.taskDetailsCodeBlockLines
 const FINAL_PLAN_OUTPUT_LINES = slackReplyLimits.finalPlan.taskOutputCodeBlockLines
+const MAX_LIVE_TEXT_CHARS = slackReplyLimits.stream.maxLiveTextChars
+const DURABLE_STREAMED_ANSWER_TASK_THRESHOLD = 10
 
 export class AgentSessionRenderer {
   constructor(private readonly client: WebClient) {}
@@ -131,22 +135,23 @@ export class AgentSessionRenderer {
       header,
       segments: [newSegment()],
       done: false,
-      statusCleared: false
+      statusCleared: false,
+      statusUnsupported: false
     })
     await this.setStatus(id, THINKING_STATUS)
     return { sessionId: id }
   }
 
-  async text(sessionId: string, markdown: string): Promise<void> {
+  async text(sessionId: string, markdown: string): Promise<number> {
     const state = requireSession(sessionId)
     const segment = currentSegment(state)
 
     segment.textParts.push(markdown)
-    await this.queueText(state, segment, markdown)
+    return await this.queueText(state, segment, markdown)
   }
 
-  async textDelta(sessionId: string, markdownDelta: string, opts: TextOptions = {}): Promise<void> {
-    if (!markdownDelta) return
+  async textDelta(sessionId: string, markdownDelta: string, opts: TextOptions = {}): Promise<number> {
+    if (!markdownDelta) return 0
     const state = requireSession(sessionId)
     const segment = currentSegment(state)
 
@@ -154,16 +159,18 @@ export class AgentSessionRenderer {
     if (lastIndex >= 0) segment.textParts[lastIndex] += markdownDelta
     else segment.textParts.push(markdownDelta)
     if (opts.flush === false) {
-      segment.pendingText += normalizeDeltaBoundary(
-        segment.streamedText + segment.pendingText,
-        markdownDelta
-      )
-      return
+      const accepted = appendPendingTextWithinLiveLimit(segment, markdownDelta)
+      return accepted
     }
-    await this.queueText(state, segment, markdownDelta, {
+    return await this.queueText(state, segment, markdownDelta, {
       force: opts.force,
       planPrefix: opts.planPrefix
     })
+  }
+
+  streamedTextChars(sessionId: string): number {
+    const state = requireSession(sessionId)
+    return streamedTextSourceChars(state)
   }
 
   async blocks(
@@ -205,13 +212,13 @@ export class AgentSessionRenderer {
     await this.flushText(state, segment, { force: true })
   }
 
-  async done(sessionId: string, opts: DoneOptions = {}): Promise<void> {
+  async done(sessionId: string, opts: DoneOptions = {}): Promise<{ streamedTextChars: number }> {
     const state = requireSession(sessionId)
     state.done = true
-    state.finalCommentaryMarkdown = opts.commentaryMarkdown
     state.finalAnswerMarkdown = opts.answerMarkdown
     const streamFinalUpdates = opts.streamFinalUpdates ?? true
     let closed = false
+    let streamedTextChars = 0
 
     try {
       for (const segment of state.segments) {
@@ -229,6 +236,7 @@ export class AgentSessionRenderer {
         }
         await this.closeTextStream(state, segment)
       }
+      streamedTextChars = streamedTextSourceChars(state)
       closed = true
     } finally {
       if (!state.statusCleared) {
@@ -236,10 +244,14 @@ export class AgentSessionRenderer {
       }
       if (closed) sessions.delete(sessionId)
     }
+    return { streamedTextChars }
   }
 
   private async setStatus(sessionId: string, status: string): Promise<boolean> {
     const state = requireSession(sessionId)
+    // assistant.threads.setStatus is only valid on AI Assistant threads; cache
+    // the first not-supported response so we skip retrying for the session.
+    if (state.statusUnsupported) return false
     try {
       const response = await this.client.assistant.threads.setStatus({
         channel_id: state.channel,
@@ -248,12 +260,24 @@ export class AgentSessionRenderer {
         ...(status ? { loading_messages: [status] } : {})
       })
       if (!response.ok) {
-        logStatusFailure(state, status, response.error ?? 'unknown_error')
+        const errorCode = response.error ?? 'unknown_error'
+        if (isUnsupportedStatusChannel(errorCode)) {
+          state.statusUnsupported = true
+          logStatusUnsupported(state, errorCode)
+          return false
+        }
+        logStatusFailure(state, status, errorCode)
         return false
       }
       return true
     } catch (error) {
-      logStatusFailure(state, status, error instanceof Error ? error.message : String(error))
+      const message = error instanceof Error ? error.message : String(error)
+      if (isUnsupportedStatusChannel(message)) {
+        state.statusUnsupported = true
+        logStatusUnsupported(state, message)
+        return false
+      }
+      logStatusFailure(state, status, message)
       return false
     }
   }
@@ -261,9 +285,7 @@ export class AgentSessionRenderer {
   private async closeTextStream(state: AgentSessionState, segment: Segment): Promise<void> {
     raiseStreamError(segment)
     if (segment.closed) return
-    const hasFinalText = Boolean(
-      state.finalCommentaryMarkdown?.trim() || state.finalAnswerMarkdown?.trim()
-    )
+    const hasFinalText = Boolean(state.finalAnswerMarkdown?.trim())
     if (!segment.streamTs && !segment.textParts.length && !segment.tasks.size && !hasFinalText) {
       return
     }
@@ -271,13 +293,13 @@ export class AgentSessionRenderer {
     if (!segment.streamTs) return
     const originalTasks = finalTaskSnapshot(segment)
     const tasks = compactFinalTasks(originalTasks)
-    const commentaryMarkdown = state.finalCommentaryMarkdown?.trim() ?? ''
     const answerSource =
       state.finalAnswerMarkdown?.trim() || segment.streamedText.trim() || segment.textParts.join('')
-    const answerMarkdown = finalMarkdownForBlocks(answerSource, tasks)
-    const streamedTextLive = Boolean(segment.streamedText.trim())
-    const showThinking = !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
-    const thinkingBlock = showThinking ? thinkingContextBlock(commentaryMarkdown) : null
+    const answerMarkdown = finalMarkdownForFinalBlocks(answerSource, segment, {
+      includeStreamedText: originalTasks.length >= DURABLE_STREAMED_ANSWER_TASK_THRESHOLD
+    })
+    const streamedTextLive =
+      Boolean(segment.streamedText.trim()) && segment.streamedText.length < MAX_LIVE_TEXT_CHARS
     // Slack accumulates appendStream chunks; stopStream blocks are the composed final layout.
     // Only add blocks for content that was not streamed live; live task_update chunks carry
     // fenced details/output, and the header has already been streamed as the first chunk.
@@ -285,18 +307,18 @@ export class AgentSessionRenderer {
       ...(tasks.length && !segment.planStarted
         ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)]
         : []),
-      ...(thinkingBlock ? [thinkingBlock] : []),
       ...(!streamedTextLive && answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : [])
     ] as AnyBlock[])
     const fallbackText = buildFinalFallbackText({
       title: state.title,
-      commentaryMarkdown: showThinking ? commentaryMarkdown : '',
       answerMarkdown
     })
+    const chunks =
+      blocks.length || streamedTextLive ? undefined : markdownToStreamChunks(fallbackText)
     const stopResponse = await this.client.chat.stopStream({
       channel: state.channel,
       ts: segment.streamTs,
-      chunks: markdownToStreamChunks(blocks.length || streamedTextLive ? ' ' : fallbackText),
+      ...(chunks ? { chunks } : {}),
       ...(blocks.length ? { blocks } : {})
     })
     if (!stopResponse.ok) throw new Error(stopResponse.error ?? 'chat.stopStream failed')
@@ -306,7 +328,7 @@ export class AgentSessionRenderer {
   private async streamChunks(
     state: AgentSessionState,
     segment: Segment,
-    chunks: AnyChunk[]
+    chunks: SlackStreamChunk[]
   ): Promise<void> {
     raiseStreamError(segment)
     if (!chunks.length || segment.closed) return
@@ -319,7 +341,7 @@ export class AgentSessionRenderer {
     const response = await this.client.chat.appendStream({
       channel: state.channel,
       ts: segment.streamTs,
-      chunks: effectiveChunks
+      chunks: effectiveChunks as AnyChunk[]
     })
     if (!response.ok) throw new Error(response.error ?? 'chat.appendStream failed')
     await this.clearStatusAfterVisibleOutput(state, effectiveChunks)
@@ -330,22 +352,25 @@ export class AgentSessionRenderer {
     segment: Segment,
     markdown: string,
     opts: { force?: boolean; planPrefix?: boolean } = {}
-  ): Promise<void> {
+  ): Promise<number> {
     raiseStreamError(segment)
     const planPrefix = opts.planPrefix !== false
     if (segment.pendingText && segment.pendingTextPlanPrefix !== planPrefix) {
       await this.flushText(state, segment, { force: true })
     }
     segment.pendingTextPlanPrefix = planPrefix
-    segment.pendingText += normalizeDeltaBoundary(
-      segment.streamedText + segment.pendingText,
-      markdown
-    )
-    if (opts.force || segment.pendingText.length >= TEXT_FLUSH_CHARS) {
+    const accepted = appendPendingTextWithinLiveLimit(segment, markdown)
+    if (accepted <= 0) return 0
+    if (opts.force) {
       await this.flushText(state, segment, { force: true })
-      return
+      return accepted
+    }
+    if (segment.pendingText.length >= TEXT_FLUSH_CHARS) {
+      await this.flushText(state, segment, { force: false })
+      return accepted
     }
     this.scheduleTextFlush(state, segment)
+    return accepted
   }
 
   private scheduleTextFlush(state: AgentSessionState, segment: Segment): void {
@@ -390,6 +415,7 @@ export class AgentSessionRenderer {
     if (!segment.pendingText) return
     const markdown = normalizeMarkdownChunk(segment.streamedText, segment.pendingText)
     segment.pendingText = ''
+    segment.pendingTextSourceChars = 0
     segment.streamedText += markdown
   }
 
@@ -401,19 +427,26 @@ export class AgentSessionRenderer {
     raiseStreamError(segment)
     if (
       !opts.force &&
-      !safeMarkdownFlush(segment.streamedText + segment.pendingText, segment.streamedText)
+      !safeMarkdownFlush(
+        segment.streamedText + segment.pendingText,
+        segment.pendingText,
+        segment.streamedText
+      )
     ) {
       this.scheduleTextFlush(state, segment)
       return
     }
     const markdown = normalizeMarkdownChunk(segment.streamedText, segment.pendingText)
     if (!markdown) return
+    const pendingSourceChars = segment.pendingTextSourceChars
     segment.pendingText = ''
-    segment.streamedText += markdown
+    segment.pendingTextSourceChars = 0
     await this.streamChunks(state, segment, [
       ...(segment.pendingTextPlanPrefix ? this.planPrefix(state, segment) : []),
-      markdownChunk(markdown)
+      ...markdownToStreamChunks(markdown)
     ])
+    segment.streamedText += markdown
+    segment.streamedTextSourceChars += pendingSourceChars
   }
 
   private async flushTask(
@@ -430,7 +463,7 @@ export class AgentSessionRenderer {
   private async ensureStream(
     state: AgentSessionState,
     segment: Segment,
-    initialChunks: AnyChunk[]
+    initialChunks: SlackStreamChunk[]
   ): Promise<boolean> {
     if (segment.streamTs) return false
     if (segment.streamStartPromise) {
@@ -446,7 +479,7 @@ export class AgentSessionRenderer {
         recipient_team_id: state.recipientTeamId,
         recipient_user_id: state.recipientUserId,
         task_display_mode: 'plan',
-        chunks
+        chunks: chunks as AnyChunk[]
       })
       if (!response.ok || !response.ts) throw new Error(response.error ?? 'chat.startStream failed')
       segment.streamTs = response.ts
@@ -463,7 +496,7 @@ export class AgentSessionRenderer {
 
   private async clearStatusAfterVisibleOutput(
     state: AgentSessionState,
-    chunks: AnyChunk[]
+    chunks: SlackStreamChunk[]
   ): Promise<void> {
     if (state.statusCleared || !hasVisibleStreamChunks(chunks)) return
     state.statusCleared = await this.setStatus(state.id, '')
@@ -481,8 +514,8 @@ export class AgentSessionRenderer {
   private withHeaderPrefix(
     state: AgentSessionState,
     segment: Segment,
-    chunks: AnyChunk[]
-  ): AnyChunk[] {
+    chunks: SlackStreamChunk[]
+  ): SlackStreamChunk[] {
     const header = state.header?.trim()
     if (!header || segment.headerEmitted) return chunks
     segment.headerEmitted = true
@@ -495,6 +528,31 @@ function logStatusFailure(state: AgentSessionState, status: string, error: strin
     channel_id: state.channel,
     thread_ts: state.parentTs,
     status: status ? 'set' : 'clear',
+    error
+  })
+}
+
+const UNSUPPORTED_STATUS_ERROR_CODES = new Set([
+  'user_not_found',
+  'channel_not_found',
+  'channel_type_not_supported',
+  'not_in_channel',
+  'restricted_action'
+])
+
+function isUnsupportedStatusChannel(error: string): boolean {
+  const trimmed = error.trim().toLowerCase()
+  if (UNSUPPORTED_STATUS_ERROR_CODES.has(trimmed)) return true
+  for (const code of UNSUPPORTED_STATUS_ERROR_CODES) {
+    if (trimmed.includes(code)) return true
+  }
+  return false
+}
+
+function logStatusUnsupported(state: AgentSessionState, error: string): void {
+  logWarn('slack_assistant_status_unsupported', {
+    channel_id: state.channel,
+    thread_ts: state.parentTs,
     error
   })
 }
@@ -582,38 +640,40 @@ function compactTaskBody(body: StreamTask['details'], maxLines: number): StreamT
   return richText([preformatted(clipLines(text, maxLines), language)])
 }
 
-function finalMarkdownForBlocks(markdown: string, tasks: StreamTask[]): string {
-  if (!tasks.length) return markdown
-  const remainingChars = slackReplyLimits.mixedBodyAndPlan.maxVisibleChars - taskVisibleChars(tasks)
-  if (remainingChars <= 0) return ''
-  return clipText(markdown, remainingChars)
+function finalMarkdownForFinalBlocks(
+  markdown: string,
+  segment: Segment,
+  opts: { includeStreamedText?: boolean } = {}
+): string {
+  const trimmed = markdown.trim()
+  if (!trimmed) return ''
+  if (opts.includeStreamedText || !segment.streamedText.trim()) {
+    return clipText(trimmed, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
+  }
+  const streamedPrefix = unstreamedMarkdownAfterLivePrefix(markdown, segment.streamedText)
+  if (streamedPrefix !== null) {
+    return clipText(streamedPrefix, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
+  }
+  const unstreamed = markdown.slice(segment.streamedTextSourceChars).trim()
+  if (!unstreamed) return ''
+  return clipText(unstreamed, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
 }
 
-function taskVisibleChars(tasks: StreamTask[]): number {
-  return tasks.reduce((total, task) => {
-    return (
-      total +
-      task.title.length +
-      taskBodyVisibleChars(task.details) +
-      taskBodyVisibleChars(task.output)
-    )
-  }, 0)
+function unstreamedMarkdownAfterLivePrefix(markdown: string, streamedText: string): string | null {
+  if (!streamedText.trim()) return null
+  if (markdown.startsWith(streamedText)) return markdown.slice(streamedText.length).trim()
+
+  const normalizedMarkdown = normalizeFinalMarkdownPrefix(markdown)
+  const normalizedStreamed = normalizeFinalMarkdownPrefix(streamedText)
+  if (!normalizedMarkdown.startsWith(normalizedStreamed)) return null
+  return normalizedMarkdown.slice(normalizedStreamed.length).trim()
 }
 
-function taskBodyVisibleChars(body: StreamTask['details']): number {
-  if (!body) return 0
-  if (typeof body === 'string') return body.length
-  return body.elements.reduce((total, element) => {
-    return (
-      total +
-      element.elements.reduce((innerTotal, inline) => {
-        if ('text' in inline) return innerTotal + (inline.text ?? '').length
-        if ('url' in inline) return innerTotal + (inline.url ?? '').length
-        if ('user_id' in inline) return innerTotal + inline.user_id.length + 3
-        return innerTotal
-      }, 0)
-    )
-  }, 0)
+function normalizeFinalMarkdownPrefix(markdown: string): string {
+  return markdown
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+$/gm, '')
+    .trim()
 }
 
 function clipText(value: string, maxChars: number): string {
@@ -626,6 +686,10 @@ function currentSegment(state: AgentSessionState): Segment {
   return state.segments.at(-1) ?? newSegment()
 }
 
+function streamedTextSourceChars(state: AgentSessionState): number {
+  return state.segments.reduce((total, segment) => total + segment.streamedTextSourceChars, 0)
+}
+
 function newSegment(): Segment {
   return {
     id: ulid(),
@@ -634,8 +698,10 @@ function newSegment(): Segment {
     planStarted: false,
     headerEmitted: false,
     pendingText: '',
+    pendingTextSourceChars: 0,
     pendingTextPlanPrefix: true,
     streamedText: '',
+    streamedTextSourceChars: 0,
     closed: false
   }
 }
@@ -650,7 +716,7 @@ function raiseStreamError(segment: Segment): void {
   if (segment.streamError) throw segment.streamError
 }
 
-function hasVisibleStreamChunks(chunks: AnyChunk[]): boolean {
+function hasVisibleStreamChunks(chunks: SlackStreamChunk[]): boolean {
   return chunks.some(chunk => {
     if (chunk.type === 'markdown_text') return Boolean(chunk.text?.trim())
     if (chunk.type === 'task_update') return Boolean(chunk.title?.trim())
@@ -659,15 +725,20 @@ function hasVisibleStreamChunks(chunks: AnyChunk[]): boolean {
   })
 }
 
-function safeMarkdownFlush(markdown: string, streamedText: string): boolean {
+function safeMarkdownFlush(markdown: string, pendingText: string, streamedText: string): boolean {
   if (hasOpenFence(markdown)) return false
-  if (!streamedText && markdown.trim().length >= FIRST_TEXT_FLUSH_CHARS) return true
+  if (!streamedText && pendingText.trim().length < FIRST_TEXT_FLUSH_CHARS) return false
+  if (isBareListPrefix(pendingText)) return false
   return (
-    markdown.endsWith('\n\n') ||
-    markdown.endsWith('```') ||
-    /[.!?](?:\s|$)$/.test(markdown) ||
-    markdown.length >= TEXT_FLUSH_CHARS
+    pendingText.endsWith('\n') ||
+    pendingText.endsWith('\n\n') ||
+    pendingText.endsWith('```') ||
+    /[.!?](?:\s|$)$/.test(pendingText)
   )
+}
+
+function isBareListPrefix(markdown: string): boolean {
+  return /^\s*\d+[.)]\s*$/.test(markdown)
 }
 
 function balancePendingMarkdown(segment: Segment): void {
@@ -753,6 +824,19 @@ function normalizeDeltaBoundary(previous: string, delta: string): string {
     return `\n${delta}`
   }
   return delta
+}
+
+function appendPendingTextWithinLiveLimit(segment: Segment, markdown: string): number {
+  const previous = segment.streamedText + segment.pendingText
+  const normalized = normalizeDeltaBoundary(previous, markdown)
+  const prefixChars = normalized.length - markdown.length
+  const remaining = MAX_LIVE_TEXT_CHARS - segment.streamedText.length - segment.pendingText.length
+  if (remaining <= 0) return 0
+  const acceptedNormalized = normalized.slice(0, remaining)
+  const acceptedSourceChars = Math.max(0, acceptedNormalized.length - prefixChars)
+  segment.pendingText += acceptedNormalized
+  segment.pendingTextSourceChars += acceptedSourceChars
+  return acceptedSourceChars
 }
 
 export async function withAgentSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {

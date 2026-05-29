@@ -2,6 +2,43 @@ import { describe, expect, it } from 'bun:test'
 import { AgentSessionRenderer, withAgentSessionLock } from './agent-session'
 
 describe('AgentSessionRenderer', () => {
+  it('stops calling assistant.threads.setStatus after the channel returns user_not_found', async () => {
+    const setStatusCalls: any[] = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async (params: any) => {
+            setStatusCalls.push(params)
+            return { ok: false, error: 'user_not_found' }
+          }
+        }
+      },
+      chat: {
+        startStream: async () => ({ ok: true, ts: '1778866940.295499' }),
+        appendStream: async () => ({ ok: true }),
+        stopStream: async () => ({ ok: true }),
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+
+    expect(setStatusCalls.length).toBe(1)
+
+    await renderer.text(sessionId, 'Hi there')
+    await renderer.step(sessionId, { id: 's1', title: 'Run command', status: 'in_progress' })
+    await renderer.done(sessionId)
+
+    expect(setStatusCalls.length).toBe(1)
+  })
+
   it('streams pending text before appending inline task updates', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
@@ -417,7 +454,6 @@ describe('AgentSessionRenderer', () => {
     })
     await renderer.text(sessionId, 'Live answer body.')
     await renderer.done(sessionId, {
-      commentaryMarkdown: 'Planning the tool calls.',
       answerMarkdown: 'Live answer body.'
     })
 
@@ -425,12 +461,67 @@ describe('AgentSessionRenderer', () => {
     const blocks = stop?.params.blocks ?? []
     expect(blocks.some((block: any) => block.type === 'plan')).toBe(false)
     expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
+    expect(stop?.params.chunks).toBeUndefined()
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
   })
 
-  it('shows thinking text by default and renders the answer in markdown on finalize', async () => {
+  it('keeps a durable final answer when the answer did not stream live', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+
+    await renderer.step(sessionId, {
+      id: 'cmd-1',
+      title: '1. Command execution',
+      status: 'in_progress'
+    })
+    await renderer.done(sessionId, {
+      answerMarkdown: 'Final answer body.'
+    })
+
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    const blocks = stop?.params.blocks ?? []
+    expect(blocks.some((block: any) => block.type === 'plan')).toBe(false)
+    expect(
+      blocks.some(
+        (block: any) => block.type === 'markdown' && block.text.includes('Final answer body.')
+      )
+    ).toBe(true)
+    expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
+  })
+
+  it('does not render a context block on finalize', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
@@ -468,19 +559,12 @@ describe('AgentSessionRenderer', () => {
     })
 
     await renderer.done(sessionId, {
-      commentaryMarkdown: 'Planning the tool calls.',
       answerMarkdown: 'Done: five tools called.'
     })
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
     const blocks = stop?.params.blocks ?? []
-    expect(
-      blocks.some(
-        (block: any) =>
-          block.type === 'context' &&
-          String(block.elements?.[0]?.text ?? '').includes('Planning the tool calls.')
-      )
-    ).toBe(true)
+    expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(
       blocks.some(
         (block: any) =>
@@ -606,7 +690,9 @@ describe('AgentSessionRenderer', () => {
       }
     })
 
-    expect(renderer.done(sessionId)).resolves.toBeUndefined()
+    await expect(renderer.done(sessionId)).resolves.toEqual({
+      streamedTextChars: expect.any(Number)
+    })
     expect(stopAttempts).toBe(2)
   })
 
@@ -738,7 +824,7 @@ describe('AgentSessionRenderer', () => {
       recipientTeamId: 'T123',
       recipientUserId: 'U123',
       title: 'Centaur execution',
-      header: 'base · claude-opus-4-7'
+      header: 'base · claude-opus-4-8'
     })
 
     await renderer.step(sessionId, {
@@ -753,7 +839,7 @@ describe('AgentSessionRenderer', () => {
     const chunks = start?.params.chunks ?? []
     expect(chunks[0]).toEqual({
       type: 'markdown_text',
-      text: '_base · claude-opus-4-7_\n'
+      text: '_base · claude-opus-4-8_\n'
     })
     const planUpdateIdx = chunks.findIndex((chunk: any) => chunk.type === 'plan_update')
     expect(planUpdateIdx).toBeGreaterThan(0)

@@ -1,10 +1,10 @@
-import type { AnyBlock, AnyChunk, ContextBlock, MarkdownBlock, RichTextBlock } from '@slack/types'
+import type { AnyBlock, AnyChunk, MarkdownBlock, RichTextBlock } from '@slack/types'
 import { slackReplyLimits } from '../constants'
 
 const MAX_BLOCKS = slackReplyLimits.message.maxBlocks
 const MAX_MARKDOWN_CHARS = slackReplyLimits.stream.markdownChunkChars
 const MAX_FALLBACK_CHARS = slackReplyLimits.text.maxFallbackChars
-const MAX_STREAM_CHUNK_CHARS = 4_000
+const MAX_STREAM_CHUNK_CHARS = slackReplyLimits.stream.markdownChunkChars
 
 export type StatusMetadata = {
   title?: string
@@ -17,32 +17,6 @@ export function blockquoteMarkdown(text: string): string {
     .split('\n')
     .map(line => `> ${line}`)
     .join('\n')
-}
-
-/** Skip Thinking when Codex repeated the same prose in commentary and final_answer. */
-export function shouldShowThinkingBlock(commentary: string, answer: string): boolean {
-  const trimmedCommentary = commentary.trim()
-  const trimmedAnswer = answer.trim()
-  if (!trimmedCommentary) return false
-  if (!trimmedAnswer) return true
-  if (trimmedCommentary === trimmedAnswer) return false
-  if (trimmedAnswer.includes(trimmedCommentary)) return false
-  return true
-}
-
-export function thinkingContextBlock(
-  commentary: string,
-  opts: { heading?: boolean } = {}
-): ContextBlock | null {
-  const trimmed = commentary.trim()
-  if (!trimmed) return null
-  const maxChars = slackReplyLimits.message.thinkingContextChars
-  const body =
-    trimmed.length > maxChars ? `${trimmed.slice(0, maxChars - 13)}\n// truncated` : trimmed
-  return {
-    type: 'context',
-    elements: [{ type: 'mrkdwn', text: opts.heading === false ? body : `*Thinking*\n${body}` }]
-  }
 }
 
 export function renderMarkdownBlocks(markdown: string): MarkdownBlock[] {
@@ -120,14 +94,14 @@ function splitText(input: string, maxChars: number): string[] {
   let remaining = input
   while (remaining.length > maxChars) {
     const hard = remaining.slice(0, maxChars)
-    const boundary = Math.max(
-      hard.lastIndexOf('\n\n'),
-      hard.lastIndexOf('\n'),
-      hard.lastIndexOf(' ')
-    )
-    const take = boundary > maxChars * 0.5 ? boundary : maxChars
+    const paragraphBoundary = hard.lastIndexOf('\n\n')
+    const lineBoundary = hard.lastIndexOf('\n')
+    const spaceBoundary = hard.lastIndexOf(' ')
+    const boundary = Math.max(paragraphBoundary, lineBoundary, spaceBoundary)
+    const delimiterLength = boundary === paragraphBoundary ? 2 : boundary >= 0 ? 1 : 0
+    const take = boundary > maxChars * 0.5 ? boundary + delimiterLength : maxChars
     chunks.push(remaining.slice(0, take))
-    remaining = remaining.slice(take).trimStart()
+    remaining = remaining.slice(take)
   }
   if (remaining) chunks.push(remaining)
   return chunks
