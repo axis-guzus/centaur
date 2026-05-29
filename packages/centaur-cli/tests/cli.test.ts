@@ -357,6 +357,38 @@ describe('environment checks', () => {
     expect(results.find(result => result.name === 'env:claude-code-auth')?.ok).toBe(true)
   })
 
+  it('does not block the default happy path on optional GitHub credentials', () => {
+    const results = envChecks(
+      {
+        SLACK_BOT_TOKEN: 'xoxb-test',
+        SLACK_SIGNING_SECRET: 'signing-test',
+        SLACK_APP_TOKEN: 'xapp-test',
+        OPENAI_API_KEY: 'sk-test',
+      },
+      { harness: 'codex', authMode: 'api_key', installMode: 'local' },
+    )
+
+    const github = results.find(result => result.name === 'env:github')
+    expect(results.every(result => result.ok)).toBe(true)
+    expect(github?.detail).toBe('missing optional')
+    expect(github?.repair).toBeUndefined()
+  })
+
+  it('can still require GitHub credentials for workflows that need them', () => {
+    const results = envChecks(
+      {
+        SLACK_BOT_TOKEN: 'xoxb-test',
+        SLACK_SIGNING_SECRET: 'signing-test',
+        OPENAI_API_KEY: 'sk-test',
+      },
+      { harness: 'codex', authMode: 'api_key', requireGithub: true },
+    )
+
+    const github = results.find(result => result.name === 'env:github')
+    expect(github?.ok).toBe(false)
+    expect(github?.repair).toContain('GITHUB_TOKEN')
+  })
+
   it('requires SLACK_APP_TOKEN for local socket-mode setup checks', () => {
     const results = envChecks(
       {

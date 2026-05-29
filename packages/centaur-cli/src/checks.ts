@@ -88,7 +88,7 @@ function selectedHarnessSecrets(harness: Harness, authMode: AuthMode) {
 
 export function envChecks(
   env: NodeJS.ProcessEnv = process.env,
-  options: { harness?: Harness; authMode?: AuthMode; installMode?: string } = {},
+  options: { harness?: Harness; authMode?: AuthMode; installMode?: string; requireGithub?: boolean } = {},
 ) {
   const harness = options.harness || 'codex'
   const authMode = options.authMode || 'api_key'
@@ -97,6 +97,7 @@ export function envChecks(
   const slackSecrets = ['SLACK_BOT_TOKEN', 'SLACK_SIGNING_SECRET']
   if (options.installMode === 'local') slackSecrets.push('SLACK_APP_TOKEN')
   const missingSlackSecrets = slackSecrets.filter(name => !has(env, name))
+  const hasGithub = has(env, 'GITHUB_APP_ID') || has(env, 'GITHUB_TOKEN')
   const results: CheckResult[] = [
     {
       name: 'env:slack',
@@ -120,9 +121,15 @@ export function envChecks(
     },
     {
       name: 'env:github',
-      ok: has(env, 'GITHUB_APP_ID') || has(env, 'GITHUB_TOKEN'),
-      detail: has(env, 'GITHUB_APP_ID') ? 'GitHub App configured' : has(env, 'GITHUB_TOKEN') ? 'token configured' : 'missing',
-      repair: 'Configure a GitHub App or scoped GITHUB_TOKEN.',
+      ok: hasGithub || !options.requireGithub,
+      detail: has(env, 'GITHUB_APP_ID')
+        ? 'GitHub App configured'
+        : has(env, 'GITHUB_TOKEN')
+          ? 'token configured'
+          : options.requireGithub
+            ? 'missing'
+            : 'missing optional',
+      repair: options.requireGithub ? 'Configure a GitHub App or scoped GITHUB_TOKEN.' : undefined,
     },
   ]
   return results.map(result => (result.ok ? { ...result, repair: undefined } : result))
