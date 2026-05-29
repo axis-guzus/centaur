@@ -897,6 +897,48 @@ esac
       process.env.PATH = previousPath
     }
   })
+
+  it('returns a structured real Slack mention action after local smoke passes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'centaur-cli-smoke-success-'))
+    const kubectl = join(root, 'kubectl')
+    writeFileSync(kubectl, `#!/bin/sh
+joined="$*"
+case "$joined" in
+  *"/agent/spawn"*) echo '{"runtime_id":"rtm-1","assignment_generation":1}' ;;
+  *"/agent/message"*) echo '{"ok":true,"message_id":"msg-1"}' ;;
+  *"/agent/execute"*) echo '{"execution_id":"exe-1","status":"queued"}' ;;
+  *"/agent/executions/exe-1"*) echo '{"status":"completed","result_text":"PONG"}' ;;
+  *"/agent/threads/"*"/release"*) echo '{"ok":true,"released":true}' ;;
+  *) echo "unexpected $joined" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(kubectl, 0o755)
+    const previousPath = process.env.PATH
+    process.env.PATH = `${root}:${previousPath || ''}`
+    try {
+      const { stdout, exitCode } = await runCliWithExit([
+        'smoke',
+        '--timeout-seconds',
+        '30',
+        '--poll-ms',
+        '1',
+        '--json',
+      ])
+      const output = JSON.parse(stdout)
+
+      expect(exitCode).toBe(0)
+      expect(output.ok).toBe(true)
+      expect(output.steps.map((step: { type: string }) => step.type)).toEqual(['command', 'user_action'])
+      expect(output.steps[0].command).toBe('centaur logs --component slackbot --namespace centaur --release centaur --follow')
+      expect(output.steps[1]).toMatchObject({
+        type: 'user_action',
+        platform: 'slack',
+        message: '@<bot> Reply with exactly PONG and nothing else.',
+      })
+    } finally {
+      process.env.PATH = previousPath
+    }
+  })
 })
 
 describe('slackbot smoke', () => {
@@ -1001,6 +1043,50 @@ esac
       expect(output.steps.map((step: { command: string }) => step.command)).toEqual(
         output.cta.commands.map((command: { command: string }) => command.command),
       )
+    } finally {
+      process.env.PATH = previousPath
+    }
+  })
+
+  it('returns a structured real Slack mention action after synthetic Slackbot smoke passes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'centaur-cli-slackbot-success-'))
+    const kubectl = join(root, 'kubectl')
+    writeFileSync(kubectl, `#!/bin/sh
+joined="$*"
+case "$joined" in
+  *"deploy/centaur-centaur-slackbot"*) echo '{"status":200,"text":"ok"}' ;;
+  *"/workflows/runs?thread_key=slack%3ATCLI%3ACCLI%3A1770000000.000001"*) echo '{"ok":true,"items":[{"run_id":"wfr-1","status":"waiting","execution_id":"exe-1"}]}' ;;
+  *"/agent/executions/exe-1"*) echo '{"status":"completed","result_text":"PONG"}' ;;
+  *"/agent/threads/slack%3ATCLI%3ACCLI%3A1770000000.000001/release"*) echo '{"ok":true,"released":true}' ;;
+  *) echo "unexpected $joined" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(kubectl, 0o755)
+    const previousPath = process.env.PATH
+    process.env.PATH = `${root}:${previousPath || ''}`
+    try {
+      const { stdout, exitCode } = await runCliWithExit([
+        'slackbot',
+        'smoke',
+        '--thread-ts',
+        '1770000000.000001',
+        '--timeout-seconds',
+        '30',
+        '--poll-ms',
+        '1',
+        '--json',
+      ])
+      const output = JSON.parse(stdout)
+
+      expect(exitCode).toBe(0)
+      expect(output.ok).toBe(true)
+      expect(output.steps.map((step: { type: string }) => step.type)).toEqual(['command', 'user_action'])
+      expect(output.steps[0].command).toBe('centaur logs --component slackbot --namespace centaur --release centaur --follow')
+      expect(output.steps[1]).toMatchObject({
+        type: 'user_action',
+        platform: 'slack',
+        message: '@<bot> Reply with exactly PONG and nothing else.',
+      })
     } finally {
       process.env.PATH = previousPath
     }

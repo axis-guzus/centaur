@@ -752,6 +752,16 @@ function commandSteps(commands: Array<{ command: string; description: string }>)
   }))
 }
 
+function realSlackMentionAction(prompt: string) {
+  return {
+    type: 'user_action',
+    description: 'send a real Slack mention in a test channel where the Slack app is installed',
+    platform: 'slack',
+    message: `@<bot> ${prompt}`,
+    expectedText: 'Centaur should reply in the Slack thread.',
+  }
+}
+
 function secretInputUserAction(missing: MissingSecretInput[], description: string) {
   return {
     type: 'secret_inputs',
@@ -2586,7 +2596,10 @@ const slackbot = Cli.create('slackbot', {
         description: 'watch Slackbot logs while sending a real Slack mention',
       },
     ]
-    return c.ok({ ...result, steps: commandSteps(commands) }, {
+    const steps = result.ok
+      ? [...commandSteps(commands), realSlackMentionAction(c.options.prompt)]
+      : commandSteps(commands)
+    return c.ok({ ...result, steps }, {
       cta: {
         description: result.ok ? 'Next real Slack verification step:' : 'Slackbot smoke failed; retry or inspect logs:',
         commands,
@@ -3170,7 +3183,9 @@ export const app = Cli.create('centaur', {
       return c.ok({
         ...result,
         slackInstruction: `Mention the Slack app in a test channel: @<bot> ${c.options.prompt}`,
-        steps: commandSteps(commands),
+        steps: result.ok
+          ? [...commandSteps(commands), realSlackMentionAction(c.options.prompt)]
+          : commandSteps(commands),
       }, {
         cta: {
           description: result.ok ? 'Next Slack verification step:' : 'Smoke failed; retry or inspect logs:',
