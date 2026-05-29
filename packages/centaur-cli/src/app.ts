@@ -497,6 +497,7 @@ function deployCommandPartsForInstallMode(
     apply?: boolean
     secretsFile?: string
     imageSource?: ImageSource
+    values?: string
     wait?: boolean
     timeout?: string
   } = {},
@@ -504,6 +505,7 @@ function deployCommandPartsForInstallMode(
   const parts = ['deploy', installMode === 'local' || installMode === 'k3s' ? 'k3s' : 'k8s']
   if (options.apply) parts.push('--apply')
   if (options.imageSource) parts.push('--image-source', options.imageSource)
+  if (options.values && options.values !== 'org/values.centaur.yaml') parts.push('--values', options.values)
   if (options.wait !== false) parts.push('--wait', '--timeout', options.timeout || '10m')
   if (options.secretsFile) parts.push('--secrets-file', options.secretsFile)
   return parts
@@ -515,6 +517,7 @@ function deploymentCommandForInstallMode(
     apply?: boolean
     secretsFile?: string
     imageSource?: ImageSource
+    values?: string
     wait?: boolean
     timeout?: string
   } = {},
@@ -587,6 +590,7 @@ function setupPlan(options: SetupPlanOptions) {
   const deployCommand = deploymentCommandForInstallMode(options.installMode, {
     apply: true,
     imageSource: options.imageSource,
+    values: join(options.overlayPath, 'values.centaur.yaml'),
     secretsFile: deploySecretsFileForBackend(options.backend, options.overlayPath),
   })
   const centaurCommand = (command: string) => `${quotePart(options.bin || 'centaur')} ${command}`
@@ -2031,6 +2035,7 @@ const secrets = Cli.create('secrets', {
     const nextDeployCommand = deploymentCommandForInstallMode(c.options.installMode, {
       apply: true,
       imageSource: c.options.imageSource,
+      values: join(c.options.overlayPath, 'values.centaur.yaml'),
       secretsFile: deploySecretsFile,
     })
     const doctorCommand = [
@@ -2552,6 +2557,7 @@ export const app = Cli.create('centaur', {
       const nextDeployCommand = `centaur ${deploymentCommandForInstallMode(state.installMode, {
         apply: true,
         imageSource: state.imageSource,
+        values: join(state.overlayPath, 'values.centaur.yaml'),
         secretsFile: deploySecretsFileForBackend(state.secretBackend, state.overlayPath),
       })}`
 
@@ -2697,42 +2703,92 @@ export const app = Cli.create('centaur', {
       const deployCommand = deploymentCommandForInstallMode(c.options.installMode, {
         apply: true,
         imageSource: c.options.imageSource,
+        values: join(c.options.overlayPath, 'values.centaur.yaml'),
         secretsFile: deploySecretsFileForDoctor(
           c.options.secretBackend,
           c.options.overlayPath,
           c.options.localEnvPath,
         ),
       })
+      const secretsCommand = {
+        command: commandLine(secretsCollectCommandParts({
+          backend: c.options.secretBackend,
+          installMode: c.options.installMode,
+          imageSource: c.options.imageSource,
+          harness: c.options.harness,
+          authMode: c.options.authMode,
+          overlayPath: c.options.overlayPath,
+          localEnvPath: c.options.localEnvPath,
+        })),
+        description: 'populate missing Slack, harness, and infra secrets',
+      }
+      const retryDoctorParts = [
+        'doctor',
+        ...(c.options.deep ? ['--deep'] : []),
+        '--overlay-path',
+        c.options.overlayPath,
+        '--harness',
+        c.options.harness,
+        '--auth-mode',
+        c.options.authMode,
+        '--secret-backend',
+        c.options.secretBackend,
+        '--install-mode',
+        c.options.installMode,
+        '--image-source',
+        c.options.imageSource,
+      ]
+      if (c.options.localEnvPath) retryDoctorParts.push('--local-env-path', c.options.localEnvPath)
+      const failedResults = results.filter(result => !result.ok)
+      const overlayMissing = failedResults.some(result => result.name.startsWith('overlay:'))
+      const ctaCommands = ok
+        ? [
+            {
+              command: deployCommand,
+              description: 'deploy with Helm using the selected install mode and secret backend',
+            },
+            {
+              command: localRunVerificationCommand(c.options.harness),
+              description: 'run one verified Centaur turn through the local API pod',
+            },
+            {
+              command: slackbotSmokeCommand(),
+              description: 'prove Slackbot can turn a signed Slack mention into a completed Centaur execution',
+            },
+          ]
+        : [
+            ...(overlayMissing
+              ? [{
+                  command: commandLine([
+                    'init',
+                    '--install-mode',
+                    c.options.installMode,
+                    '--image-source',
+                    c.options.imageSource,
+                    '--secret-backend',
+                    c.options.secretBackend,
+                    '--harness',
+                    c.options.harness,
+                    '--auth-mode',
+                    c.options.authMode,
+                    '--overlay-path',
+                    c.options.overlayPath,
+                  ]),
+                  description: 'scaffold missing overlay files before continuing setup',
+                }]
+              : []),
+            ...(c.options.deep ? [secretsCommand] : []),
+            {
+              command: commandLine(retryDoctorParts),
+              description: 'rerun doctor after repairing failed checks',
+            },
+          ]
       return c.ok(
         { ok, results },
         {
           cta: {
-            commands: [
-              {
-                command: commandLine(secretsCollectCommandParts({
-                  backend: c.options.secretBackend,
-                  installMode: c.options.installMode,
-                  imageSource: c.options.imageSource,
-                  harness: c.options.harness,
-                  authMode: c.options.authMode,
-                  overlayPath: c.options.overlayPath,
-                  localEnvPath: c.options.localEnvPath,
-                })),
-                description: 'populate missing Slack, harness, and infra secrets',
-              },
-              {
-                command: deployCommand,
-                description: 'deploy with Helm using the selected install mode and secret backend',
-              },
-              {
-                command: localRunVerificationCommand(c.options.harness),
-                description: 'run one verified Centaur turn through the local API pod',
-              },
-              {
-                command: commandLine(['slackbot', 'smoke']),
-                description: 'prove Slackbot can turn a signed Slack mention into a completed Centaur execution',
-              },
-            ],
+            description: ok ? 'Next deployment commands:' : 'Repair failing checks first:',
+            commands: ctaCommands,
           },
         },
       )

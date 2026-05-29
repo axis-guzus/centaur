@@ -374,6 +374,20 @@ describe('overlay scaffolding', () => {
     expect(output.cta).toBeUndefined()
   })
 
+  it('preserves custom overlay values paths in generated setup deploy commands', async () => {
+    const stdout = await runCli([
+      'setup',
+      '--overlay-path',
+      '/tmp/acme overlay',
+      '--json',
+    ])
+    const output = JSON.parse(stdout)
+    const deploy = output.commands.find((command: string) => command.startsWith('centaur deploy '))
+
+    expect(deploy).toContain("--values '/tmp/acme overlay/values.centaur.yaml'")
+    expect(deploy).toContain("--secrets-file '/tmp/acme overlay/secrets.local.env'")
+  })
+
   it('doctor warns without blocking local subscription bootstrap on read-only backends', async () => {
     const root = mkdtempSync(join(tmpdir(), 'centaur-cli-doctor-'))
     const overlayPath = join(root, 'org')
@@ -974,6 +988,16 @@ describe('secret backends', () => {
   it('uses the selected backend and install mode in doctor deploy CTAs', async () => {
     const root = mkdtempSync(join(tmpdir(), 'centaur-cli-doctor-'))
     const overlayPath = join(root, 'org')
+    writeOverlay({
+      path: overlayPath,
+      org: 'acme',
+      assistantName: 'centaur',
+      domain: 'centaur.acme.com',
+      harness: 'codex',
+      authMode: 'api_key',
+      secretBackend: 'kubernetes',
+    })
+    writeSlackManifest(join(overlayPath, 'slack-app-manifest.json'), 'centaur', 'centaur.acme.com', false)
     const { stdout } = await runCliWithExit([
       'doctor',
       '--secret-backend',
@@ -991,7 +1015,10 @@ describe('secret backends', () => {
       command.command.startsWith('centaur deploy '),
     )
 
+    expect(output.ok).toBe(true)
+    expect(output.cta.description).toBe('Next deployment commands:')
     expect(deploy.command).toContain('centaur deploy k8s --apply --image-source ghcr')
+    expect(deploy.command).toContain(`--values ${join(overlayPath, 'values.centaur.yaml')}`)
     expect(deploy.command).toContain('--wait --timeout 10m')
     expect(deploy.command).not.toContain('--secrets-file')
   })
@@ -1000,6 +1027,16 @@ describe('secret backends', () => {
     const root = mkdtempSync(join(tmpdir(), 'centaur-cli-doctor-local-'))
     const overlayPath = join(root, 'org')
     const localEnvPath = join(root, 'custom.env')
+    writeOverlay({
+      path: overlayPath,
+      org: 'acme',
+      assistantName: 'centaur',
+      domain: 'centaur.acme.com',
+      harness: 'codex',
+      authMode: 'api_key',
+      secretBackend: 'local-env',
+    })
+    writeSlackManifest(join(overlayPath, 'slack-app-manifest.json'), 'centaur', 'centaur.acme.com', true)
     const { stdout } = await runCliWithExit([
       'doctor',
       '--secret-backend',
@@ -1019,9 +1056,34 @@ describe('secret backends', () => {
       command.command.startsWith('centaur deploy '),
     )
 
+    expect(output.ok).toBe(true)
+    expect(output.cta.description).toBe('Next deployment commands:')
     expect(deploy.command).toContain('centaur deploy k3s --apply --image-source ghcr')
+    expect(deploy.command).toContain(`--values ${join(overlayPath, 'values.centaur.yaml')}`)
     expect(deploy.command).toContain(`--secrets-file ${localEnvPath}`)
     expect(deploy.command).not.toContain(join(overlayPath, 'secrets.local.env'))
+  })
+
+  it('does not suggest deploy before failed doctor checks are repaired', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'centaur-cli-doctor-missing-'))
+    const overlayPath = join(root, 'org')
+    const { stdout, exitCode } = await runCliWithExit([
+      'doctor',
+      '--deep',
+      '--overlay-path',
+      overlayPath,
+      '--json',
+    ])
+    const output = JSON.parse(stdout)
+    const ctaCommands = output.cta.commands.map((command: { command: string }) => command.command)
+
+    expect(exitCode).toBe(1)
+    expect(output.ok).toBe(false)
+    expect(output.cta.description).toBe('Repair failing checks first:')
+    expect(ctaCommands[0]).toContain('centaur init')
+    expect(ctaCommands[0]).toContain(`--overlay-path ${overlayPath}`)
+    expect(ctaCommands.some((command: string) => command.startsWith('centaur deploy '))).toBe(false)
+    expect(ctaCommands.at(-1)).toContain('centaur doctor --deep')
   })
 
   it('uses backend-aware deep doctor checks for non-env secret stores', async () => {
