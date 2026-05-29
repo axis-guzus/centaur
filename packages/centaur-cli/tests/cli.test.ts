@@ -962,6 +962,32 @@ describe('secret backends', () => {
     expect(deploy.command).not.toContain(join(overlayPath, 'secrets.local.env'))
   })
 
+  it('uses backend-aware deep doctor checks for non-env secret stores', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'centaur-cli-doctor-backend-'))
+    const overlayPath = join(root, 'org')
+    const { stdout } = await runCliWithExit([
+      'doctor',
+      '--deep',
+      '--secret-backend',
+      'onepassword-connect',
+      '--install-mode',
+      'k8s',
+      '--image-source',
+      'ghcr',
+      '--overlay-path',
+      overlayPath,
+      '--json',
+    ])
+    const output = JSON.parse(stdout)
+    const resultNames = output.results.map((result: { name: string }) => result.name)
+
+    expect(resultNames).toContain('env:OP_CONNECT_TOKEN')
+    expect(resultNames).toContain('env:OP_VAULT')
+    expect(resultNames).not.toContain('env:slack')
+    expect(resultNames).not.toContain('env:codex')
+    expect(resultNames).not.toContain('env:codex-auth')
+  })
+
   it('reports every missing from-env secret input with retry CTAs', async () => {
     const root = mkdtempSync(join(tmpdir(), 'centaur-cli-missing-env-'))
     const overlayPath = join(root, 'org')

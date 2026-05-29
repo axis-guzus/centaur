@@ -15,8 +15,11 @@ import {
   INSTALL_MODES,
   SECRET_BACKENDS,
   VERSION,
+  type AuthMode,
   type Harness,
   type ImageSource,
+  type InstallMode,
+  type SecretBackend,
 } from './constants.js'
 import {
   binaryChecks,
@@ -1425,6 +1428,60 @@ function missingSecretInputsFromEnv(state: {
   return missing
 }
 
+function secretBackendChecks(options: {
+  backend: SecretBackend
+  harness: Harness
+  authMode: AuthMode
+  overlayPath: string
+  localEnvPath?: string
+  installMode?: InstallMode
+}) {
+  if (options.backend === 'onepassword') {
+    return [
+      commandCheck('1password:op', ['op', 'vault', 'list'], 'Set OP_SERVICE_ACCOUNT_TOKEN and run op vault list.'),
+    ]
+  }
+  if (options.backend === 'onepassword-connect') {
+    return [
+      {
+        name: 'env:OP_CONNECT_TOKEN',
+        ok: Boolean(process.env.OP_CONNECT_TOKEN),
+        detail: process.env.OP_CONNECT_TOKEN ? 'set' : 'missing',
+        repair: 'Set OP_CONNECT_TOKEN for 1Password Connect.',
+      },
+      {
+        name: 'env:OP_VAULT',
+        ok: Boolean(process.env.OP_VAULT),
+        detail: process.env.OP_VAULT ? 'set' : 'missing',
+        repair: 'Set OP_VAULT to the vault name or id.',
+      },
+    ]
+  }
+  if (options.backend === 'sops') {
+    return [
+      commandCheck('sops:version', ['sops', '--version'], 'Install sops.'),
+      commandCheck('age:version', ['age', '--version'], 'Install age and generate a key.'),
+    ]
+  }
+  if (options.backend === 'kubernetes') {
+    return [
+      commandCheck('kubectl:secrets', ['kubectl', 'get', 'secret', '-A'], 'Create Kubernetes secrets or configure cluster access.'),
+    ]
+  }
+  const env =
+    options.backend === 'local-env'
+      ? {
+          ...process.env,
+          ...readDotenvFile(options.localEnvPath || defaultSecretTarget('local-env', options.overlayPath)),
+        }
+      : process.env
+  return envChecks(env, {
+    harness: options.harness,
+    authMode: options.authMode,
+    installMode: options.installMode,
+  })
+}
+
 export function codexSubscriptionSecretsFromSources(
   env: NodeJS.ProcessEnv,
   auth: CodexSubscriptionAuth,
@@ -1697,46 +1754,11 @@ const secrets = Cli.create('secrets', {
     harness: harnessSchema.default('codex').describe('Selected default harness'),
     authMode: authModeSchema.default('api_key').describe('Auth mode for the selected harness'),
     overlayPath: z.string().default('org').describe('Overlay path for local generated files'),
+    installMode: installModeSchema.optional().describe('Install mode for local-env required secret checks'),
     localEnvPath: z.string().optional().describe('local-env source file'),
   }),
   run(c) {
-    let results: CheckResult[]
-    if (c.options.backend === 'onepassword') {
-      results = [commandCheck('1password:op', ['op', 'vault', 'list'], 'Set OP_SERVICE_ACCOUNT_TOKEN and run op vault list.')]
-    } else if (c.options.backend === 'onepassword-connect') {
-      results = [
-        {
-          name: 'env:OP_CONNECT_TOKEN',
-          ok: Boolean(process.env.OP_CONNECT_TOKEN),
-          detail: process.env.OP_CONNECT_TOKEN ? 'set' : 'missing',
-          repair: 'Set OP_CONNECT_TOKEN for 1Password Connect.',
-        },
-        {
-          name: 'env:OP_VAULT',
-          ok: Boolean(process.env.OP_VAULT),
-          detail: process.env.OP_VAULT ? 'set' : 'missing',
-          repair: 'Set OP_VAULT to the vault name or id.',
-        },
-      ]
-    } else if (c.options.backend === 'sops') {
-      results = [
-        commandCheck('sops:version', ['sops', '--version'], 'Install sops.'),
-        commandCheck('age:version', ['age', '--version'], 'Install age and generate a key.'),
-      ]
-    } else if (c.options.backend === 'kubernetes') {
-      results = [
-        commandCheck('kubectl:secrets', ['kubectl', 'get', 'secret', '-A'], 'Create Kubernetes secrets or configure cluster access.'),
-      ]
-    } else {
-      const env =
-        c.options.backend === 'local-env'
-          ? {
-              ...process.env,
-              ...readDotenvFile(c.options.localEnvPath || defaultSecretTarget('local-env', c.options.overlayPath)),
-            }
-          : process.env
-      results = envChecks(env, { harness: c.options.harness, authMode: c.options.authMode })
-    }
+    const results = secretBackendChecks(c.options)
     results.push(...brokeredTokenBackendCheck(c.options.backend, c.options.authMode))
     const ok = allOk(results)
     setFailedExit(ok)
@@ -2441,17 +2463,13 @@ export const app = Cli.create('centaur', {
     run(c) {
       const results = [...binaryChecks({ includeDeploy: c.options.deep }), ...overlayChecks(c.options.overlayPath)]
       if (c.options.deep) {
-        const env =
-          c.options.secretBackend === 'local-env'
-            ? {
-                ...process.env,
-                ...readDotenvFile(c.options.localEnvPath || defaultSecretTarget('local-env', c.options.overlayPath)),
-              }
-            : process.env
         results.push(
-          ...envChecks(env, {
+          ...secretBackendChecks({
+            backend: c.options.secretBackend,
             harness: c.options.harness,
             authMode: c.options.authMode,
+            overlayPath: c.options.overlayPath,
+            localEnvPath: c.options.localEnvPath,
             installMode: c.options.installMode,
           }),
           ...brokeredTokenBackendCheck(c.options.secretBackend, c.options.authMode),
