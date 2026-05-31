@@ -4,6 +4,7 @@ use centaur_api_server::{SandboxRuntime, build_router_with_runtime};
 use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig};
 use centaur_sandbox_core::SandboxSpec;
 use centaur_sandbox_local::LocalSandboxBackend;
+use centaur_session_core::ThreadKey;
 use centaur_session_sqlx::PgSessionStore;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -56,9 +57,15 @@ async fn sandbox_runtime_from_env() -> Result<SandboxRuntime, ServerError> {
         "agent-k8s" => {
             let namespace = env::var("SESSION_SANDBOX_K8S_NAMESPACE")
                 .unwrap_or_else(|_| "centaur-sandbox-e2e".to_owned());
+            let workload =
+                env::var("SESSION_SANDBOX_WORKLOAD").unwrap_or_else(|_| "mock".to_owned());
             let image =
-                env::var("SESSION_SANDBOX_IMAGE").unwrap_or_else(|_| "busybox:1.36".to_owned());
+                env::var("SESSION_SANDBOX_IMAGE").unwrap_or_else(|_| match workload.as_str() {
+                    "codex-app-server" => "centaur-agent:latest".to_owned(),
+                    _ => "busybox:1.36".to_owned(),
+                });
             let mut config = AgentSandboxConfig::new(namespace);
+            config.image_pull_policy = env::var("SESSION_SANDBOX_IMAGE_PULL_POLICY").ok();
             config.ready_timeout = Duration::from_secs(
                 env::var("SESSION_SANDBOX_READY_TIMEOUT_SECS")
                     .ok()
@@ -66,21 +73,34 @@ async fn sandbox_runtime_from_env() -> Result<SandboxRuntime, ServerError> {
                     .unwrap_or(90),
             );
 
-            let backend = if let Ok(context) = env::var("SESSION_SANDBOX_K8S_CONTEXT") {
+            let client = if let Ok(context) = env::var("SESSION_SANDBOX_K8S_CONTEXT") {
                 let kube_config = kube::Config::from_kubeconfig(&kube::config::KubeConfigOptions {
                     context: Some(context),
                     ..kube::config::KubeConfigOptions::default()
                 })
                 .await?;
-                AgentSandboxBackend::new(kube::Client::try_from(kube_config)?, config)
+                kube::Client::try_from(kube_config)?
             } else {
-                AgentSandboxBackend::try_default(config.namespace.clone()).await?
+                kube::Client::try_default().await?
             };
+            let backend = AgentSandboxBackend::new(client, config);
 
-            Ok(SandboxRuntime::backend(
-                Arc::new(backend),
-                agent_k8s_mock_app_server_spec(&image),
-            ))
+            match workload.as_str() {
+                "mock" => Ok(SandboxRuntime::backend(
+                    Arc::new(backend),
+                    agent_k8s_mock_app_server_spec(&image),
+                )),
+                "codex-app-server" => {
+                    let env_template = codex_app_server_env_template();
+                    Ok(SandboxRuntime::backend_with_spec_factory(
+                        Arc::new(backend),
+                        move |thread_key, _execution_id| {
+                            codex_app_server_spec(&image, thread_key, &env_template)
+                        },
+                    ))
+                }
+                other => Err(ServerError::InvalidSandboxWorkload(other.to_owned())),
+            }
         }
         other => Err(ServerError::InvalidSandboxBackend(other.to_owned())),
     }
@@ -96,6 +116,64 @@ fn agent_k8s_mock_app_server_spec(image: &str) -> SandboxSpec {
     SandboxSpec::new(image)
         .command(["/bin/sh", "-lc"])
         .args([mock_app_server_script()])
+}
+
+fn codex_app_server_spec(
+    image: &str,
+    thread_key: &ThreadKey,
+    env_template: &[(String, String)],
+) -> SandboxSpec {
+    let mut spec = SandboxSpec::new(image).env("CENTAUR_THREAD_KEY", thread_key.as_str());
+    for (name, value) in env_template {
+        spec = spec.env(name.clone(), value.clone());
+    }
+    spec
+}
+
+fn codex_app_server_env_template() -> Vec<(String, String)> {
+    let mut envs = Vec::new();
+    push_env(
+        &mut envs,
+        "CENTAUR_API_URL",
+        env::var("SESSION_SANDBOX_CENTAUR_API_URL")
+            .or_else(|_| env::var("CENTAUR_API_URL"))
+            .unwrap_or_else(|_| "http://api:8000".to_owned()),
+    );
+    if let Ok(api_key) =
+        env::var("SESSION_SANDBOX_CENTAUR_API_KEY").or_else(|_| env::var("CENTAUR_API_KEY"))
+    {
+        push_env(&mut envs, "CENTAUR_API_KEY", api_key);
+    }
+
+    for name in passthrough_env_names() {
+        if let Ok(value) = env::var(&name) {
+            push_env(&mut envs, &name, value);
+        }
+    }
+
+    envs
+}
+
+fn passthrough_env_names() -> impl Iterator<Item = String> {
+    env::var("SESSION_SANDBOX_PASSTHROUGH_ENV")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+fn push_env(envs: &mut Vec<(String, String)>, name: &str, value: String) {
+    if let Some((_, existing_value)) = envs
+        .iter_mut()
+        .find(|(existing_name, _)| existing_name == name)
+    {
+        *existing_value = value;
+    } else {
+        envs.push((name.to_owned(), value));
+    }
 }
 
 fn mock_app_server_script() -> &'static str {
@@ -126,6 +204,8 @@ enum ServerError {
     MissingDatabaseUrl,
     #[error("unknown SESSION_SANDBOX_BACKEND {0:?}; expected mock, local, or agent-k8s")]
     InvalidSandboxBackend(String),
+    #[error("unknown SESSION_SANDBOX_WORKLOAD {0:?}; expected mock or codex-app-server")]
+    InvalidSandboxWorkload(String),
     #[error(transparent)]
     AddrParse(#[from] std::net::AddrParseError),
     #[error(transparent)]
