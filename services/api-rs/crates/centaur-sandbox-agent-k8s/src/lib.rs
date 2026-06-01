@@ -955,7 +955,18 @@ fn env_json(spec: &SandboxSpec, resolved_iron_proxy: Option<&ResolvedIronProxy>)
         for (name, value) in &resolved_iron_proxy.placeholder_env {
             env.entry(name.clone()).or_insert_with(|| value.clone());
         }
-        for (name, value) in proxy_env(&resolved_iron_proxy.proxy_host) {
+        let api_host = env
+            .get("CENTAUR_API_URL")
+            .and_then(|value| host_from_url(value));
+        let no_proxy_extra = ["NO_PROXY", "no_proxy"]
+            .into_iter()
+            .filter_map(|name| env.get(name).map(String::as_str))
+            .collect::<Vec<_>>();
+        for (name, value) in proxy_env(
+            &resolved_iron_proxy.proxy_host,
+            api_host.as_deref(),
+            &no_proxy_extra,
+        ) {
             env.insert(name, value);
         }
     }
@@ -964,21 +975,21 @@ fn env_json(spec: &SandboxSpec, resolved_iron_proxy: Option<&ResolvedIronProxy>)
         .collect()
 }
 
-fn proxy_env(proxy_host: &str) -> BTreeMap<String, String> {
+fn proxy_env(
+    proxy_host: &str,
+    api_host: Option<&str>,
+    no_proxy_extra: &[&str],
+) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     let proxy_url = format!("http://{proxy_host}:8080");
+    let no_proxy = no_proxy_value(proxy_host, api_host, no_proxy_extra);
+    env.insert("FIREWALL_HOST".to_owned(), proxy_host.to_owned());
     env.insert("HTTP_PROXY".to_owned(), proxy_url.clone());
     env.insert("HTTPS_PROXY".to_owned(), proxy_url.clone());
     env.insert("http_proxy".to_owned(), proxy_url.clone());
     env.insert("https_proxy".to_owned(), proxy_url);
-    env.insert(
-        "NO_PROXY".to_owned(),
-        "localhost,127.0.0.1,::1,api".to_owned(),
-    );
-    env.insert(
-        "no_proxy".to_owned(),
-        "localhost,127.0.0.1,::1,api".to_owned(),
-    );
+    env.insert("NO_PROXY".to_owned(), no_proxy.clone());
+    env.insert("no_proxy".to_owned(), no_proxy);
     env.insert(
         "NODE_EXTRA_CA_CERTS".to_owned(),
         "/firewall-certs/ca-cert.pem".to_owned(),
@@ -996,6 +1007,54 @@ fn proxy_env(proxy_host: &str) -> BTreeMap<String, String> {
         "/firewall-certs/ca-cert.pem".to_owned(),
     );
     env
+}
+
+fn no_proxy_value(proxy_host: &str, api_host: Option<&str>, extra_values: &[&str]) -> String {
+    let mut hosts = vec![
+        "localhost".to_owned(),
+        "127.0.0.1".to_owned(),
+        "::1".to_owned(),
+        proxy_host.to_owned(),
+        "api".to_owned(),
+        "victoriametrics".to_owned(),
+        "victorialogs".to_owned(),
+    ];
+    if let Some(api_host) = api_host.filter(|value| !value.is_empty()) {
+        hosts.push(api_host.to_owned());
+    }
+    for value in extra_values {
+        hosts.extend(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|host| !host.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    let mut deduped = Vec::new();
+    for host in hosts {
+        if !deduped.contains(&host) {
+            deduped.push(host);
+        }
+    }
+    deduped.join(",")
+}
+
+fn host_from_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    let without_scheme = value
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(value);
+    let authority = without_scheme.split('/').next()?.trim();
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, host_port)| host_port)
+        .unwrap_or(authority);
+    let host = host_port
+        .split_once(':')
+        .map_or(host_port, |(host, _)| host);
+    (!host.is_empty()).then(|| host.to_owned())
 }
 
 fn spec_env<'a>(spec: &'a SandboxSpec, name: &str) -> Option<&'a str> {
@@ -1436,7 +1495,8 @@ mod tests {
             listen_ports: vec![8080],
         };
         let spec = SandboxSpec::new("centaur-agent:latest")
-            .env("CENTAUR_API_URL", "http://api:8000")
+            .env("CENTAUR_API_URL", "http://centaur-centaur-api:8000")
+            .env("NO_PROXY", "otel.local")
             .env("CENTAUR_HARNESS_KIND", "codex");
 
         let sandbox = build_agent_sandbox(
@@ -1469,7 +1529,11 @@ mod tests {
             .map(|env| (env.name.as_str(), env.value.as_deref().unwrap_or("")))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(agent_env["OPENAI_API_KEY"], "OPENAI_API_KEY");
+        assert_eq!(agent_env["FIREWALL_HOST"], "asbx-test-proxy");
         assert_eq!(agent_env["HTTPS_PROXY"], "http://asbx-test-proxy:8080");
+        assert!(agent_env["NO_PROXY"].contains("asbx-test-proxy"));
+        assert!(agent_env["NO_PROXY"].contains("centaur-centaur-api"));
+        assert!(agent_env["NO_PROXY"].contains("otel.local"));
         assert_eq!(
             agent_env["REQUESTS_CA_BUNDLE"],
             "/firewall-certs/ca-cert.pem"
