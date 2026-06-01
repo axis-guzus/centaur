@@ -143,6 +143,7 @@ durable session store:
 
 - create or reuse thread sessions
 - start executions and ensure the backing sandbox exists
+- own sandbox workload modes that translate session intent into `SandboxSpec`
 - own live sandbox stdin/stdout/stderr pumps
 - frame sandbox byte streams into session events
 - expose replayable session event streams for thin HTTP adapters
@@ -151,7 +152,8 @@ This crate owns protocol framing such as NDJSON lines. It may use
 `tokio_util::codec::FramedRead` and `FramedWrite` over `SandboxIo`, but those
 details should not live in the HTTP server crate. It should consume sandboxes
 through the generic manager interface; backend selection remains startup
-configuration, not execution-path branching.
+configuration, and workload selection remains a runtime mode, not API-server
+business logic.
 
 ## Core Types
 

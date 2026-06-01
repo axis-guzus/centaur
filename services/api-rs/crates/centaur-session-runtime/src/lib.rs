@@ -40,6 +40,17 @@ pub struct SandboxRuntime {
     spec_factory: SandboxSpecFactory,
 }
 
+#[derive(Clone, Debug)]
+pub enum SandboxWorkloadMode {
+    MockAppServer {
+        image: String,
+    },
+    CodexAppServer {
+        image: String,
+        env: Vec<(String, String)>,
+    },
+}
+
 #[derive(Debug)]
 pub struct ExecuteSessionInput {
     pub metadata: Option<Value>,
@@ -298,6 +309,15 @@ impl SandboxRuntime {
         Self::backend_with_spec_factory(backend, spec_factory)
     }
 
+    pub fn backend_with_workload(
+        backend: Arc<dyn SandboxBackend>,
+        workload: SandboxWorkloadMode,
+    ) -> Self {
+        Self::backend_with_spec_factory(backend, move |thread_key, _execution_id| {
+            workload.spec(thread_key)
+        })
+    }
+
     pub fn backend_with_spec_factory<F>(backend: Arc<dyn SandboxBackend>, spec_factory: F) -> Self
     where
         F: Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync + 'static,
@@ -307,6 +327,62 @@ impl SandboxRuntime {
             spec_factory: Arc::new(spec_factory),
         }
     }
+}
+
+impl SandboxWorkloadMode {
+    pub fn mock_app_server(image: impl Into<String>) -> Self {
+        Self::MockAppServer {
+            image: image.into(),
+        }
+    }
+
+    pub fn codex_app_server(
+        image: impl Into<String>,
+        env: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        Self::CodexAppServer {
+            image: image.into(),
+            env: env.into_iter().collect(),
+        }
+    }
+
+    fn spec(&self, thread_key: &ThreadKey) -> SandboxSpec {
+        match self {
+            Self::MockAppServer { image } => SandboxSpec::new(image)
+                .command(["/bin/sh", "-lc"])
+                .args([mock_app_server_script()]),
+            Self::CodexAppServer { image, env } => {
+                let mut spec =
+                    SandboxSpec::new(image).env("CENTAUR_THREAD_KEY", thread_key.as_str());
+                for (name, value) in env {
+                    spec = spec.env(name.clone(), value.clone());
+                }
+                spec
+            }
+        }
+    }
+}
+
+fn mock_app_server_script() -> &'static str {
+    r#"while IFS= read -r line; do
+printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"startup"}'
+sleep 0.2
+printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"app_server_started"}'
+sleep 0.2
+printf '%s\n' '{"type":"thread.started","thread_id":"mock-codex-thread"}'
+sleep 0.2
+turn_index=1
+while [ "$turn_index" -le 3 ]; do
+  turn_id="mock-turn-$turn_index"
+  printf '{"type":"turn.started","turn_id":"%s"}\n' "$turn_id"
+  sleep 0.2
+  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG %s"}\n' "$turn_id" "$turn_index"
+  sleep 0.2
+  printf '{"type":"turn.completed","turn":{"id":"%s"},"usage":{"input_tokens":0,"output_tokens":1}}\n' "$turn_id"
+  sleep 0.2
+  turn_index=$((turn_index + 1))
+done
+done"#
 }
 
 fn session_event_stream(

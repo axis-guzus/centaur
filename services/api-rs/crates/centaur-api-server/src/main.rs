@@ -1,19 +1,15 @@
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 
-use centaur_api_server::{
-    SandboxRuntime, build_router_with_runtime, local_mock_app_server_spec,
-    local_mock_sandbox_runtime, mock_app_server_script,
-};
+use centaur_api_server::{SandboxRuntime, build_router_with_runtime};
 use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig};
-use centaur_sandbox_core::SandboxSpec;
 use centaur_sandbox_local::LocalSandboxBackend;
-use centaur_session_core::ThreadKey;
+use centaur_session_runtime::SandboxWorkloadMode;
 use centaur_session_sqlx::PgSessionStore;
 use clap::{Parser, ValueEnum};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::info;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{EnvFilter, fmt as tracing_fmt};
 
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
@@ -38,7 +34,7 @@ async fn main() -> Result<(), ServerError> {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    fmt().with_env_filter(filter).json().init();
+    tracing_fmt().with_env_filter(filter).json().init();
 }
 
 async fn shutdown_signal() {
@@ -47,16 +43,11 @@ async fn shutdown_signal() {
 
 async fn sandbox_runtime_from_args(args: &Args) -> Result<SandboxRuntime, ServerError> {
     match args.session_sandbox_backend {
-        SandboxBackendKind::Mock => Ok(local_mock_sandbox_runtime()),
-        SandboxBackendKind::Local => Ok(SandboxRuntime::backend(
+        SandboxBackendKind::Local => Ok(SandboxRuntime::backend_with_workload(
             Arc::new(LocalSandboxBackend::new()),
-            local_mock_app_server_spec(),
+            local_workload_mode(args)?,
         )),
         SandboxBackendKind::AgentK8s => {
-            let image = args
-                .session_sandbox_image
-                .clone()
-                .unwrap_or_else(|| default_sandbox_image(args.session_sandbox_workload).to_owned());
             let mut config = AgentSandboxConfig::new(args.session_sandbox_k8s_namespace.clone());
             config.image_pull_policy = args.session_sandbox_image_pull_policy.clone();
             config.ready_timeout = Duration::from_secs(args.session_sandbox_ready_timeout_secs);
@@ -73,21 +64,36 @@ async fn sandbox_runtime_from_args(args: &Args) -> Result<SandboxRuntime, Server
             };
             let backend = AgentSandboxBackend::new(client, config);
 
-            match args.session_sandbox_workload {
-                SandboxWorkloadKind::Mock => Ok(SandboxRuntime::backend(
-                    Arc::new(backend),
-                    agent_k8s_mock_app_server_spec(&image),
-                )),
-                SandboxWorkloadKind::CodexAppServer => {
-                    let env_template = codex_app_server_env_template(args);
-                    Ok(SandboxRuntime::backend_with_spec_factory(
-                        Arc::new(backend),
-                        move |thread_key, _execution_id| {
-                            codex_app_server_spec(&image, thread_key, &env_template)
-                        },
-                    ))
-                }
-            }
+            Ok(SandboxRuntime::backend_with_workload(
+                Arc::new(backend),
+                container_workload_mode(args),
+            ))
+        }
+    }
+}
+
+fn local_workload_mode(args: &Args) -> Result<SandboxWorkloadMode, ServerError> {
+    match args.session_sandbox_workload {
+        SandboxWorkloadKind::Mock => Ok(SandboxWorkloadMode::mock_app_server(
+            args.session_sandbox_image
+                .clone()
+                .unwrap_or_else(|| "local-mock-app-server".to_owned()),
+        )),
+        SandboxWorkloadKind::CodexAppServer => Err(ServerError::UnsupportedConfig(
+            "codex-app-server workload requires --session-sandbox-backend agent-k8s".to_owned(),
+        )),
+    }
+}
+
+fn container_workload_mode(args: &Args) -> SandboxWorkloadMode {
+    let image = args
+        .session_sandbox_image
+        .clone()
+        .unwrap_or_else(|| default_sandbox_image(args.session_sandbox_workload).to_owned());
+    match args.session_sandbox_workload {
+        SandboxWorkloadKind::Mock => SandboxWorkloadMode::mock_app_server(image),
+        SandboxWorkloadKind::CodexAppServer => {
+            SandboxWorkloadMode::codex_app_server(image, codex_app_server_env_template(args))
         }
     }
 }
@@ -105,7 +111,7 @@ struct Args {
         long,
         env = "SESSION_SANDBOX_BACKEND",
         value_enum,
-        default_value = "mock"
+        default_value = "local"
     )]
     session_sandbox_backend: SandboxBackendKind,
     #[arg(
@@ -143,7 +149,6 @@ struct Args {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum SandboxBackendKind {
-    Mock,
     Local,
     #[value(name = "agent-k8s")]
     AgentK8s,
@@ -161,24 +166,6 @@ fn default_sandbox_image(workload: SandboxWorkloadKind) -> &'static str {
         SandboxWorkloadKind::Mock => "busybox:1.36",
         SandboxWorkloadKind::CodexAppServer => "centaur-agent:latest",
     }
-}
-
-fn agent_k8s_mock_app_server_spec(image: &str) -> SandboxSpec {
-    SandboxSpec::new(image)
-        .command(["/bin/sh", "-lc"])
-        .args([mock_app_server_script()])
-}
-
-fn codex_app_server_spec(
-    image: &str,
-    thread_key: &ThreadKey,
-    env_template: &[(String, String)],
-) -> SandboxSpec {
-    let mut spec = SandboxSpec::new(image).env("CENTAUR_THREAD_KEY", thread_key.as_str());
-    for (name, value) in env_template {
-        spec = spec.env(name.clone(), value.clone());
-    }
-    spec
 }
 
 fn codex_app_server_env_template(args: &Args) -> Vec<(String, String)> {
@@ -227,11 +214,11 @@ enum ServerError {
     #[error(transparent)]
     Store(#[from] centaur_session_sqlx::SessionStoreError),
     #[error(transparent)]
-    Sandbox(#[from] centaur_sandbox_core::SandboxError),
-    #[error(transparent)]
     KubeConfig(#[from] kube::config::KubeconfigError),
     #[error(transparent)]
     KubeInferConfig(#[from] kube::config::InferConfigError),
     #[error(transparent)]
     Kube(#[from] kube::Error),
+    #[error("{0}")]
+    UnsupportedConfig(String),
 }

@@ -1,4 +1,4 @@
-use std::{convert::Infallible, sync::Arc};
+use std::convert::Infallible;
 
 use axum::{
     Json, Router,
@@ -10,8 +10,6 @@ use axum::{
     },
     routing::{get, post},
 };
-use centaur_sandbox_core::SandboxSpec;
-use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_session_core::{HarnessType, SessionEvent, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, SESSION_OUTPUT_LINE_EVENT, SessionRuntimeError,
@@ -28,47 +26,8 @@ pub struct AppState {
     runtime: SessionRuntime,
 }
 
-pub fn build_router(store: PgSessionStore) -> Router {
-    build_router_with_runtime(store, local_mock_sandbox_runtime())
-}
-
 pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Router {
     build_router_with_session_runtime(SessionRuntime::new(store, sandbox_runtime))
-}
-
-pub fn local_mock_sandbox_runtime() -> SandboxRuntime {
-    SandboxRuntime::backend(
-        Arc::new(LocalSandboxBackend::new()),
-        local_mock_app_server_spec(),
-    )
-}
-
-pub fn local_mock_app_server_spec() -> SandboxSpec {
-    SandboxSpec::new("/bin/sh")
-        .command(["/bin/sh", "-lc"])
-        .args([mock_app_server_script()])
-}
-
-pub fn mock_app_server_script() -> &'static str {
-    r#"while IFS= read -r line; do
-printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"startup"}'
-sleep 0.2
-printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"app_server_started"}'
-sleep 0.2
-printf '%s\n' '{"type":"thread.started","thread_id":"mock-codex-thread"}'
-sleep 0.2
-turn_index=1
-while [ "$turn_index" -le 3 ]; do
-  turn_id="mock-turn-$turn_index"
-  printf '{"type":"turn.started","turn_id":"%s"}\n' "$turn_id"
-  sleep 0.2
-  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG %s"}\n' "$turn_id" "$turn_index"
-  sleep 0.2
-  printf '{"type":"turn.completed","turn":{"id":"%s"},"usage":{"input_tokens":0,"output_tokens":1}}\n' "$turn_id"
-  sleep 0.2
-  turn_index=$((turn_index + 1))
-done
-done"#
 }
 
 pub fn build_router_with_session_runtime(runtime: SessionRuntime) -> Router {
@@ -249,14 +208,87 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::build_router;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    use async_trait::async_trait;
+    use centaur_sandbox_core::{
+        ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
+        SandboxResult, SandboxSpec, SandboxStatus,
+    };
+    use centaur_session_runtime::SandboxRuntime;
     use centaur_session_sqlx::PgSessionStore;
     use sqlx::PgPool;
+
+    use super::build_router_with_runtime;
 
     #[tokio::test]
     async fn router_builds() {
         let pool =
             PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
-        let _router = build_router(PgSessionStore::new(pool));
+        let _router = build_router_with_runtime(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+        );
+    }
+
+    #[derive(Default)]
+    struct TestBackend {
+        next_id: AtomicU64,
+    }
+
+    #[async_trait]
+    impl SandboxBackend for TestBackend {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+
+        async fn create(&self, _spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+            Ok(SandboxHandle::new(
+                SandboxId::new(format!("test-{id}")),
+                self.name(),
+            ))
+        }
+
+        async fn open_io(&self, _id: &SandboxId) -> SandboxResult<SandboxIo> {
+            unreachable!("router construction should not open sandbox I/O")
+        }
+
+        async fn status(&self, _id: &SandboxId) -> SandboxResult<SandboxStatus> {
+            Ok(SandboxStatus::Running)
+        }
+
+        async fn observe(&self, id: &SandboxId) -> SandboxResult<ObservedSandbox> {
+            Ok(ObservedSandbox::new(
+                id.clone(),
+                self.name(),
+                SandboxStatus::Running,
+            ))
+        }
+
+        async fn list_observed(&self) -> SandboxResult<Vec<ObservedSandbox>> {
+            Ok(Vec::new())
+        }
+
+        async fn stop(&self, _id: &SandboxId) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &SandboxId) -> SandboxResult<()> {
+            Err(SandboxError::Unsupported {
+                backend: self.name(),
+                operation: "pause",
+            })
+        }
+
+        async fn resume(&self, _id: &SandboxId) -> SandboxResult<()> {
+            Err(SandboxError::Unsupported {
+                backend: self.name(),
+                operation: "resume",
+            })
+        }
     }
 }
