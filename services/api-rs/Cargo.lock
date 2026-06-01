@@ -262,11 +262,11 @@ name = "centaur-api-server"
 version = "0.1.0"
 dependencies = [
  "axum",
- "bytes",
  "centaur-sandbox-agent-k8s",
  "centaur-sandbox-core",
  "centaur-sandbox-local",
  "centaur-session-core",
+ "centaur-session-runtime",
  "centaur-session-sqlx",
  "clap",
  "futures-util",
@@ -276,7 +276,6 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -366,6 +365,21 @@ dependencies = [
  "strum 0.28.0",
  "thiserror",
  "time",
+]
+
+[[package]]
+name = "centaur-session-runtime"
+version = "0.1.0"
+dependencies = [
+ "centaur-sandbox-core",
+ "centaur-session-core",
+ "centaur-session-sqlx",
+ "futures-util",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

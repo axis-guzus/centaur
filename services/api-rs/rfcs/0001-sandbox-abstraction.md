@@ -76,6 +76,7 @@ services/api-rs/
     centaur-sandbox-local/
     centaur-sandbox-agent-k8s/
     centaur-sandbox-manager/
+    centaur-session-runtime/
   rfcs/
     0001-sandbox-abstraction.md
 ```
@@ -134,6 +135,21 @@ Internal orchestration over `SandboxBackend`:
 
 This crate should not expose HTTP. A future API layer can call this crate after
 the higher-level Centaur data model is settled.
+
+### `centaur-session-runtime`
+
+Internal session control-plane runtime over the sandbox abstraction and durable
+session store:
+
+- create or reuse thread sessions
+- start executions and ensure the backing sandbox exists
+- own live sandbox stdin/stdout/stderr pumps
+- frame sandbox byte streams into session events
+- expose replayable session event streams for thin HTTP adapters
+
+This crate owns protocol framing such as NDJSON lines. It may use
+`tokio_util::codec::FramedRead` and `FramedWrite` over `SandboxIo`, but those
+details should not live in the HTTP server crate.
 
 ## Core Types
 
@@ -239,8 +255,9 @@ Transport rules:
   stopping the sandbox.
 - The sandbox layer does not append newlines, JSON-encode values, or parse
   stdout.
-- Protocol framing belongs above this layer. A session API can wrap stdout with
-  `tokio_util::codec::FramedRead` and stdin with `FramedWrite`.
+- Protocol framing belongs above this layer. The session runtime can wrap stdout
+  with `tokio_util::codec::FramedRead` and stdin with `FramedWrite`; an HTTP
+  server should only adapt those runtime events to HTTP/SSE.
 - Backends may reject a second `open_io` call for the same live workload if the
   first stdio session still owns the transport.
 - EOF on `stdout` or `stderr` means that stream is closed. Call `observe` or
@@ -258,15 +275,16 @@ parse stdout lines back into agent events without changing the sandbox backend.
 ## Output Recovery Model
 
 Durable output recovery is not part of the first implementation milestone. The
-session/control-plane layer should persist framed output above the sandbox
-boundary so a future API process can recover output after a crash.
+session runtime should persist framed output above the sandbox boundary so a
+future HTTP process can recover output after a crash without owning live sandbox
+transport.
 
-Kubernetes attach is not durable. If the API process owns a live attach stream
-and then crashes, bytes written by the sandbox while the API is down may be lost
-from that live stream. Kubernetes Pod logs may recover some output, but they are
-not a strong enough source of truth because log access is timestamp/tail based,
-rotation can drop old bytes, and stream framing is weaker than the sandbox API
-needs.
+Kubernetes attach is not durable. If an in-process session runtime owns a live
+attach stream and then crashes, bytes written by the sandbox while that runtime
+is down may be lost from the live stream. Kubernetes Pod logs may recover some
+output, but they are not a strong enough source of truth because log access is
+timestamp/tail based, rotation can drop old bytes, and stream framing is weaker
+than the sandbox API needs.
 
 The long-term design should make output durable inside the sandbox runtime. For
 Agent Sandboxes, the likely shape is a stdout/stderr spool on the state volume:

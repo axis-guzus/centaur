@@ -8,6 +8,7 @@ members = [
     "crates/centaur-sandbox-manager",
     "crates/centaur-session-cli",
     "crates/centaur-session-core",
+    "crates/centaur-session-runtime",
     "crates/centaur-session-sqlx",
 ]
 resolver = "3"
@@ -27,6 +28,7 @@ centaur-sandbox-agent-k8s = { path = "crates/centaur-sandbox-agent-k8s" }
 centaur-sandbox-local = { path = "crates/centaur-sandbox-local" }
 centaur-sandbox-manager = { path = "crates/centaur-sandbox-manager" }
 centaur-session-core = { path = "crates/centaur-session-core" }
+centaur-session-runtime = { path = "crates/centaur-session-runtime" }
 centaur-session-sqlx = { path = "crates/centaur-session-sqlx" }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 crossterm = "0.28"

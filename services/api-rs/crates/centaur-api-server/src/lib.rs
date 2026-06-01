@@ -1,9 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    convert::Infallible,
-    sync::Arc,
-    time::Duration,
-};
+use std::convert::Infallible;
 
 use axum::{
     Json, Router,
@@ -15,39 +10,20 @@ use axum::{
     },
     routing::{get, post},
 };
-use centaur_sandbox_core::{
-    SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec,
-    SandboxStatus, SandboxWrite,
+use centaur_session_core::{HarnessType, SessionEvent, SessionMessageInput, ThreadKey};
+use centaur_session_runtime::{
+    ExecuteSessionInput, SESSION_OUTPUT_LINE_EVENT, SessionRuntimeError,
 };
-use centaur_session_core::{
-    HarnessType, SessionEvent, SessionMessageInput, ThreadKey, ThreadKeyError,
-};
-use centaur_session_sqlx::{PgSessionStore, SessionStoreError, default_metadata};
-use futures_util::{SinkExt, StreamExt, stream};
+pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
+use centaur_session_sqlx::{PgSessionStore, SessionStoreError};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::{io, sync::Mutex, time::sleep};
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
-use tracing::warn;
-
-const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
-const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 1024 * 1024;
-const DEFAULT_IDLE_TIMEOUT_MS: u64 = 1_000;
-const DEFAULT_MAX_DURATION_MS: u64 = 60_000;
-type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync>;
-type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 
 #[derive(Clone)]
 pub struct AppState {
-    store: PgSessionStore,
-    sandbox_runtime: SandboxRuntime,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
-}
-
-#[derive(Clone)]
-struct SessionPipe {
-    stdin: Arc<Mutex<SessionInputSink>>,
+    runtime: SessionRuntime,
 }
 
 pub fn build_router(store: PgSessionStore) -> Router {
@@ -55,44 +31,17 @@ pub fn build_router(store: PgSessionStore) -> Router {
 }
 
 pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Router {
-    let state = AppState {
-        store,
-        sandbox_runtime,
-        sandbox_pipes: Arc::new(Mutex::new(HashMap::new())),
-    };
+    build_router_with_session_runtime(SessionRuntime::new(store, sandbox_runtime))
+}
+
+pub fn build_router_with_session_runtime(runtime: SessionRuntime) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/session/{thread_key}", post(create_or_get_session))
         .route("/api/session/{thread_key}/messages", post(append_messages))
         .route("/api/session/{thread_key}/execute", post(execute_session))
         .route("/api/session/{thread_key}/events", get(stream_events))
-        .with_state(state)
-}
-
-#[derive(Clone)]
-pub enum SandboxRuntime {
-    Mock,
-    Backend {
-        backend: Arc<dyn SandboxBackend>,
-        spec_factory: SandboxSpecFactory,
-    },
-}
-
-impl SandboxRuntime {
-    pub fn backend(backend: Arc<dyn SandboxBackend>, spec: SandboxSpec) -> Self {
-        let spec_factory = move |_thread_key: &ThreadKey, _execution_id: &str| spec.clone();
-        Self::backend_with_spec_factory(backend, spec_factory)
-    }
-
-    pub fn backend_with_spec_factory<F>(backend: Arc<dyn SandboxBackend>, spec_factory: F) -> Self
-    where
-        F: Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync + 'static,
-    {
-        Self::Backend {
-            backend,
-            spec_factory: Arc::new(spec_factory),
-        }
-    }
+        .with_state(AppState { runtime })
 }
 
 async fn healthz() -> Json<Value> {
@@ -105,10 +54,9 @@ async fn create_or_get_session(
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let thread_key = parse_thread_key(raw_thread_key)?;
-    let metadata = default_metadata(request.metadata);
     let session = state
-        .store
-        .create_or_get_session(&thread_key, &request.harness_type, metadata)
+        .runtime
+        .create_or_get_session(&thread_key, &request.harness_type, request.metadata)
         .await?;
     Ok(Json(serde_json::to_value(session)?))
 }
@@ -118,14 +66,9 @@ async fn append_messages(
     Path(raw_thread_key): Path<String>,
     Json(request): Json<AppendMessagesRequest>,
 ) -> Result<Json<AppendMessagesResponse>, ApiError> {
-    if request.messages.is_empty() {
-        return Err(ApiError::BadRequest(
-            "messages must not be empty".to_owned(),
-        ));
-    }
     let thread_key = parse_thread_key(raw_thread_key)?;
     let message_ids = state
-        .store
+        .runtime
         .append_messages(&thread_key, &request.messages)
         .await?;
     Ok(Json(AppendMessagesResponse {
@@ -140,105 +83,17 @@ async fn execute_session(
     Json(request): Json<ExecuteSessionRequest>,
 ) -> Result<Json<ExecuteSessionResponse>, ApiError> {
     let thread_key = parse_thread_key(raw_thread_key)?;
-    let session = state.store.get_session(&thread_key).await?;
-    validate_input_lines(&request.input_lines)?;
-    let pipe_options = PipeOptions::from_request(&request)?;
-
     let execution = state
-        .store
-        .create_execution(&thread_key, default_metadata(request.metadata))
-        .await?;
-    let execution = state
-        .store
-        .mark_execution_running(&execution.execution_id)
-        .await?;
-    let sandbox_id = ensure_session_sandbox(
-        &state.store,
-        &state.sandbox_runtime,
-        &thread_key,
-        session.sandbox_id.as_deref(),
-        &execution.execution_id,
-    )
-    .await?;
-
-    state
-        .store
-        .append_event(
+        .runtime
+        .execute_session(
             &thread_key,
-            Some(&execution.execution_id),
-            "session.execution_started",
-            json!({
-                "execution_id": execution.execution_id,
-                "thread_key": thread_key.as_str(),
-                "input_line_count": request.input_lines.len(),
-            }),
+            ExecuteSessionInput {
+                metadata: request.metadata,
+                input_lines: request.input_lines,
+                idle_timeout_ms: request.idle_timeout_ms,
+                max_duration_ms: request.max_duration_ms,
+            },
         )
-        .await?;
-
-    let run_result = match &state.sandbox_runtime {
-        SandboxRuntime::Mock => {
-            run_mock_session_pipe(
-                &state.store,
-                &thread_key,
-                &execution.execution_id,
-                &sandbox_id,
-                pipe_options,
-            )
-            .await
-        }
-        SandboxRuntime::Backend { backend, .. } => {
-            let pipe = ensure_session_pipe(&state, backend.clone(), &thread_key, &sandbox_id).await;
-            match pipe {
-                Ok(pipe) => write_input_lines(&pipe, &request.input_lines)
-                    .await
-                    .map(|()| 0),
-                Err(error) => Err(error),
-            }
-        }
-    };
-    let output_line_count = match run_result {
-        Ok(output_line_count) => output_line_count,
-        Err(error) => {
-            let error_message = error.to_string();
-            let _ = state
-                .store
-                .append_event(
-                    &thread_key,
-                    Some(&execution.execution_id),
-                    "session.execution_failed",
-                    json!({
-                        "execution_id": execution.execution_id,
-                        "thread_key": thread_key.as_str(),
-                        "error": error_message,
-                    }),
-                )
-                .await;
-            let _ = state
-                .store
-                .fail_execution(&execution.execution_id, &error_message)
-                .await;
-            return Err(error);
-        }
-    };
-
-    state
-        .store
-        .append_event(
-            &thread_key,
-            Some(&execution.execution_id),
-            "session.execution_completed",
-            json!({
-                "execution_id": execution.execution_id,
-                "thread_key": thread_key.as_str(),
-                "output_line_count": output_line_count,
-                "completion_reason": "input_accepted",
-            }),
-        )
-        .await?;
-
-    let execution = state
-        .store
-        .complete_execution(&execution.execution_id)
         .await?;
     Ok(Json(ExecuteSessionResponse {
         ok: true,
@@ -248,318 +103,25 @@ async fn execute_session(
     }))
 }
 
-async fn ensure_session_sandbox(
-    store: &PgSessionStore,
-    runtime: &SandboxRuntime,
-    thread_key: &ThreadKey,
-    existing_sandbox_id: Option<&str>,
-    execution_id: &str,
-) -> Result<String, ApiError> {
-    match runtime {
-        SandboxRuntime::Mock => {
-            if let Some(sandbox_id) = existing_sandbox_id {
-                return Ok(sandbox_id.to_owned());
-            }
-            let sandbox_id = format!("mock-sandbox-{execution_id}");
-            store
-                .update_sandbox_id(thread_key, Some(&sandbox_id))
-                .await?;
-            Ok(sandbox_id)
-        }
-        SandboxRuntime::Backend {
-            backend,
-            spec_factory,
-        } => {
-            if let Some(sandbox_id) = existing_sandbox_id {
-                let id = SandboxId::new(sandbox_id);
-                match backend.status(&id).await {
-                    Ok(SandboxStatus::Running | SandboxStatus::Created) => {
-                        return Ok(sandbox_id.to_owned());
-                    }
-                    Ok(_) | Err(SandboxError::NotFound(_)) => {}
-                    Err(error) => return Err(ApiError::Sandbox(error)),
-                }
-            }
-
-            let spec = spec_factory(thread_key, execution_id);
-            let handle = backend.create(spec).await.map_err(ApiError::Sandbox)?;
-            store
-                .update_sandbox_id(thread_key, Some(handle.id.as_str()))
-                .await?;
-            Ok(handle.id.into_string())
-        }
-    }
-}
-
-async fn run_mock_session_pipe(
-    store: &PgSessionStore,
-    thread_key: &ThreadKey,
-    execution_id: &str,
-    sandbox_id: &str,
-    options: PipeOptions,
-) -> Result<usize, ApiError> {
-    let mut output_line_count = 0;
-    let output_lines = mock_app_server_output_lines(thread_key, execution_id, sandbox_id);
-    for (index, line) in output_lines.iter().enumerate() {
-        append_output_line(store, thread_key, Some(execution_id), line).await?;
-        output_line_count += 1;
-        if index + 1 < output_lines.len() {
-            sleep(Duration::from_millis(200)).await;
-        }
-    }
-    if options.idle_timeout < Duration::from_millis(DEFAULT_IDLE_TIMEOUT_MS)
-        || options.max_duration < Duration::from_millis(DEFAULT_MAX_DURATION_MS)
-    {
-        sleep(options.idle_timeout).await;
-    }
-    Ok(output_line_count)
-}
-
-async fn ensure_session_pipe(
-    state: &AppState,
-    backend: Arc<dyn SandboxBackend>,
-    thread_key: &ThreadKey,
-    sandbox_id: &str,
-) -> Result<SessionPipe, ApiError> {
-    if let Some(pipe) = state.sandbox_pipes.lock().await.get(sandbox_id).cloned() {
-        return Ok(pipe);
-    }
-
-    let io = backend
-        .open_io(&SandboxId::new(sandbox_id))
-        .await
-        .map_err(ApiError::Sandbox)?
-        .into_parts();
-    let pipe = SessionPipe {
-        stdin: Arc::new(Mutex::new(FramedWrite::new(
-            io.stdin,
-            LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
-        ))),
-    };
-
-    state
-        .sandbox_pipes
-        .lock()
-        .await
-        .insert(sandbox_id.to_owned(), pipe.clone());
-    let store = state.store.clone();
-    let thread_key = thread_key.clone();
-    let pump_key = sandbox_id.to_owned();
-    let sandbox_pipes = state.sandbox_pipes.clone();
-    let stdout = io.stdout;
-    let stderr = io.stderr;
-    let guard = io.guard;
-    let stderr_key = pump_key.clone();
-
-    tokio::spawn(async move {
-        let result =
-            run_stdout_pump(store.clone(), thread_key.clone(), &pump_key, stdout, guard).await;
-        if let Err(error) = result {
-            warn!(%pump_key, %error, "session stdout pump failed");
-            let _ = store
-                .append_event(
-                    &thread_key,
-                    None,
-                    "session.stdout_pump_failed",
-                    json!({
-                        "sandbox_id": pump_key.as_str(),
-                        "error": error.to_string(),
-                    }),
-                )
-                .await;
-        }
-        sandbox_pipes.lock().await.remove(&pump_key);
-    });
-
-    tokio::spawn(async move {
-        if let Err(error) = drain_stderr(stderr).await {
-            warn!(%stderr_key, %error, "session stderr drain failed");
-        }
-    });
-
-    Ok(pipe)
-}
-
-async fn run_stdout_pump(
-    store: PgSessionStore,
-    thread_key: ThreadKey,
-    sandbox_id: &str,
-    stdout: SandboxRead,
-    _guard: SandboxIoGuard,
-) -> Result<(), ApiError> {
-    let mut stdout = FramedRead::new(
-        stdout,
-        LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
-    );
-    while let Some(line) = stdout.next().await {
-        let line = line.map_err(codec_error_to_api)?;
-        append_output_line(&store, &thread_key, None, &line).await?;
-    }
-    store
-        .append_event(
-            &thread_key,
-            None,
-            "session.stdout_eof",
-            json!({
-                "sandbox_id": sandbox_id,
-            }),
-        )
-        .await?;
-    Ok(())
-}
-
-async fn drain_stderr(mut stderr: SandboxRead) -> Result<(), ApiError> {
-    io::copy(&mut stderr, &mut io::sink())
-        .await
-        .map_err(|err| ApiError::Sandbox(SandboxError::Io(format!("drain stderr: {err}"))))?;
-    Ok(())
-}
-
-async fn write_input_lines(pipe: &SessionPipe, input_lines: &[String]) -> Result<(), ApiError> {
-    let mut stdin = pipe.stdin.lock().await;
-    for line in input_lines {
-        stdin.send(line).await.map_err(codec_error_to_api)?;
-    }
-    Ok(())
-}
-
-fn codec_error_to_api(error: LinesCodecError) -> ApiError {
-    ApiError::Sandbox(SandboxError::Io(error.to_string()))
-}
-
-async fn append_output_line(
-    store: &PgSessionStore,
-    thread_key: &ThreadKey,
-    execution_id: Option<&str>,
-    line: &str,
-) -> Result<(), ApiError> {
-    store
-        .append_event(
-            thread_key,
-            execution_id,
-            SESSION_OUTPUT_LINE_EVENT,
-            Value::String(line.to_owned()),
-        )
-        .await?;
-    Ok(())
-}
-
-fn mock_app_server_output_lines(
-    thread_key: &ThreadKey,
-    execution_id: &str,
-    sandbox_id: &str,
-) -> Vec<String> {
-    let mock_thread_id = format!("mock-codex-thread-{sandbox_id}");
-    let mut lines = vec![
-        json!({
-            "type": "system",
-            "subtype": "wrapper_heartbeat",
-            "phase": "startup",
-            "thread_key": thread_key.as_str(),
-            "execution_id": execution_id,
-            "sandbox_id": sandbox_id,
-        }),
-        json!({
-            "type": "system",
-            "subtype": "wrapper_heartbeat",
-            "phase": "app_server_started",
-            "thread_key": thread_key.as_str(),
-            "execution_id": execution_id,
-            "sandbox_id": sandbox_id,
-        }),
-        json!({
-            "type": "thread.started",
-            "thread_id": mock_thread_id,
-        }),
-    ];
-
-    for turn_index in 1..=3 {
-        let mock_turn_id = format!("mock-turn-{execution_id}-{turn_index}");
-        lines.extend([
-            json!({
-                "type": "turn.started",
-                "turn_id": mock_turn_id,
-            }),
-            json!({
-                "type": "item.agentMessage.delta",
-                "turnId": mock_turn_id,
-                "session_id": mock_thread_id,
-                "delta": format!("PONG {turn_index}"),
-            }),
-            json!({
-                "type": "turn.completed",
-                "turn": {
-                    "id": mock_turn_id,
-                },
-                "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 1,
-                },
-            }),
-        ]);
-    }
-
-    lines.into_iter().map(|value| value.to_string()).collect()
-}
-
 async fn stream_events(
     State(state): State<AppState>,
     Path(raw_thread_key): Path<String>,
     Query(query): Query<EventsQuery>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let thread_key = parse_thread_key(raw_thread_key)?;
-    let session = state.store.get_session(&thread_key).await?;
-    if let Some(sandbox_id) = session.sandbox_id.as_deref()
-        && let SandboxRuntime::Backend { backend, .. } = &state.sandbox_runtime
-    {
-        ensure_session_pipe(&state, backend.clone(), &thread_key, sandbox_id).await?;
-    }
-
-    let stream = stream::unfold(
-        SessionEventStreamState {
-            store: state.store,
-            thread_key,
-            after_event_id: query.after_event_id.unwrap_or(0),
-            pending: VecDeque::new(),
-            done: false,
-        },
-        |mut state| async move {
-            loop {
-                if let Some(event) = state.pending.pop_front() {
-                    state.after_event_id = event.event_id;
-                    return Some((Ok(to_sse_event(event)), state));
-                }
-                if state.done {
-                    return None;
-                }
-                match state
-                    .store
-                    .list_events_after(&state.thread_key, state.after_event_id, 100)
-                    .await
-                {
-                    Ok(events) if events.is_empty() => sleep(Duration::from_millis(250)).await,
-                    Ok(events) => state.pending = events.into(),
-                    Err(error) => {
-                        state.done = true;
-                        let event = Event::default()
-                            .event("session.stream_error")
-                            .data(json!({"error": error.to_string()}).to_string());
-                        return Some((Ok(event), state));
-                    }
-                }
-            }
-        },
-    );
-
+    let events = state
+        .runtime
+        .stream_events(&thread_key, query.after_event_id.unwrap_or(0))
+        .await?;
+    let stream = events.map(|result| {
+        Ok(match result {
+            Ok(event) => to_sse_event(event),
+            Err(error) => Event::default()
+                .event("session.stream_error")
+                .data(json!({"error": error.to_string()}).to_string()),
+        })
+    });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
-struct SessionEventStreamState {
-    store: PgSessionStore,
-    thread_key: ThreadKey,
-    after_event_id: i64,
-    pending: VecDeque<SessionEvent>,
-    done: bool,
 }
 
 fn to_sse_event(event: SessionEvent) -> Event {
@@ -575,59 +137,7 @@ fn to_sse_event(event: SessionEvent) -> Event {
 }
 
 fn parse_thread_key(value: String) -> Result<ThreadKey, ApiError> {
-    ThreadKey::parse(value).map_err(ApiError::InvalidThreadKey)
-}
-
-fn validate_input_lines(lines: &[String]) -> Result<(), ApiError> {
-    for (index, line) in lines.iter().enumerate() {
-        if line.contains('\n') || line.contains('\r') {
-            return Err(ApiError::BadRequest(format!(
-                "input_lines[{index}] must be one line"
-            )));
-        }
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PipeOptions {
-    idle_timeout: Duration,
-    max_duration: Duration,
-}
-
-impl PipeOptions {
-    fn from_request(request: &ExecuteSessionRequest) -> Result<Self, ApiError> {
-        let idle_timeout = request
-            .idle_timeout_ms
-            .map(nonzero_duration_millis)
-            .transpose()?
-            .unwrap_or_else(|| Duration::from_millis(DEFAULT_IDLE_TIMEOUT_MS));
-        let max_duration = request
-            .max_duration_ms
-            .map(nonzero_duration_millis)
-            .transpose()?
-            .unwrap_or_else(|| Duration::from_millis(DEFAULT_MAX_DURATION_MS));
-
-        if idle_timeout > max_duration {
-            return Err(ApiError::BadRequest(
-                "idle_timeout_ms must be less than or equal to max_duration_ms".to_owned(),
-            ));
-        }
-
-        Ok(Self {
-            idle_timeout,
-            max_duration,
-        })
-    }
-}
-
-fn nonzero_duration_millis(value: u64) -> Result<Duration, ApiError> {
-    if value == 0 {
-        return Err(ApiError::BadRequest(
-            "duration values must be greater than zero".to_owned(),
-        ));
-    }
-    Ok(Duration::from_millis(value))
+    ThreadKey::parse(value).map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -671,14 +181,10 @@ struct EventsQuery {
 
 #[derive(Debug, Error)]
 enum ApiError {
-    #[error(transparent)]
-    InvalidThreadKey(#[from] ThreadKeyError),
     #[error("{0}")]
     BadRequest(String),
     #[error(transparent)]
-    Store(#[from] SessionStoreError),
-    #[error(transparent)]
-    Sandbox(#[from] SandboxError),
+    Runtime(#[from] SessionRuntimeError),
     #[error(transparent)]
     Serialize(#[from] serde_json::Error),
 }
@@ -686,12 +192,15 @@ enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
-            Self::InvalidThreadKey(_) | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Store(SessionStoreError::NotFound { .. }) => StatusCode::NOT_FOUND,
-            Self::Store(SessionStoreError::HarnessConflict { .. }) => StatusCode::CONFLICT,
-            Self::Store(_) | Self::Sandbox(_) | Self::Serialize(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Runtime(SessionRuntimeError::BadRequest(_)) => StatusCode::BAD_REQUEST,
+            Self::Runtime(SessionRuntimeError::Store(SessionStoreError::NotFound { .. })) => {
+                StatusCode::NOT_FOUND
             }
+            Self::Runtime(SessionRuntimeError::Store(SessionStoreError::HarnessConflict {
+                ..
+            })) => StatusCode::CONFLICT,
+            Self::Runtime(_) | Self::Serialize(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = Json(json!({
             "ok": false,
