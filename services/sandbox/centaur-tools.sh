@@ -15,7 +15,13 @@ EOF
 candidate_roots() {
   [ -d "$PWD/tools" ] && printf '%s\n' "$PWD/tools"
   [ -d "$HOME/workspace/tools" ] && printf '%s\n' "$HOME/workspace/tools"
-  for root in "$HOME"/github/*/centaur/tools "$HOME"/github/*/centaur-overlay/tools; do
+  if [ -n "${TOOL_DIRS:-}" ]; then
+    local tool_dir
+    while IFS= read -r tool_dir; do
+      [ -d "$tool_dir" ] && printf '%s\n' "$tool_dir"
+    done < <(printf '%s\n' "$TOOL_DIRS" | tr ':' '\n')
+  fi
+  for root in "$HOME"/github/tools "$HOME"/github/*/tools "$HOME"/github/*/*/tools; do
     [ -d "$root" ] && printf '%s\n' "$root"
   done
   if [ -n "${CENTAUR_OVERLAY_DIR:-}" ] && [ -d "$CENTAUR_OVERLAY_DIR/tools" ]; then
