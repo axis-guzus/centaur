@@ -90,7 +90,7 @@ pub struct IronProxyPodConfig {
     pub ca_key_secret_name: String,
     pub op_connect_app_name: String,
     pub op_connect_port: u16,
-    pub env_from_secret_name: Option<String>,
+    pub env_from_secret_names: Vec<String>,
     pub extra_env: BTreeMap<String, String>,
 }
 
@@ -111,7 +111,7 @@ impl IronProxyPodConfig {
             ca_key_secret_name: ca_key_secret_name.into(),
             op_connect_app_name: "onepassword-connect".to_owned(),
             op_connect_port: 8080,
-            env_from_secret_name: None,
+            env_from_secret_names: Vec::new(),
             extra_env: BTreeMap::new(),
         }
     }
@@ -1135,10 +1135,13 @@ fn iron_proxy_container(iron_proxy: &IronProxyPodConfig) -> Value {
     insert_optional(
         &mut container,
         "envFrom",
-        iron_proxy
-            .env_from_secret_name
-            .as_ref()
-            .map(|name| vec![json!({ "secretRef": { "name": name } })]),
+        (!iron_proxy.env_from_secret_names.is_empty()).then(|| {
+            iron_proxy
+                .env_from_secret_names
+                .iter()
+                .map(|name| json!({ "secretRef": { "name": name } }))
+                .collect::<Vec<_>>()
+        }),
     );
     container
 }
@@ -1572,7 +1575,9 @@ mod tests {
             "firewall-ca-key",
         );
         iron_proxy.source_policy = SourcePolicy::onepassword_connect("ai-agents", "10m");
-        iron_proxy.env_from_secret_name = Some("centaur-infra-env".to_owned());
+        iron_proxy
+            .env_from_secret_names
+            .push("centaur-infra-env".to_owned());
         iron_proxy.extra_env.insert(
             "OP_CONNECT_HOST".to_owned(),
             "http://op-connect:8080".to_owned(),

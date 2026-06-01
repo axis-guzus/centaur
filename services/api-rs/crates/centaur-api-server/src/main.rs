@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use centaur_api_server::{SandboxRuntime, build_router_with_runtime};
-use centaur_iron_proxy::{SourcePolicy, load_fragment_files};
+use centaur_iron_proxy::{SourceKind, SourcePolicy, load_fragment_files};
 use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig, IronProxyPodConfig};
 use centaur_sandbox_core::SandboxSpec;
 use centaur_sandbox_local::LocalSandboxBackend;
@@ -192,9 +192,23 @@ fn iron_proxy_config_from_env() -> Result<Option<IronProxyPodConfig>, ServerErro
         .or_else(|_| env::var("KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY"))
         .ok();
     config.source_policy = SourcePolicy::from_env();
-    config.env_from_secret_name = env::var("SESSION_SANDBOX_IRON_PROXY_ENV_SECRET")
+    if let Some(secret_name) = env::var("SESSION_SANDBOX_IRON_PROXY_ENV_SECRET")
         .or_else(|_| env::var("KUBERNETES_SECRET_ENV_NAME"))
-        .ok();
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        config.env_from_secret_names.push(secret_name);
+    }
+    if matches!(config.source_policy.kind, SourceKind::OnePassword) {
+        if let Some(secret_name) = env::var("KUBERNETES_BOOTSTRAP_SECRET_NAME")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            config.env_from_secret_names.push(secret_name);
+        }
+    }
     if let Ok(app_name) = env::var("KUBERNETES_OP_CONNECT_APP_NAME") {
         config.op_connect_app_name = app_name;
     }
