@@ -257,7 +257,9 @@ pub fn render_proxy_yaml_with_source_policy(
 
     for fragment in fragments {
         for (key, value) in &fragment.top_level {
-            cfg_map.insert(string_value(key), value.clone());
+            let mut value = value.clone();
+            resolve_placeholder_source_values(&mut value, source_policy);
+            cfg_map.insert(string_value(key), value);
         }
     }
 
@@ -275,6 +277,10 @@ pub fn render_proxy_yaml_with_source_policy(
     let mut postgres = fragments
         .iter()
         .flat_map(|fragment| fragment.postgres.iter().cloned())
+        .map(|mut listener| {
+            resolve_placeholder_source_values(&mut listener, source_policy);
+            listener
+        })
         .collect::<Vec<_>>();
     if let Some(core_pg) = core_pg {
         postgres.push(core_pg_listener_value(core_pg));
@@ -568,6 +574,45 @@ mcp:
         let rendered = render_proxy_yaml(None, &[fragment], None).unwrap();
         let cfg = parse_rendered(&rendered);
         assert_eq!(cfg["mcp"]["servers"][0]["name"], "github");
+    }
+
+    #[test]
+    fn resolves_placeholders_in_postgres_and_top_level_config() {
+        let fragment = fragment_yaml(
+            r#"
+postgres:
+  - name: warehouse
+    listen: 0.0.0.0:5432
+    upstream:
+      dsn:
+        placeholder: WAREHOUSE_DSN
+    client:
+      user: app_user
+      password_env: PG_PROXY_PASSWORD_WAREHOUSE
+mcp:
+  servers:
+    - name: github
+      auth:
+        placeholder: GITHUB_TOKEN
+"#,
+        );
+        let rendered = render_proxy_yaml_with_source_policy(
+            None,
+            &[fragment],
+            None,
+            &SourcePolicy::onepassword("ai-agents", "10m"),
+        )
+        .unwrap();
+        let cfg = parse_rendered(&rendered);
+        assert_eq!(
+            cfg["postgres"][0]["upstream"]["dsn"]["secret_ref"],
+            "op://ai-agents/WAREHOUSE_DSN/credential"
+        );
+        assert_eq!(
+            cfg["mcp"]["servers"][0]["auth"]["secret_ref"],
+            "op://ai-agents/GITHUB_TOKEN/credential"
+        );
+        assert!(!rendered.contains("placeholder:"));
     }
 
     #[test]
