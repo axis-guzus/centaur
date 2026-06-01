@@ -1,8 +1,13 @@
-use anyhow::{Context, Result, bail};
-use centaur_session_core::ThreadKey;
-use clap::Parser;
+use std::str::FromStr;
+
+use centaur_api_server::{
+    client::{CentaurClient, SseEvent as ApiSseEvent, SseEventStream},
+    types::{AppendMessagesRequest, CreateSessionRequest, ExecuteSessionRequest},
+};
+use centaur_session_core::{HarnessType, MessageRole, SessionMessageInput, ThreadKey};
+use clap::{Parser, ValueEnum};
+use eyre::{Result, WrapErr, bail, eyre};
 use futures_util::StreamExt;
-use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::{
     io::{self, AsyncBufReadExt, BufReader},
@@ -14,20 +19,22 @@ mod tui;
 
 const DEFAULT_MESSAGE: &str = "Reply with exactly PONG and nothing else.";
 
+pub(crate) type SseFrame = ApiSseEvent;
+
 #[derive(Debug, Parser)]
 #[command(about = "Create, execute, or attach to a Centaur session")]
 struct Args {
     #[arg(long, env = "CENTAUR_API_URL", default_value = "http://127.0.0.1:8080")]
-    api_url: String,
+    api_url: ApiBaseUrl,
 
     #[arg(long)]
-    thread_key: Option<String>,
+    thread_key: Option<ThreadKeyArg>,
 
     #[arg(long)]
     attach: bool,
 
-    #[arg(long, default_value = "codex")]
-    harness_type: String,
+    #[arg(long, value_enum, default_value = "codex")]
+    harness_type: HarnessTypeArg,
 
     #[arg(long)]
     message: Option<String>,
@@ -51,7 +58,7 @@ struct Args {
     exit_on_terminal: bool,
 
     #[arg(long)]
-    exit_on_output_type: Option<String>,
+    exit_on_output_type: Option<OutputEventType>,
 
     #[arg(long, alias = "stdin")]
     stdin_events: bool,
@@ -69,113 +76,99 @@ async fn main() -> Result<()> {
     let attach_mode = attach_mode(&args);
     validate_mode(&args, attach_mode)?;
     let (thread_key, generated_thread_key) = thread_key_arg(&args, attach_mode)?;
-    let thread_key = ThreadKey::parse(thread_key)?;
     if generated_thread_key {
         eprintln!("thread_key={}", thread_key.as_str());
     }
-    let client = Client::new();
-    let base_url = args.api_url.trim_end_matches('/').to_owned();
-    let session_url = session_url(&base_url, thread_key.as_str());
+    let client = CentaurClient::new(args.api_url.as_str());
 
     if attach_mode {
-        let events_response = open_event_stream(&client, &session_url, args.after_event_id).await?;
+        let events = client
+            .stream_events(&thread_key, args.after_event_id)
+            .await
+            .wrap_err("open event stream")?;
         if args.tui {
-            return tui::run(
-                client,
-                thread_key.as_str().to_owned(),
-                session_url,
-                events_response,
-                tui::TuiOptions {
-                    debug_visible: args.debug,
-                    idle_timeout_ms: args.idle_timeout_ms,
-                    max_duration_ms: args.max_duration_ms,
-                    exit_on_terminal: args.exit_on_terminal,
-                    exit_on_output_type: args.exit_on_output_type,
-                },
-            )
-            .await;
+            return tui::run(client, thread_key, events, tui_options(&args)).await;
         }
         return run_stream_and_optional_stdin(
             client,
-            session_url,
-            events_response,
-            args.all_events,
-            args.exit_on_terminal,
-            args.exit_on_output_type,
-            args.stdin_events,
-            args.idle_timeout_ms,
-            args.max_duration_ms,
+            thread_key,
+            events,
+            stream_run_options(&args),
         )
         .await;
     }
 
-    post_json(
-        &client,
-        &session_url,
-        json!({
-            "harness_type": args.harness_type,
-            "metadata": {
-                "source": "centaur-session-cli",
+    client
+        .create_session(
+            &thread_key,
+            CreateSessionRequest {
+                harness_type: args.harness_type.into(),
+                metadata: Some(json!({
+                    "source": "centaur-session-cli",
+                })),
             },
-        }),
-    )
-    .await
-    .context("create session")?;
+        )
+        .await
+        .wrap_err("create session")?;
 
     let initial_input_lines = if should_send_initial_turn(&args) {
         let input_lines = session_input_lines(&args)?;
         let message = message_text(&args);
-        append_user_message(&client, &session_url, message)
+        append_user_message(&client, &thread_key, message)
             .await
-            .context("append message")?;
+            .wrap_err("append message")?;
         Some(input_lines)
     } else {
         None
     };
 
-    let events_response = open_event_stream(&client, &session_url, args.after_event_id).await?;
+    let events = client
+        .stream_events(&thread_key, args.after_event_id)
+        .await
+        .wrap_err("open event stream")?;
 
     if let Some(input_lines) = initial_input_lines {
         execute_input_lines(
             &client,
-            &session_url,
+            &thread_key,
             input_lines,
             args.idle_timeout_ms,
             args.max_duration_ms,
         )
         .await
-        .context("execute initial turn")?;
+        .wrap_err("execute initial turn")?;
     }
 
     if args.tui {
-        return tui::run(
-            client,
-            thread_key.as_str().to_owned(),
-            session_url,
-            events_response,
-            tui::TuiOptions {
-                debug_visible: args.debug,
-                idle_timeout_ms: args.idle_timeout_ms,
-                max_duration_ms: args.max_duration_ms,
-                exit_on_terminal: args.exit_on_terminal,
-                exit_on_output_type: args.exit_on_output_type,
-            },
-        )
-        .await;
+        return tui::run(client, thread_key, events, tui_options(&args)).await;
     }
 
-    run_stream_and_optional_stdin(
-        client,
-        session_url,
-        events_response,
-        args.all_events,
-        args.exit_on_terminal,
-        args.exit_on_output_type,
-        args.stdin_events,
-        args.idle_timeout_ms,
-        args.max_duration_ms,
-    )
-    .await
+    run_stream_and_optional_stdin(client, thread_key, events, stream_run_options(&args)).await
+}
+
+fn tui_options(args: &Args) -> tui::TuiOptions {
+    tui::TuiOptions {
+        debug_visible: args.debug,
+        idle_timeout_ms: args.idle_timeout_ms,
+        max_duration_ms: args.max_duration_ms,
+        exit_on_terminal: args.exit_on_terminal,
+        exit_on_output_type: args
+            .exit_on_output_type
+            .as_ref()
+            .map(OutputEventType::as_str)
+            .map(ToOwned::to_owned),
+    }
+}
+
+fn stream_run_options(args: &Args) -> StreamRunOptions {
+    StreamRunOptions {
+        all_events: args.all_events,
+        exit_on_terminal: args.exit_on_terminal,
+        exit_on_output_type: args.exit_on_output_type.clone(),
+        stdin_events: args.stdin_events,
+        idle_timeout_ms: args.idle_timeout_ms,
+        max_duration_ms: args.max_duration_ms,
+    }
 }
 
 fn attach_mode(args: &Args) -> bool {
@@ -199,130 +192,86 @@ fn validate_mode(args: &Args, attach_mode: bool) -> Result<()> {
     Ok(())
 }
 
-fn thread_key_arg(args: &Args, attach_mode: bool) -> Result<(String, bool)> {
+fn thread_key_arg(args: &Args, attach_mode: bool) -> Result<(ThreadKey, bool)> {
     match (&args.thread_key, attach_mode) {
-        (Some(thread_key), _) => Ok((thread_key.clone(), false)),
+        (Some(thread_key), _) => Ok((thread_key.clone().into_thread_key(), false)),
         (None, true) => bail!("--attach requires --thread-key"),
-        (None, false) => Ok((format!("cli:{}", Uuid::new_v4().simple()), true)),
+        (None, false) => Ok((
+            ThreadKey::parse(format!("cli:{}", Uuid::new_v4().simple()))?,
+            true,
+        )),
     }
-}
-
-async fn post_json(client: &Client, url: &str, payload: Value) -> Result<Value> {
-    let response = client
-        .post(url)
-        .json(&payload)
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
-    let status = response.status();
-    let body = response.text().await?;
-    ensure_success(status, body.clone()).with_context(|| format!("POST {url}"))?;
-    serde_json::from_str(&body).with_context(|| format!("decode response from {url}"))
-}
-
-fn ensure_success(status: reqwest::StatusCode, body: String) -> Result<()> {
-    if status.is_success() {
-        return Ok(());
-    }
-    bail!("HTTP {status}: {body}");
-}
-
-async fn ensure_response_success(response: reqwest::Response) -> Result<reqwest::Response> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-    let body = response.text().await?;
-    bail!("HTTP {status}: {body}");
-}
-
-async fn open_event_stream(
-    client: &Client,
-    session_url: &str,
-    after_event_id: i64,
-) -> Result<reqwest::Response> {
-    let events_url = format!("{session_url}/events?after_event_id={after_event_id}");
-    let events_response = client
-        .get(&events_url)
-        .send()
-        .await
-        .context("open event stream")?;
-    ensure_response_success(events_response)
-        .await
-        .context("open event stream")
 }
 
 pub(crate) async fn append_user_message(
-    client: &Client,
-    session_url: &str,
+    client: &CentaurClient,
+    thread_key: &ThreadKey,
     text: &str,
 ) -> Result<()> {
-    post_json(
-        client,
-        &format!("{session_url}/messages"),
-        json!({
-            "messages": [{
-                "role": "user",
-                "parts": [{"type": "text", "text": text}],
-                "metadata": {
-                    "source": "centaur-session-cli",
-                },
-            }],
-        }),
-    )
-    .await
-    .context("append message")?;
+    client
+        .append_messages(
+            thread_key,
+            AppendMessagesRequest {
+                messages: vec![SessionMessageInput {
+                    role: MessageRole::User,
+                    parts: vec![json!({"type": "text", "text": text})],
+                    metadata: json!({
+                        "source": "centaur-session-cli",
+                    }),
+                }],
+            },
+        )
+        .await?;
     Ok(())
 }
 
 pub(crate) async fn execute_input_lines(
-    client: &Client,
-    session_url: &str,
+    client: &CentaurClient,
+    thread_key: &ThreadKey,
     input_lines: Vec<String>,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
 ) -> Result<()> {
-    post_json(
-        client,
-        &format!("{session_url}/execute"),
-        json!({
-            "metadata": {
-                "source": "centaur-session-cli",
+    client
+        .execute_session(
+            thread_key,
+            ExecuteSessionRequest {
+                metadata: Some(json!({
+                    "source": "centaur-session-cli",
+                })),
+                input_lines,
+                idle_timeout_ms: Some(idle_timeout_ms),
+                max_duration_ms: Some(max_duration_ms),
             },
-            "input_lines": input_lines,
-            "idle_timeout_ms": idle_timeout_ms,
-            "max_duration_ms": max_duration_ms,
-        }),
-    )
-    .await
-    .context("execute session")?;
+        )
+        .await?;
     Ok(())
 }
 
 async fn run_stream_and_optional_stdin(
-    client: Client,
-    session_url: String,
-    events_response: reqwest::Response,
-    all_events: bool,
-    exit_on_terminal: bool,
-    exit_on_output_type: Option<String>,
-    stdin_events: bool,
-    idle_timeout_ms: u64,
-    max_duration_ms: u64,
+    client: CentaurClient,
+    thread_key: ThreadKey,
+    events: SseEventStream,
+    options: StreamRunOptions,
 ) -> Result<()> {
     let stream_future = stream_output_lines(
-        events_response,
-        all_events,
-        exit_on_terminal,
-        exit_on_output_type,
+        events,
+        options.all_events,
+        options.exit_on_terminal,
+        options.exit_on_output_type,
     );
     tokio::pin!(stream_future);
 
-    if !stdin_events {
+    if !options.stdin_events {
         return stream_future.await;
     }
 
-    let mut stdin_task = spawn_stdin_events(client, session_url, idle_timeout_ms, max_duration_ms);
+    let mut stdin_task = spawn_stdin_events(
+        client,
+        thread_key,
+        options.idle_timeout_ms,
+        options.max_duration_ms,
+    );
 
     tokio::select! {
         stream_result = &mut stream_future => {
@@ -330,31 +279,41 @@ async fn run_stream_and_optional_stdin(
             stream_result
         }
         stdin_result = &mut stdin_task => {
-            stdin_result.context("join stdin event task")??;
+            stdin_result.wrap_err("join stdin event task")??;
             stream_future.await
         }
     }
 }
 
+#[derive(Clone, Debug)]
+struct StreamRunOptions {
+    all_events: bool,
+    exit_on_terminal: bool,
+    exit_on_output_type: Option<OutputEventType>,
+    stdin_events: bool,
+    idle_timeout_ms: u64,
+    max_duration_ms: u64,
+}
+
 fn spawn_stdin_events(
-    client: Client,
-    session_url: String,
+    client: CentaurClient,
+    thread_key: ThreadKey,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
 ) -> JoinHandle<Result<()>> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(io::stdin()).lines();
-        while let Some(line) = lines.next_line().await.context("read stdin event")? {
+        while let Some(line) = lines.next_line().await.wrap_err("read stdin event")? {
             let event = match StdinEvent::parse(&line)? {
                 Some(event) => event,
                 None => continue,
             };
             match event {
                 StdinEvent::Message(text) => {
-                    append_user_message(&client, &session_url, &text).await?;
+                    append_user_message(&client, &thread_key, &text).await?;
                     execute_input_lines(
                         &client,
-                        &session_url,
+                        &thread_key,
                         vec![user_input_line(&text)?],
                         idle_timeout_ms,
                         max_duration_ms,
@@ -364,7 +323,7 @@ fn spawn_stdin_events(
                 StdinEvent::InputLine(line) => {
                     execute_input_lines(
                         &client,
-                        &session_url,
+                        &thread_key,
                         vec![line],
                         idle_timeout_ms,
                         max_duration_ms,
@@ -374,7 +333,7 @@ fn spawn_stdin_events(
                 StdinEvent::InputLines(lines) => {
                     execute_input_lines(
                         &client,
-                        &session_url,
+                        &thread_key,
                         lines,
                         idle_timeout_ms,
                         max_duration_ms,
@@ -389,50 +348,40 @@ fn spawn_stdin_events(
 }
 
 async fn stream_output_lines(
-    response: reqwest::Response,
+    mut events: SseEventStream,
     all_events: bool,
     exit_on_terminal: bool,
-    exit_on_output_type: Option<String>,
+    exit_on_output_type: Option<OutputEventType>,
 ) -> Result<()> {
-    let mut chunks = response.bytes_stream();
-    let mut buffer = String::new();
+    while let Some(event) = events.next().await {
+        let event = event.wrap_err("read event stream")?;
 
-    while let Some(chunk) = chunks.next().await {
-        let chunk = chunk.context("read event stream")?;
-        buffer.push_str(std::str::from_utf8(&chunk).context("event stream is not UTF-8")?);
-
-        while let Some((frame_end, separator_len)) = next_frame(&buffer) {
-            let frame = buffer[..frame_end].to_owned();
-            buffer.drain(..frame_end + separator_len);
-
-            let Some(event) = SseFrame::parse(&frame) else {
-                continue;
-            };
-
-            if event.event == "session.output.line" {
-                println!(
-                    "{}\t{}",
-                    event.id.as_deref().unwrap_or("unknown"),
-                    event.data
-                );
-                if output_type_matches(&event.data, exit_on_output_type.as_deref()) {
-                    return Ok(());
-                }
-            } else if all_events {
-                let data = parse_json_or_string(&event.data);
-                println!(
-                    "{}",
-                    serde_json::to_string(&json!({
-                        "sse_event": event.event,
-                        "id": event.id,
-                        "data": data,
-                    }))?
-                );
-            }
-
-            if exit_on_terminal && is_terminal_event(&event.event) {
+        if event.event == "session.output.line" {
+            println!(
+                "{}\t{}",
+                event.id.as_deref().unwrap_or("unknown"),
+                event.data
+            );
+            if output_type_matches(
+                &event.data,
+                exit_on_output_type.as_ref().map(|value| value.as_str()),
+            ) {
                 return Ok(());
             }
+        } else if all_events {
+            let data = parse_json_or_string(&event.data);
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "sse_event": event.event,
+                    "id": event.id,
+                    "data": data,
+                }))?
+            );
+        }
+
+        if exit_on_terminal && is_terminal_event(&event.event) {
+            return Ok(());
         }
     }
 
@@ -477,20 +426,6 @@ pub(crate) fn user_input_line(text: &str) -> Result<String> {
 
 fn message_text(args: &Args) -> &str {
     args.message.as_deref().unwrap_or(DEFAULT_MESSAGE)
-}
-
-fn session_url(base_url: &str, thread_key: &str) -> String {
-    format!("{base_url}/api/session/{}", urlencoding::encode(thread_key))
-}
-
-pub(crate) fn next_frame(buffer: &str) -> Option<(usize, usize)> {
-    let lf = buffer.find("\n\n").map(|index| (index, 2));
-    let crlf = buffer.find("\r\n\r\n").map(|index| (index, 4));
-    match (lf, crlf) {
-        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
-        (Some(frame), None) | (None, Some(frame)) => Some(frame),
-        (None, None) => None,
-    }
 }
 
 pub(crate) fn parse_json_or_string(data: &str) -> Value {
@@ -543,40 +478,40 @@ impl StdinEvent {
 fn parse_execute_command(value: &str) -> Result<StdinEvent> {
     if value.starts_with('[') {
         let lines =
-            serde_json::from_str::<Vec<String>>(value).context("parse /execute JSON array")?;
+            serde_json::from_str::<Vec<String>>(value).wrap_err("parse /execute JSON array")?;
         return Ok(StdinEvent::InputLines(lines));
     }
     Ok(StdinEvent::InputLine(value.to_owned()))
 }
 
 fn parse_json_stdin_event(line: &str) -> Result<StdinEvent> {
-    let value = serde_json::from_str::<Value>(line).context("parse stdin JSON event")?;
+    let value = serde_json::from_str::<Value>(line).wrap_err("parse stdin JSON event")?;
     match value.get("type").and_then(Value::as_str) {
         Some("message") => {
             let text = value
                 .get("text")
                 .and_then(Value::as_str)
-                .context("stdin message event requires string field `text`")?;
+                .ok_or_else(|| eyre!("stdin message event requires string field `text`"))?;
             Ok(StdinEvent::Message(text.to_owned()))
         }
         Some("input_line") => {
             let raw_line = value
                 .get("line")
                 .and_then(Value::as_str)
-                .context("stdin input_line event requires string field `line`")?;
+                .ok_or_else(|| eyre!("stdin input_line event requires string field `line`"))?;
             Ok(StdinEvent::InputLine(raw_line.to_owned()))
         }
         Some("execute") => {
             let lines = value
                 .get("input_lines")
                 .and_then(Value::as_array)
-                .context("stdin execute event requires array field `input_lines`")?
+                .ok_or_else(|| eyre!("stdin execute event requires array field `input_lines`"))?
                 .iter()
                 .map(|value| {
                     value
                         .as_str()
                         .map(ToOwned::to_owned)
-                        .context("stdin execute input_lines must be strings")
+                        .ok_or_else(|| eyre!("stdin execute input_lines must be strings"))
                 })
                 .collect::<Result<Vec<_>>>()?;
             Ok(StdinEvent::InputLines(lines))
@@ -586,41 +521,80 @@ fn parse_json_stdin_event(line: &str) -> Result<StdinEvent> {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct SseFrame {
-    pub(crate) id: Option<String>,
-    pub(crate) event: String,
-    pub(crate) data: String,
+#[derive(Clone, Debug)]
+struct ApiBaseUrl(String);
+
+impl ApiBaseUrl {
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
 }
 
-impl SseFrame {
-    pub(crate) fn parse(frame: &str) -> Option<Self> {
-        let frame = frame.replace("\r\n", "\n");
-        let mut id = None;
-        let mut event = "message".to_owned();
-        let mut data = Vec::new();
+impl FromStr for ApiBaseUrl {
+    type Err = String;
 
-        for line in frame.lines() {
-            if line.is_empty() || line.starts_with(':') {
-                continue;
-            }
-            if let Some(value) = line.strip_prefix("id:") {
-                id = Some(value.trim_start().to_owned());
-            } else if let Some(value) = line.strip_prefix("event:") {
-                event = value.trim_start().to_owned();
-            } else if let Some(value) = line.strip_prefix("data:") {
-                data.push(value.trim_start().to_owned());
-            }
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim_end_matches('/');
+        if value.is_empty() {
+            return Err("api_url must not be empty".to_owned());
         }
+        Ok(Self(value.to_owned()))
+    }
+}
 
-        if data.is_empty() {
-            return None;
+#[derive(Clone, Debug)]
+struct ThreadKeyArg(ThreadKey);
+
+impl ThreadKeyArg {
+    fn into_thread_key(self) -> ThreadKey {
+        self.0
+    }
+}
+
+impl FromStr for ThreadKeyArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        ThreadKey::parse(value)
+            .map(Self)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum HarnessTypeArg {
+    Codex,
+    Amp,
+    #[value(name = "claudecode")]
+    ClaudeCode,
+}
+
+impl From<HarnessTypeArg> for HarnessType {
+    fn from(value: HarnessTypeArg) -> Self {
+        match value {
+            HarnessTypeArg::Codex => Self::Codex,
+            HarnessTypeArg::Amp => Self::Amp,
+            HarnessTypeArg::ClaudeCode => Self::ClaudeCode,
         }
+    }
+}
 
-        Some(Self {
-            id,
-            event,
-            data: data.join("\n"),
-        })
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OutputEventType(String);
+
+impl OutputEventType {
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl FromStr for OutputEventType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.trim().is_empty() {
+            return Err("output event type must not be empty".to_owned());
+        }
+        Ok(Self(value.to_owned()))
     }
 }

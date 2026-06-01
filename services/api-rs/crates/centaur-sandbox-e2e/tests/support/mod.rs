@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,11 +11,11 @@ use clap::Parser;
 use kube::config::KubeConfigOptions;
 use kube::{Client, Config};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::{Instant, sleep};
+use tokio::time::{interval, timeout};
 
 const ALL_IMPLEMENTATIONS: &[&str] = &["local", "agent-k8s"];
 
-struct SandboxImplementation {
+pub(crate) struct SandboxImplementation {
     name: &'static str,
     backend: Arc<dyn SandboxBackend>,
     reconnect_backend: Arc<dyn Fn() -> Arc<dyn SandboxBackend> + Send + Sync>,
@@ -23,24 +25,23 @@ struct SandboxImplementation {
     invalid_spec: SandboxSpec,
 }
 
-#[tokio::test]
-#[ignore = "requires sandbox e2e infrastructure; run `just e2e-kind`"]
-async fn sandbox_invariants_by_implementation() {
-    for implementation in implementations().await {
-        eprintln!("running sandbox invariants for {}", implementation.name);
-        create_stop_cleans_up(&implementation).await;
-        pause_resume_restores_running(&implementation).await;
-        unexpected_shutdown_reports_drift(&implementation).await;
-        byte_io_round_trips(&implementation).await;
-        stdin_drop_closes_write_half(&implementation).await;
-        reconnect_can_observe_and_stop(&implementation).await;
-        pause_blocks_read_write_until_resume(&implementation).await;
-        missing_sandbox_operations_are_consistent(&implementation).await;
-        failed_create_cleans_up_observed_resources(&implementation).await;
+pub(crate) async fn implementation_if_requested(
+    name: &'static str,
+) -> Option<SandboxImplementation> {
+    let args = E2eArgs::from_env();
+    validate_requested_implementations(&args);
+    if !args.includes_implementation(name) {
+        return None;
     }
+
+    Some(match name {
+        "local" => local_implementation(),
+        "agent-k8s" => agent_k8s_implementation().await,
+        other => panic!("unknown sandbox e2e implementation {other:?}"),
+    })
 }
 
-async fn create_stop_cleans_up(implementation: &SandboxImplementation) {
+pub(crate) async fn create_stop_cleans_up(implementation: &SandboxImplementation) {
     let manager = SandboxManager::new(implementation.backend.clone());
     let handle = manager
         .create_running(implementation.long_running_spec.clone())
@@ -56,7 +57,7 @@ async fn create_stop_cleans_up(implementation: &SandboxImplementation) {
     eventually_status(&manager, &handle.id, SandboxStatus::Gone).await;
 }
 
-async fn pause_resume_restores_running(implementation: &SandboxImplementation) {
+pub(crate) async fn pause_resume_restores_running(implementation: &SandboxImplementation) {
     let manager = SandboxManager::new(implementation.backend.clone());
     let handle = manager
         .create_running(implementation.long_running_spec.clone())
@@ -81,7 +82,7 @@ async fn pause_resume_restores_running(implementation: &SandboxImplementation) {
         .unwrap_or_else(|err| panic!("{} stop failed: {err}", implementation.name));
 }
 
-async fn unexpected_shutdown_reports_drift(implementation: &SandboxImplementation) {
+pub(crate) async fn unexpected_shutdown_reports_drift(implementation: &SandboxImplementation) {
     let manager = SandboxManager::new(implementation.backend.clone());
     let handle = manager
         .create_running(implementation.short_lived_spec.clone())
@@ -107,7 +108,7 @@ async fn unexpected_shutdown_reports_drift(implementation: &SandboxImplementatio
         .unwrap_or_else(|err| panic!("{} cleanup stop failed: {err}", implementation.name));
 }
 
-async fn byte_io_round_trips(implementation: &SandboxImplementation) {
+pub(crate) async fn byte_io_round_trips(implementation: &SandboxImplementation) {
     let manager = SandboxManager::new(implementation.backend.clone());
     let handle = manager
         .create_running(implementation.byte_io_spec.clone())
@@ -144,7 +145,7 @@ async fn byte_io_round_trips(implementation: &SandboxImplementation) {
     manager.stop(&handle.id).await.unwrap();
 }
 
-async fn stdin_drop_closes_write_half(implementation: &SandboxImplementation) {
+pub(crate) async fn stdin_drop_closes_write_half(implementation: &SandboxImplementation) {
     let manager = SandboxManager::new(implementation.backend.clone());
     let handle = manager
         .create_running(implementation.byte_io_spec.clone())
@@ -176,7 +177,7 @@ async fn stdin_drop_closes_write_half(implementation: &SandboxImplementation) {
     manager.stop(&handle.id).await.unwrap();
 }
 
-async fn reconnect_can_observe_and_stop(implementation: &SandboxImplementation) {
+pub(crate) async fn reconnect_can_observe_and_stop(implementation: &SandboxImplementation) {
     let manager = SandboxManager::new(implementation.backend.clone());
     let handle = manager
         .create_running(implementation.long_running_spec.clone())
@@ -197,7 +198,7 @@ async fn reconnect_can_observe_and_stop(implementation: &SandboxImplementation) 
     eventually_status(&reconnected, &handle.id, SandboxStatus::Gone).await;
 }
 
-async fn pause_blocks_read_write_until_resume(implementation: &SandboxImplementation) {
+pub(crate) async fn pause_blocks_read_write_until_resume(implementation: &SandboxImplementation) {
     let manager = SandboxManager::new(implementation.backend.clone());
     let handle = manager
         .create_running(implementation.byte_io_spec.clone())
@@ -230,7 +231,9 @@ async fn pause_blocks_read_write_until_resume(implementation: &SandboxImplementa
     manager.stop(&handle.id).await.unwrap();
 }
 
-async fn missing_sandbox_operations_are_consistent(implementation: &SandboxImplementation) {
+pub(crate) async fn missing_sandbox_operations_are_consistent(
+    implementation: &SandboxImplementation,
+) {
     let manager = SandboxManager::new(implementation.backend.clone());
     let missing = SandboxId::new(format!("missing-{}", implementation.name));
 
@@ -264,7 +267,9 @@ async fn missing_sandbox_operations_are_consistent(implementation: &SandboxImple
     });
 }
 
-async fn failed_create_cleans_up_observed_resources(implementation: &SandboxImplementation) {
+pub(crate) async fn failed_create_cleans_up_observed_resources(
+    implementation: &SandboxImplementation,
+) {
     let before = implementation
         .backend
         .list_observed()
@@ -287,42 +292,51 @@ async fn eventually_status<S>(manager: &SandboxManager<S>, id: &SandboxId, expec
 where
     S: centaur_sandbox_manager::DesiredStateStore,
 {
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let mut latest;
-    loop {
-        let status = manager.status(id).await.unwrap_or(SandboxStatus::Gone);
-        if status == expected {
-            return;
+    let mut latest = SandboxStatus::Gone;
+    let result = timeout(Duration::from_secs(45), async {
+        let mut ticks = interval(Duration::from_millis(250));
+        loop {
+            let status = manager.status(id).await.unwrap_or(SandboxStatus::Gone);
+            if status == expected {
+                return;
+            }
+            latest = status;
+            ticks.tick().await;
         }
-        latest = Some(status);
-        assert!(
-            Instant::now() < deadline,
-            "sandbox {} did not reach {expected:?}; latest status: {:?}",
-            id.as_str(),
-            latest
-        );
-        sleep(Duration::from_millis(250)).await;
-    }
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "sandbox {} did not reach {expected:?}; latest status: {latest:?}",
+        id.as_str()
+    );
 }
 
 async fn eventually_observed_count_at_most(backend: Arc<dyn SandboxBackend>, expected_max: usize) {
-    let deadline = Instant::now() + Duration::from_secs(45);
-    loop {
-        let count = backend.list_observed().await.unwrap_or_default().len();
-        if count <= expected_max {
-            return;
+    let mut latest = usize::MAX;
+    let result = timeout(Duration::from_secs(45), async {
+        let mut ticks = interval(Duration::from_millis(250));
+        loop {
+            let count = backend.list_observed().await.unwrap_or_default().len();
+            if count <= expected_max {
+                return;
+            }
+            latest = count;
+            ticks.tick().await;
         }
-        assert!(
-            Instant::now() < deadline,
-            "observed sandbox count stayed above {expected_max}; latest count: {count}"
-        );
-        sleep(Duration::from_millis(250)).await;
-    }
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "observed sandbox count stayed above {expected_max}; latest count: {latest}"
+    );
 }
 
 async fn read_stdout(stdout: &mut centaur_sandbox_core::SandboxRead, len: usize) -> Vec<u8> {
     let mut buf = vec![0; len];
-    tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut buf))
+    timeout(Duration::from_secs(5), stdout.read_exact(&mut buf))
         .await
         .expect("read stdout timed out")
         .expect("read stdout failed");
@@ -331,30 +345,6 @@ async fn read_stdout(stdout: &mut centaur_sandbox_core::SandboxRead, len: usize)
 
 fn drop_stdin(stdin: SandboxWrite) {
     drop(stdin);
-}
-
-async fn implementations() -> Vec<SandboxImplementation> {
-    let args = E2eArgs::from_env();
-    let requested = args.sandbox_e2e_impls.as_str();
-    let names = if requested.trim() == "all" {
-        ALL_IMPLEMENTATIONS.to_vec()
-    } else {
-        requested
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .collect::<Vec<_>>()
-    };
-
-    let mut implementations = Vec::new();
-    for name in names {
-        match name {
-            "local" => implementations.push(local_implementation()),
-            "agent-k8s" => implementations.push(agent_k8s_implementation().await),
-            other => panic!("unknown sandbox e2e implementation {other:?}"),
-        }
-    }
-    implementations
 }
 
 fn local_implementation() -> SandboxImplementation {
@@ -407,6 +397,18 @@ async fn agent_k8s_implementation() -> SandboxImplementation {
     }
 }
 
+fn validate_requested_implementations(args: &E2eArgs) {
+    if args.sandbox_e2e_impls.trim() == "all" {
+        return;
+    }
+    for name in args.requested_implementation_names() {
+        assert!(
+            ALL_IMPLEMENTATIONS.contains(&name),
+            "unknown sandbox e2e implementation {name:?}"
+        );
+    }
+}
+
 #[derive(Debug, Parser)]
 struct E2eArgs {
     #[arg(long, env = "SANDBOX_E2E_IMPLS", default_value = "all")]
@@ -426,6 +428,23 @@ struct E2eArgs {
 impl E2eArgs {
     fn from_env() -> Self {
         Self::parse_from(["centaur-sandbox-e2e"])
+    }
+
+    fn includes_implementation(&self, name: &str) -> bool {
+        if self.sandbox_e2e_impls.trim() == "all" {
+            return true;
+        }
+        self.requested_implementation_names()
+            .into_iter()
+            .any(|requested| requested == name)
+    }
+
+    fn requested_implementation_names(&self) -> Vec<&str> {
+        self.sandbox_e2e_impls
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect()
     }
 }
 

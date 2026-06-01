@@ -8,13 +8,15 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use centaur_api_server::client::{CentaurClient, SseEventStream};
+use centaur_session_core::ThreadKey;
 use crossterm::{
     cursor::{Hide, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use eyre::{Result, WrapErr};
 use futures_util::StreamExt;
 use ratatui::{
     Frame, Terminal,
@@ -24,7 +26,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use reqwest::Client;
 use serde_json::Value;
 use tokio::{
     sync::mpsc,
@@ -32,7 +33,7 @@ use tokio::{
 };
 
 use crate::{
-    SseFrame, StdinEvent, append_user_message, execute_input_lines, is_terminal_event, next_frame,
+    SseFrame, StdinEvent, append_user_message, execute_input_lines, is_terminal_event,
     output_type_matches, parse_json_or_string, user_input_line,
 };
 
@@ -48,10 +49,9 @@ pub(crate) struct TuiOptions {
 }
 
 pub(crate) async fn run(
-    client: Client,
-    thread_key: String,
-    session_url: String,
-    events_response: reqwest::Response,
+    client: CentaurClient,
+    thread_key: ThreadKey,
+    events: SseEventStream,
     options: TuiOptions,
 ) -> Result<()> {
     let _terminal_restore = TerminalRestore::enter()?;
@@ -63,9 +63,9 @@ pub(crate) async fn run(
     let (frame_tx, mut frame_rx) = mpsc::channel(256);
     let (notice_tx, mut notice_rx) = mpsc::channel(64);
 
-    spawn_stream_task(events_response, frame_tx, notice_tx.clone());
+    spawn_stream_task(events, frame_tx, notice_tx.clone());
 
-    let mut app = TuiApp::new(thread_key, options.debug_visible);
+    let mut app = TuiApp::new(thread_key.to_string(), options.debug_visible);
     let mut tick = time::interval(TokioDuration::from_millis(100));
 
     loop {
@@ -78,7 +78,7 @@ pub(crate) async fn run(
                     &mut app,
                     event,
                     &client,
-                    &session_url,
+                    &thread_key,
                     &options,
                     notice_tx.clone(),
                 )? {
@@ -101,12 +101,12 @@ pub(crate) async fn run(
 }
 
 fn spawn_stream_task(
-    response: reqwest::Response,
+    stream: SseEventStream,
     frame_tx: mpsc::Sender<SseFrame>,
     notice_tx: mpsc::Sender<TuiNotice>,
 ) {
     tokio::spawn(async move {
-        if let Err(error) = stream_sse_frames(response, frame_tx).await {
+        if let Err(error) = stream_sse_frames(stream, frame_tx).await {
             let _ = notice_tx
                 .send(TuiNotice::Error(format!("stream error: {error:#}")))
                 .await;
@@ -115,25 +115,13 @@ fn spawn_stream_task(
 }
 
 async fn stream_sse_frames(
-    response: reqwest::Response,
+    mut stream: SseEventStream,
     frame_tx: mpsc::Sender<SseFrame>,
 ) -> Result<()> {
-    let mut chunks = response.bytes_stream();
-    let mut buffer = String::new();
-
-    while let Some(chunk) = chunks.next().await {
-        let chunk = chunk.context("read event stream")?;
-        buffer.push_str(std::str::from_utf8(&chunk).context("event stream is not UTF-8")?);
-
-        while let Some((frame_end, separator_len)) = next_frame(&buffer) {
-            let frame = buffer[..frame_end].to_owned();
-            buffer.drain(..frame_end + separator_len);
-
-            if let Some(event) = SseFrame::parse(&frame) {
-                if frame_tx.send(event).await.is_err() {
-                    return Ok(());
-                }
-            }
+    while let Some(frame) = stream.next().await {
+        let frame = frame.wrap_err("read event stream")?;
+        if frame_tx.send(frame).await.is_err() {
+            return Ok(());
         }
     }
 
@@ -143,8 +131,8 @@ async fn stream_sse_frames(
 fn handle_terminal_event(
     app: &mut TuiApp,
     event: TerminalInput,
-    client: &Client,
-    session_url: &str,
+    client: &CentaurClient,
+    thread_key: &ThreadKey,
     options: &TuiOptions,
     notice_tx: mpsc::Sender<TuiNotice>,
 ) -> Result<bool> {
@@ -160,15 +148,13 @@ fn handle_terminal_event(
         KeyCode::Enter => {
             let line = app.input.trim().to_owned();
             app.input.clear();
-            return submit_input_line(app, line, client, session_url, options, notice_tx);
+            return submit_input_line(app, line, client, thread_key, options, notice_tx);
         }
         KeyCode::Backspace => {
             app.input.pop();
         }
-        KeyCode::Char(ch) => {
-            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                app.input.push(ch);
-            }
+        KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            app.input.push(ch);
         }
         _ => {}
     }
@@ -179,8 +165,8 @@ fn handle_terminal_event(
 fn submit_input_line(
     app: &mut TuiApp,
     line: String,
-    client: &Client,
-    session_url: &str,
+    client: &CentaurClient,
+    thread_key: &ThreadKey,
     options: &TuiOptions,
     notice_tx: mpsc::Sender<TuiNotice>,
 ) -> Result<bool> {
@@ -215,7 +201,7 @@ fn submit_input_line(
     spawn_send_task(
         event,
         client.clone(),
-        session_url.to_owned(),
+        thread_key.clone(),
         options.idle_timeout_ms,
         options.max_duration_ms,
         notice_tx,
@@ -225,15 +211,15 @@ fn submit_input_line(
 
 fn spawn_send_task(
     event: StdinEvent,
-    client: Client,
-    session_url: String,
+    client: CentaurClient,
+    thread_key: ThreadKey,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
     notice_tx: mpsc::Sender<TuiNotice>,
 ) {
     tokio::spawn(async move {
         let notice =
-            match send_stdin_event(event, client, session_url, idle_timeout_ms, max_duration_ms)
+            match send_stdin_event(event, client, thread_key, idle_timeout_ms, max_duration_ms)
                 .await
             {
                 Ok(message) => TuiNotice::Info(message),
@@ -245,17 +231,17 @@ fn spawn_send_task(
 
 async fn send_stdin_event(
     event: StdinEvent,
-    client: Client,
-    session_url: String,
+    client: CentaurClient,
+    thread_key: ThreadKey,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
 ) -> Result<String> {
     match event {
         StdinEvent::Message(text) => {
-            append_user_message(&client, &session_url, &text).await?;
+            append_user_message(&client, &thread_key, &text).await?;
             execute_input_lines(
                 &client,
-                &session_url,
+                &thread_key,
                 vec![user_input_line(&text)?],
                 idle_timeout_ms,
                 max_duration_ms,
@@ -266,7 +252,7 @@ async fn send_stdin_event(
         StdinEvent::InputLine(line) => {
             execute_input_lines(
                 &client,
-                &session_url,
+                &thread_key,
                 vec![line],
                 idle_timeout_ms,
                 max_duration_ms,
@@ -278,7 +264,7 @@ async fn send_stdin_event(
             let count = lines.len();
             execute_input_lines(
                 &client,
-                &session_url,
+                &thread_key,
                 lines,
                 idle_timeout_ms,
                 max_duration_ms,
@@ -473,8 +459,8 @@ struct TerminalRestore;
 
 impl TerminalRestore {
     fn enter() -> Result<Self> {
-        enable_raw_mode().context("enable terminal raw mode")?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide).context("enter alternate screen")?;
+        enable_raw_mode().wrap_err("enable terminal raw mode")?;
+        execute!(io::stdout(), EnterAlternateScreen, Hide).wrap_err("enter alternate screen")?;
         Ok(Self)
     }
 }
@@ -507,10 +493,7 @@ impl TuiApp {
         Self {
             thread_key,
             input: String::new(),
-            main_lines: vec![
-                "session ready".to_owned(),
-                "type a message and press Enter; use F2 for raw events".to_owned(),
-            ],
+            main_lines: Vec::new(),
             debug_lines: Vec::new(),
             debug_visible,
             status: "ready".to_owned(),
@@ -542,12 +525,10 @@ impl TuiApp {
                 self.status = "sending message".to_owned();
             }
             StdinEvent::InputLine(_) => {
-                self.push_main_line("system: sending raw input line".to_owned());
                 self.status = "sending raw input line".to_owned();
             }
             StdinEvent::InputLines(lines) => {
-                self.push_main_line(format!("system: sending {} raw input lines", lines.len()));
-                self.status = "sending raw input lines".to_owned();
+                self.status = format!("sending {} raw input lines", lines.len());
             }
             StdinEvent::Quit => {}
         }
@@ -558,7 +539,6 @@ impl TuiApp {
             TuiNotice::Info(message) => self.status = message,
             TuiNotice::Error(message) => {
                 self.status = format!("error: {message}");
-                self.push_main_line(format!("error: {message}"));
             }
         }
     }
@@ -577,11 +557,9 @@ impl TuiApp {
                 return true;
             }
         } else if frame.event == "session.execution_started" {
-            self.push_main_line("system: execution started".to_owned());
             self.status = "execution started".to_owned();
         } else if is_terminal_event(&frame.event) {
             self.current_agent_line = None;
-            self.push_main_line(format!("system: {}", frame.event));
             self.status = frame.event.clone();
             if options.exit_on_terminal {
                 return true;
@@ -593,52 +571,110 @@ impl TuiApp {
 
     fn handle_output_line(&mut self, data: &str) {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
-            self.push_main_line(format!("stdout: {data}"));
+            self.status = "received non-json output".to_owned();
             return;
         };
 
-        let Some(event_type) = value.get("type").and_then(Value::as_str) else {
-            self.push_main_line(format!("stdout: {}", compact_json(&value, 240)));
+        let Some(event_type) = output_event_name(&value) else {
+            self.status = "received output event".to_owned();
             return;
         };
 
         match event_type {
-            "item.agentMessage.delta" => {
-                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+            "remoteControl/status/changed" => {
+                if let Some(status) = value
+                    .get("params")
+                    .and_then(|params| params.get("status"))
+                    .and_then(Value::as_str)
+                {
+                    self.status = format!("remote control: {status}");
+                }
+            }
+            "thread/started" => {
+                if let Some(thread_id) = value
+                    .get("params")
+                    .and_then(|params| params.get("thread"))
+                    .and_then(|thread| thread.get("id"))
+                    .and_then(Value::as_str)
+                {
+                    self.status = format!("codex thread {thread_id}");
+                } else {
+                    self.status = "codex thread started".to_owned();
+                }
+            }
+            "thread/status/changed" => {
+                if let Some(status) = value
+                    .get("params")
+                    .and_then(|params| params.get("status"))
+                    .and_then(|status| status.get("type"))
+                    .and_then(Value::as_str)
+                {
+                    self.status = format!("thread {status}");
+                }
+            }
+            "turn/started" | "turn.started" => {
+                self.current_agent_line = None;
+                self.status = "turn started".to_owned();
+            }
+            "item/started" | "item.started" => {
+                self.handle_item_event(&value, false);
+            }
+            "item/completed" | "item.completed" => {
+                self.handle_item_event(&value, true);
+            }
+            "item/agentMessage/delta" | "item.agentMessage.delta" => {
+                if let Some(delta) = app_server_delta(&value) {
                     self.append_agent_delta(delta);
                 }
             }
-            "item.completed" => {
-                if let Some(text) = completed_agent_text(&value) {
-                    if self.current_agent_line.is_none() {
-                        self.push_main_line(format!("assistant: {text}"));
-                    }
-                    self.current_agent_line = None;
-                }
+            "thread/tokenUsage/updated" => {
+                self.status = "token usage updated".to_owned();
             }
-            "turn.completed" => {
+            "turn/completed" | "turn.completed" => {
                 self.current_agent_line = None;
-                self.push_main_line("system: turn completed".to_owned());
                 self.status = "turn completed".to_owned();
             }
             "result" => {
                 self.current_agent_line = None;
-                if let Some(result) = value.get("result").and_then(Value::as_str) {
-                    self.push_main_line(format!("result: {result}"));
-                } else {
-                    self.push_main_line(format!("result: {}", compact_json(&value, 240)));
-                }
+                self.status = "result received".to_owned();
             }
             "system" => {
                 let subtype = value
                     .get("subtype")
                     .and_then(Value::as_str)
                     .unwrap_or("event");
-                self.push_main_line(format!("system: {subtype}"));
+                self.status = format!("system: {subtype}");
             }
             other => {
-                self.push_main_line(format!("event: {other}"));
+                self.status = format!("event: {other}");
             }
+        }
+    }
+
+    fn handle_item_event(&mut self, value: &Value, completed: bool) {
+        let Some(item) = app_server_item(value) else {
+            return;
+        };
+        match item.get("type").and_then(Value::as_str) {
+            Some("userMessage") if completed || item.get("content").is_some() => {
+                if let Some(text) = user_message_text(item) {
+                    self.push_user_line_once(text);
+                }
+            }
+            Some("agentMessage") => {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() && self.current_agent_line.is_none() {
+                        self.push_main_line(format!("assistant: {text}"));
+                    }
+                } else if !completed && self.current_agent_line.is_none() {
+                    self.push_main_line("assistant: ".to_owned());
+                    self.current_agent_line = self.main_lines.len().checked_sub(1);
+                }
+                if completed {
+                    self.current_agent_line = None;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -647,10 +683,23 @@ impl TuiApp {
             self.push_main_line("assistant: ".to_owned());
             self.current_agent_line = self.main_lines.len().checked_sub(1);
         }
-        if let Some(index) = self.current_agent_line {
-            if let Some(line) = self.main_lines.get_mut(index) {
-                line.push_str(delta);
-            }
+        if let Some(index) = self.current_agent_line
+            && let Some(line) = self.main_lines.get_mut(index)
+        {
+            line.push_str(delta);
+        }
+    }
+
+    fn push_user_line_once(&mut self, text: &str) {
+        let line = format!("you: {text}");
+        if !self
+            .main_lines
+            .iter()
+            .rev()
+            .take(8)
+            .any(|existing| existing == &line)
+        {
+            self.push_main_line(line);
         }
     }
 
@@ -672,12 +721,33 @@ impl TuiApp {
     }
 }
 
-fn completed_agent_text(value: &Value) -> Option<&str> {
-    let item = value.get("item")?;
-    if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
-        return None;
-    }
-    item.get("text").and_then(Value::as_str)
+fn output_event_name(value: &Value) -> Option<&str> {
+    value
+        .get("method")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("type").and_then(Value::as_str))
+}
+
+fn app_server_item(value: &Value) -> Option<&Value> {
+    value
+        .get("params")
+        .and_then(|params| params.get("item"))
+        .or_else(|| value.get("item"))
+}
+
+fn app_server_delta(value: &Value) -> Option<&str> {
+    value
+        .get("params")
+        .and_then(|params| params.get("delta"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("delta").and_then(Value::as_str))
+}
+
+fn user_message_text(item: &Value) -> Option<&str> {
+    item.get("content")?
+        .as_array()?
+        .iter()
+        .find_map(|part| part.get("text").and_then(Value::as_str))
 }
 
 fn format_debug_frame(frame: &SseFrame) -> String {
@@ -706,5 +776,62 @@ fn truncate(value: &str, max_chars: usize) -> String {
         format!("{truncated}...")
     } else {
         truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projects_codex_app_server_events_into_transcript() {
+        let mut app = TuiApp::new("cli:test".to_owned(), false);
+        app.clear();
+
+        for line in [
+            r#"{"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
+            r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#,
+            r#"{"method":"item/started","params":{"item":{"type":"userMessage","content":[{"type":"text","text":"hello"}]}}}"#,
+            r#"{"method":"item/completed","params":{"item":{"type":"userMessage","content":[{"type":"text","text":"hello"}]}}}"#,
+            r#"{"method":"item/started","params":{"item":{"id":"agent-1","type":"agentMessage","text":""}}}"#,
+            r#"{"method":"item/agentMessage/delta","params":{"delta":"PO"}}"#,
+            r#"{"method":"item/agentMessage/delta","params":{"delta":"NG"}}"#,
+            r#"{"method":"item/completed","params":{"item":{"id":"agent-1","type":"agentMessage","text":"PONG"}}}"#,
+            r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":10,"cachedInputTokens":4,"outputTokens":2,"totalTokens":12}}}}"#,
+            r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}"#,
+        ] {
+            app.handle_output_line(line);
+        }
+
+        assert_eq!(app.main_lines, vec!["you: hello", "assistant: PONG"]);
+    }
+
+    #[test]
+    fn still_projects_legacy_type_delta_events() {
+        let mut app = TuiApp::new("cli:test".to_owned(), false);
+        app.clear();
+
+        app.handle_output_line(r#"{"type":"item.agentMessage.delta","delta":"P"}"#);
+        app.handle_output_line(r#"{"type":"item.agentMessage.delta","delta":"ONG"}"#);
+        app.handle_output_line(r#"{"type":"turn.completed"}"#);
+
+        assert_eq!(app.main_lines, vec!["assistant: PONG"]);
+    }
+
+    #[test]
+    fn leaves_non_message_events_out_of_transcript() {
+        let mut app = TuiApp::new("cli:test".to_owned(), false);
+
+        for line in [
+            r#"{"type":"system","subtype":"wrapper_heartbeat"}"#,
+            r#"{"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
+            r#"{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}"#,
+            r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"totalTokens":12}}}}"#,
+            r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}"#,
+        ] {
+            app.handle_output_line(line);
+        }
+
+        assert!(app.main_lines.is_empty());
     }
 }

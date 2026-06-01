@@ -13,8 +13,10 @@ centaur-session-core.workspace = true
 centaur-session-runtime.workspace = true
 centaur-session-sqlx.workspace = true
 clap.workspace = true
+eventsource-stream.workspace = true
 futures-util.workspace = true
 kube.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -22,6 +24,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
+urlencoding.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

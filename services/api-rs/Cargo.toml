@@ -23,6 +23,7 @@ anyhow = "1"
 async-trait = "0.1"
 axum = "0.8.9"
 bytes = { version = "1", features = ["serde"] }
+centaur-api-server = { path = "crates/centaur-api-server" }
 centaur-sandbox-core = { path = "crates/centaur-sandbox-core" }
 centaur-sandbox-agent-k8s = { path = "crates/centaur-sandbox-agent-k8s" }
 centaur-sandbox-local = { path = "crates/centaur-sandbox-local" }
@@ -32,6 +33,8 @@ centaur-session-runtime = { path = "crates/centaur-session-runtime" }
 centaur-session-sqlx = { path = "crates/centaur-session-sqlx" }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 crossterm = "0.28"
+eventsource-stream = "0.2.3"
+eyre = "0.6"
 futures-util = { version = "0.3", features = ["sink"] }
 k8s-openapi = { version = "0.27.1", features = ["latest"] }
 kube = "3.1.0"
@@ -41,6 +44,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "r
 ratatui = "0.29"
 sqlx = { version = "0.8.6", default-features = false, features = ["derive", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "time"] }
 strum = { version = "0.28", features = ["derive"] }
+test-case = "3.3.1"
 thiserror = "2"
 time = { version = "0.3", features = ["serde"] }
 tokio = "1"
