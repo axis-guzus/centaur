@@ -157,6 +157,58 @@ async def open_agent_session(
     return session_id or None
 
 
+async def open_renderer_session(
+    *,
+    delivery: dict[str, Any],
+    metadata: dict[str, Any],
+    thread_key: str,
+    title: str = "Centaur execution",
+    header: str | None = None,
+) -> str | None:
+    if not enabled() or not is_slack_delivery(delivery):
+        return None
+    channel = channel_id(delivery)
+    parent_ts = thread_ts(delivery)
+    team_id = recipient_team_id(delivery, thread_key)
+    user_id = recipient_user_id(delivery, metadata)
+    if not channel or not parent_ts or not team_id or not user_id:
+        return None
+    body: dict[str, Any] = {
+        "type": "renderer.session.open",
+        "title": title,
+        "target": {
+            "platform": "slack",
+            "threadKey": thread_key,
+            "slack": {
+                "channel": channel,
+                "parentTs": parent_ts,
+                "recipientTeamId": team_id,
+                "recipientUserId": user_id,
+            },
+        },
+    }
+    header_text = (header or "").strip()
+    if header_text:
+        body["header"] = header_text
+    result = await post("/api/v2/rendering/sessions", body)
+    session_id = str((result or {}).get("session_id") or "").strip()
+    return session_id or None
+
+
+async def renderer_event(
+    session_id: str | None,
+    event: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    return await post(
+        f"/api/v2/rendering/sessions/{session_id}/events",
+        sanitize_slack_event(event),
+        timeout=httpx.Timeout(60.0, connect=2.0),
+        suppress_http_span=True,
+    )
+
+
 async def session_text(session_id: str | None, markdown: str) -> None:
     sanitized = sanitize_for_slack(markdown)
     if not session_id or not sanitized.strip():

@@ -1,0 +1,19 @@
+{
+  "name": "@centaur/rendering",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "bun test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@std/ulid": "npm:@jsr/std__ulid",
+    "chat": "^4.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

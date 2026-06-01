@@ -127,3 +127,74 @@ async def test_harness_event_suppresses_auto_http_span(monkeypatch):
         fake.calls[0]["url"]
         == "http://slackbot.test/api/slack/agent-sessions/sess/harness-event"
     )
+
+
+@pytest.mark.asyncio
+async def test_open_renderer_session_posts_v2_contract():
+    fake = _FakeClient([_response(200, {"ok": True, "session_id": "rnd-1"})])
+    with patch("api.slackbot_client.httpx.AsyncClient", return_value=fake):
+        from api import slackbot_client
+
+        result = await slackbot_client.open_renderer_session(
+            delivery={
+                "platform": "slack",
+                "channel": "C123",
+                "thread_ts": "1778866921.505479",
+                "recipient_team_id": "T123",
+                "recipient_user_id": "U123",
+            },
+            metadata={},
+            thread_key="slack:T123:C123:1778866921.505479",
+            title="Centaur execution",
+            header="base - codex",
+        )
+
+    assert result == "rnd-1"
+    assert fake.calls[0]["url"] == "http://slackbot.test/api/v2/rendering/sessions"
+    assert fake.calls[0]["json"] == {
+        "type": "renderer.session.open",
+        "title": "Centaur execution",
+        "header": "base - codex",
+        "target": {
+            "platform": "slack",
+            "threadKey": "slack:T123:C123:1778866921.505479",
+            "slack": {
+                "channel": "C123",
+                "parentTs": "1778866921.505479",
+                "recipientTeamId": "T123",
+                "recipientUserId": "U123",
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_renderer_event_posts_v2_event_and_suppresses_auto_http_span(monkeypatch):
+    from api import slackbot_client
+
+    fake = _FakeClient([_response(200, {"ok": True})])
+    entered = 0
+
+    @contextmanager
+    def suppress():
+        nonlocal entered
+        entered += 1
+        yield
+
+    monkeypatch.setattr(slackbot_client, "suppress_http_instrumentation", suppress)
+    with patch("api.slackbot_client.httpx.AsyncClient", return_value=fake):
+        result = await slackbot_client.renderer_event(
+            "rnd-1",
+            {"type": "renderer.message.delta", "text": "hello <@U123>"},
+        )
+
+    assert result == {"ok": True}
+    assert entered == 1
+    assert (
+        fake.calls[0]["url"]
+        == "http://slackbot.test/api/v2/rendering/sessions/rnd-1/events"
+    )
+    assert fake.calls[0]["json"] == {
+        "type": "renderer.message.delta",
+        "text": "hello <@U123>",
+    }

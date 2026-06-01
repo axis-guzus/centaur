@@ -26,6 +26,7 @@ import { normalizeSlackEnvelope } from './slack/normalize'
 import { markdownToStreamChunks } from './slack/render'
 import { verifySlackSignature } from './slack/signature'
 import { shouldAckWithReaction } from './slack/trivial-ack'
+import { registerRenderingV2Routes } from './rendering/routes'
 import type { NormalizedSlackEvent, SlackEnvelope } from './slack/types'
 import type { AnyBlock, AnyChunk } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
@@ -119,6 +120,14 @@ const apiKeyMiddleware: MiddlewareHandler<{ Variables: Variables }> = async (c, 
   }
   await next()
 }
+
+registerRenderingV2Routes(app, {
+  apiKeyMiddleware,
+  resolveClient: async () => {
+    const { client } = await resolver.resolve({})
+    return client
+  }
+})
 
 const slackSignatureMiddleware: MiddlewareHandler<{ Variables: Variables }> = async (c, next) => {
   const rawBody = await c.req.raw.text()
