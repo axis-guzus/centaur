@@ -251,6 +251,14 @@ fn iron_proxy_config_from_env() -> Result<Option<IronProxyPodConfig>, ServerErro
             config.api_pod_labels = labels;
         }
     }
+    if let Some(selector) = nonempty_env("SESSION_SANDBOX_IRON_BROKER_POD_LABEL_SELECTOR")
+        .or_else(|| nonempty_env("KUBERNETES_TOKEN_BROKER_POD_LABEL_SELECTOR"))
+    {
+        let labels = parse_label_selector(&selector);
+        if !labels.is_empty() {
+            config.token_broker_pod_labels = labels;
+        }
+    }
     config.harness_auth_modes = harness_auth_modes_from_env();
     push_optional_proxy_env(
         &mut config.extra_env,
