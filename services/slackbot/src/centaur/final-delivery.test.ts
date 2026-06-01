@@ -454,6 +454,75 @@ describe("final delivery polling", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("posts the full answer instead of corrupting it when the streamed-char offset lands mid-token", async () => {
+    // `slackbot_streamed_answer_chars` counts streamed *source* characters, which
+    // can drift from `result_text` (normalization / reflow / answer revisions). An
+    // offset that lands inside a word must not be blindly sliced — that drops
+    // characters (e.g. "market cap" -> "marketountries"). The full, uncorrupted
+    // answer should be posted instead.
+    const originalFetch = globalThis.fetch;
+    const resultText = "USDT ~$190B and USDC ~$78B are ~90% of the stablecoin market.";
+    const midTokenOffset = 8; // inside "~$190B" — a blind slice would yield "90B and USDC ..."
+    const fetchMock = mock(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        if (url.pathname === "/agent/final-deliveries/claim") {
+          return jsonResponse({
+            deliveries: [
+              {
+                execution_id: "exe-midtoken",
+                thread_key: "slack:T123:C123:1778883099.579529",
+                delivery: {
+                  platform: "slack",
+                  channel: "C123",
+                  thread_ts: "1778883099.579529",
+                },
+                final_payload: {
+                  result_text: resultText,
+                  slackbot_streamed_answer_chars: midTokenOffset,
+                },
+              },
+            ],
+          });
+        }
+        if (url.pathname === "/agent/final-deliveries/exe-midtoken/delivered") {
+          return jsonResponse({ ok: true });
+        }
+        throw new Error(`unexpected request: ${url.pathname}`);
+      },
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const slackCalls: Array<{ method: string; params: any }> = [];
+    const client = {
+      chat: {
+        postMessage: async (params: any) => {
+          slackCalls.push({ method: "chat.postMessage", params });
+          return { ok: true };
+        },
+      },
+      conversations: {
+        replies: async () => ({ ok: true, messages: [] }),
+      },
+    };
+
+    try {
+      await pollFinalDeliveriesOnce(config, client as any);
+
+      const posts = slackCalls.filter(
+        (call) => call.method === "chat.postMessage",
+      );
+      expect(posts).toHaveLength(1);
+      const post = posts[0];
+      if (!post) throw new Error("expected one Slack post");
+      expect(post.params.text).toBe(resultText);
+      // a blind slice at the mid-token offset would have started with "90B…"
+      expect(post.params.text.startsWith("90B")).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 function jsonResponse(body: unknown): Response {

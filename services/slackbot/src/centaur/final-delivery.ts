@@ -272,6 +272,19 @@ function continuationText(payload: any, text: string): string | null {
   if (!Number.isFinite(rawOffset) || rawOffset <= 0) return null;
   const offset = Math.floor(rawOffset);
   if (offset >= text.length) return null;
+  // `slackbot_streamed_answer_chars` counts the *source* characters streamed live,
+  // which can drift from the canonical `text` (markdown normalization, whitespace
+  // reflow, and post-hoc answer revisions all change lengths). Slicing `text`
+  // blindly at this offset can therefore land mid-token and drop characters
+  // (e.g. "market cap" rendered as "marketountries"). We only have the count
+  // here, not the streamed string, so we cannot verify the prefix — but we can
+  // refuse to cut mid-token: only treat the offset as a split point when it falls
+  // on a whitespace boundary in `text`. When it is misaligned, fall back to the
+  // full answer (re-showing the already-streamed prefix is strictly preferable to
+  // emitting corrupted text).
+  const before = text[offset - 1] ?? "";
+  const at = text[offset] ?? "";
+  if (!/\s/.test(before) && !/\s/.test(at)) return text;
   return text.slice(offset).trimStart();
 }
 
