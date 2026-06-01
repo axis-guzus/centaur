@@ -138,8 +138,8 @@ the higher-level Centaur data model is settled.
 
 ### `centaur-session-runtime`
 
-Internal session control-plane runtime over the sandbox abstraction and durable
-session store:
+Internal session control-plane runtime over `centaur-sandbox-manager` and the
+durable session store:
 
 - create or reuse thread sessions
 - start executions and ensure the backing sandbox exists
@@ -149,7 +149,9 @@ session store:
 
 This crate owns protocol framing such as NDJSON lines. It may use
 `tokio_util::codec::FramedRead` and `FramedWrite` over `SandboxIo`, but those
-details should not live in the HTTP server crate.
+details should not live in the HTTP server crate. It should consume sandboxes
+through the generic manager interface; backend selection remains startup
+configuration, not execution-path branching.
 
 ## Core Types
 

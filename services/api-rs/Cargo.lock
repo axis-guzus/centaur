@@ -372,6 +372,7 @@ name = "centaur-session-runtime"
 version = "0.1.0"
 dependencies = [
  "centaur-sandbox-core",
+ "centaur-sandbox-manager",
  "centaur-session-core",
  "centaur-session-sqlx",
  "futures-util",

@@ -1,4 +1,4 @@
-use std::convert::Infallible;
+use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -10,6 +10,8 @@ use axum::{
     },
     routing::{get, post},
 };
+use centaur_sandbox_core::SandboxSpec;
+use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_session_core::{HarnessType, SessionEvent, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, SESSION_OUTPUT_LINE_EVENT, SessionRuntimeError,
@@ -27,11 +29,46 @@ pub struct AppState {
 }
 
 pub fn build_router(store: PgSessionStore) -> Router {
-    build_router_with_runtime(store, SandboxRuntime::Mock)
+    build_router_with_runtime(store, local_mock_sandbox_runtime())
 }
 
 pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Router {
     build_router_with_session_runtime(SessionRuntime::new(store, sandbox_runtime))
+}
+
+pub fn local_mock_sandbox_runtime() -> SandboxRuntime {
+    SandboxRuntime::backend(
+        Arc::new(LocalSandboxBackend::new()),
+        local_mock_app_server_spec(),
+    )
+}
+
+pub fn local_mock_app_server_spec() -> SandboxSpec {
+    SandboxSpec::new("/bin/sh")
+        .command(["/bin/sh", "-lc"])
+        .args([mock_app_server_script()])
+}
+
+pub fn mock_app_server_script() -> &'static str {
+    r#"while IFS= read -r line; do
+printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"startup"}'
+sleep 0.2
+printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"app_server_started"}'
+sleep 0.2
+printf '%s\n' '{"type":"thread.started","thread_id":"mock-codex-thread"}'
+sleep 0.2
+turn_index=1
+while [ "$turn_index" -le 3 ]; do
+  turn_id="mock-turn-$turn_index"
+  printf '{"type":"turn.started","turn_id":"%s"}\n' "$turn_id"
+  sleep 0.2
+  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG %s"}\n' "$turn_id" "$turn_index"
+  sleep 0.2
+  printf '{"type":"turn.completed","turn":{"id":"%s"},"usage":{"input_tokens":0,"output_tokens":1}}\n' "$turn_id"
+  sleep 0.2
+  turn_index=$((turn_index + 1))
+done
+done"#
 }
 
 pub fn build_router_with_session_runtime(runtime: SessionRuntime) -> Router {

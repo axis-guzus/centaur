@@ -1,6 +1,9 @@
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 
-use centaur_api_server::{SandboxRuntime, build_router_with_runtime};
+use centaur_api_server::{
+    SandboxRuntime, build_router_with_runtime, local_mock_app_server_spec,
+    local_mock_sandbox_runtime, mock_app_server_script,
+};
 use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig};
 use centaur_sandbox_core::SandboxSpec;
 use centaur_sandbox_local::LocalSandboxBackend;
@@ -44,7 +47,7 @@ async fn shutdown_signal() {
 
 async fn sandbox_runtime_from_args(args: &Args) -> Result<SandboxRuntime, ServerError> {
     match args.session_sandbox_backend {
-        SandboxBackendKind::Mock => Ok(SandboxRuntime::Mock),
+        SandboxBackendKind::Mock => Ok(local_mock_sandbox_runtime()),
         SandboxBackendKind::Local => Ok(SandboxRuntime::backend(
             Arc::new(LocalSandboxBackend::new()),
             local_mock_app_server_spec(),
@@ -160,12 +163,6 @@ fn default_sandbox_image(workload: SandboxWorkloadKind) -> &'static str {
     }
 }
 
-fn local_mock_app_server_spec() -> SandboxSpec {
-    SandboxSpec::new("/bin/sh")
-        .command(["/bin/sh", "-lc"])
-        .args([mock_app_server_script()])
-}
-
 fn agent_k8s_mock_app_server_spec(image: &str) -> SandboxSpec {
     SandboxSpec::new(image)
         .command(["/bin/sh", "-lc"])
@@ -221,28 +218,6 @@ fn push_env(envs: &mut Vec<(String, String)>, name: &str, value: String) {
     } else {
         envs.push((name.to_owned(), value));
     }
-}
-
-fn mock_app_server_script() -> &'static str {
-    r#"while IFS= read -r line; do
-printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"startup"}'
-sleep 0.2
-printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"app_server_started"}'
-sleep 0.2
-printf '%s\n' '{"type":"thread.started","thread_id":"mock-codex-thread"}'
-sleep 0.2
-turn_index=1
-while [ "$turn_index" -le 3 ]; do
-  turn_id="mock-turn-$turn_index"
-  printf '{"type":"turn.started","turn_id":"%s"}\n' "$turn_id"
-  sleep 0.2
-  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG %s"}\n' "$turn_id" "$turn_index"
-  sleep 0.2
-  printf '{"type":"turn.completed","turn":{"id":"%s"},"usage":{"input_tokens":0,"output_tokens":1}}\n' "$turn_id"
-  sleep 0.2
-  turn_index=$((turn_index + 1))
-done
-done"#
 }
 
 #[derive(Debug, Error)]
