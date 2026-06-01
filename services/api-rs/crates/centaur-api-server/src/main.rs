@@ -177,13 +177,16 @@ fn iron_proxy_config_from_env() -> Result<Option<IronProxyPodConfig>, ServerErro
     if !env_bool("SESSION_SANDBOX_IRON_PROXY_ENABLED") && fragment_paths.is_empty() {
         return Ok(None);
     }
-    let ca_secret_name = env::var("SESSION_SANDBOX_IRON_PROXY_CA_SECRET_NAME")
+    let ca_cert_secret_name = env::var("SESSION_SANDBOX_IRON_PROXY_CA_CERT_SECRET_NAME")
+        .or_else(|_| env::var("KUBERNETES_FIREWALL_CA_SECRET_NAME"))
+        .map_err(|_| ServerError::MissingIronProxyCaSecret)?;
+    let ca_key_secret_name = env::var("SESSION_SANDBOX_IRON_PROXY_CA_KEY_SECRET_NAME")
         .or_else(|_| env::var("KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME"))
         .map_err(|_| ServerError::MissingIronProxyCaSecret)?;
     let image = env::var("SESSION_SANDBOX_IRON_PROXY_IMAGE")
         .or_else(|_| env::var("KUBERNETES_IRON_PROXY_IMAGE"))
         .unwrap_or_else(|_| "centaur-iron-proxy:latest".to_owned());
-    let mut config = IronProxyPodConfig::new(image, ca_secret_name)
+    let mut config = IronProxyPodConfig::new(image, ca_cert_secret_name, ca_key_secret_name)
         .with_fragments(load_fragment_files(&fragment_paths)?);
     config.image_pull_policy = env::var("SESSION_SANDBOX_IRON_PROXY_IMAGE_PULL_POLICY")
         .or_else(|_| env::var("KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY"))
@@ -192,6 +195,18 @@ fn iron_proxy_config_from_env() -> Result<Option<IronProxyPodConfig>, ServerErro
     config.env_from_secret_name = env::var("SESSION_SANDBOX_IRON_PROXY_ENV_SECRET")
         .or_else(|_| env::var("KUBERNETES_SECRET_ENV_NAME"))
         .ok();
+    if let Ok(app_name) = env::var("KUBERNETES_OP_CONNECT_APP_NAME") {
+        config.op_connect_app_name = app_name;
+    }
+    config.op_connect_port = env::var("KUBERNETES_OP_CONNECT_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .or_else(|| {
+            env::var("KUBERNETES_OP_CONNECT_HOST")
+                .ok()
+                .and_then(|value| parse_host_port(&value))
+        })
+        .unwrap_or(config.op_connect_port);
     config.harness_auth_modes = harness_auth_modes_from_env();
     push_optional_proxy_env(
         &mut config.extra_env,
@@ -238,6 +253,10 @@ fn push_optional_proxy_env(envs: &mut BTreeMap<String, String>, name: &str, valu
     {
         envs.insert(name.to_owned(), value);
     }
+}
+
+fn parse_host_port(value: &str) -> Option<u16> {
+    value.rsplit_once(':')?.1.parse().ok()
 }
 
 fn env_bool(name: &str) -> bool {
@@ -344,7 +363,7 @@ enum ServerError {
     #[error("DATABASE_URL is required")]
     MissingDatabaseUrl,
     #[error(
-        "SESSION_SANDBOX_IRON_PROXY_CA_SECRET_NAME or KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME is required when SESSION_SANDBOX_IRON_PROXY_ENABLED is set"
+        "SESSION_SANDBOX_IRON_PROXY_CA_CERT_SECRET_NAME/KUBERNETES_FIREWALL_CA_SECRET_NAME and SESSION_SANDBOX_IRON_PROXY_CA_KEY_SECRET_NAME/KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME are required when SESSION_SANDBOX_IRON_PROXY_ENABLED is set"
     )]
     MissingIronProxyCaSecret,
     #[error("unknown SESSION_SANDBOX_BACKEND {0:?}; expected mock, local, or agent-k8s")]

@@ -235,6 +235,26 @@ pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> 
     env
 }
 
+pub fn listen_ports_from_yaml(config_yaml: &str) -> Result<Vec<u16>> {
+    let cfg: Value = serde_yaml::from_str(config_yaml).map_err(IronProxyConfigError::ParseBase)?;
+    let mut ports = Vec::new();
+    if let Some(port) = cfg["proxy"]["tunnel_listen"].as_str().and_then(listen_port) {
+        ports.push(port);
+    }
+    for listener in cfg["postgres"].as_sequence().into_iter().flatten() {
+        if let Some(port) = listener["listen"].as_str().and_then(listen_port) {
+            ports.push(port);
+        }
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    Ok(ports)
+}
+
+fn listen_port(value: &str) -> Option<u16> {
+    value.rsplit_once(':')?.1.parse().ok()
+}
+
 pub fn render_proxy_yaml(
     base_config: Option<&str>,
     fragments: &[ProxyFragment],
@@ -638,6 +658,35 @@ transforms:
         assert_eq!(
             placeholder_env(&[fragment]),
             BTreeMap::from([("OPENAI_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned())])
+        );
+    }
+
+    #[test]
+    fn extracts_proxy_and_postgres_listen_ports() {
+        let rendered = render_proxy_yaml(
+            None,
+            &[fragment_yaml(
+                r#"
+postgres:
+  - name: warehouse
+    listen: 0.0.0.0:5432
+    upstream:
+      dsn: { type: env, var: WAREHOUSE_DSN }
+    client:
+      user: app_user
+      password_env: PG_PROXY_PASSWORD_WAREHOUSE
+"#,
+            )],
+            Some(&CorePgListener::new(
+                5433,
+                "CENTAUR_DATABASE_URL",
+                "PG_PROXY_PASSWORD_CENTAUR_CORE",
+            )),
+        )
+        .unwrap();
+        assert_eq!(
+            listen_ports_from_yaml(&rendered).unwrap(),
+            vec![5432, 5433, 8080]
         );
     }
 
