@@ -73,11 +73,10 @@ impl CentaurClient {
         );
         let response = self.client.get(&events_url).send().await?;
         let response = ensure_response_success(response).await?;
-        let stream = response.bytes_stream().eventsource().map(|event| {
-            event
-                .map(SseEvent::from)
-                .map_err(|error| ClientError::EventStream(error.to_string()))
-        });
+        let stream = response
+            .bytes_stream()
+            .eventsource()
+            .map(|event| event.map_err(|error| ClientError::EventStream(error.to_string())));
         Ok(Box::pin(stream))
     }
 
@@ -101,23 +100,7 @@ impl CentaurClient {
 }
 
 pub type SseEventStream = Pin<Box<dyn Stream<Item = Result<SseEvent, ClientError>> + Send>>;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SseEvent {
-    pub id: Option<String>,
-    pub event: String,
-    pub data: String,
-}
-
-impl From<eventsource_stream::Event> for SseEvent {
-    fn from(value: eventsource_stream::Event) -> Self {
-        Self {
-            id: (!value.id.is_empty()).then_some(value.id),
-            event: value.event,
-            data: value.data,
-        }
-    }
-}
+pub type SseEvent = eventsource_stream::Event;
 
 async fn ensure_response_success(
     response: reqwest::Response,

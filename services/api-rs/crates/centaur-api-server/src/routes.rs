@@ -3,7 +3,10 @@ use std::{convert::Infallible, convert::TryFrom};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    response::{Sse, sse::KeepAlive},
+    response::{
+        Sse,
+        sse::{Event, KeepAlive},
+    },
     routing::{get, post},
 };
 use centaur_session_core::{Session, ThreadKey};
@@ -16,7 +19,7 @@ use crate::{
     ApiError,
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, EventsQuery,
-        ExecuteSessionRequest, ExecuteSessionResponse, SessionSseEvent,
+        ExecuteSessionRequest, ExecuteSessionResponse, session_event_to_sse, stream_error_sse,
     },
 };
 
@@ -102,19 +105,19 @@ async fn stream_events(
     State(state): State<AppState>,
     Path(raw_thread_key): Path<String>,
     Query(query): Query<EventsQuery>,
-) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, Infallible>>>, ApiError> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let events = state
         .runtime
         .stream_events(&thread_key, query.after_event_id.unwrap_or(0))
         .await?;
     let stream = events.map(|result| {
-        let event = match result {
-            Ok(event) => SessionSseEvent::try_from(event)
-                .unwrap_or_else(|error| SessionSseEvent::stream_error(error.to_string())),
-            Err(error) => SessionSseEvent::stream_error(error.to_string()),
+        let sse = match result {
+            Ok(event) => session_event_to_sse(event)
+                .unwrap_or_else(|error| stream_error_sse(error.to_string())),
+            Err(error) => stream_error_sse(error.to_string()),
         };
-        Ok(axum::response::sse::Event::from(event))
+        Ok(sse)
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

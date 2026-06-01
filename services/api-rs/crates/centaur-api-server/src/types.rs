@@ -1,5 +1,3 @@
-use std::convert::TryFrom;
-
 use axum::response::sse::Event;
 use centaur_session_core::{HarnessType, SessionEvent, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::SESSION_OUTPUT_LINE_EVENT;
@@ -91,88 +89,41 @@ impl From<&str> for SessionEventName {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum SessionSseEvent {
-    OutputLine {
-        id: i64,
-        line: String,
-    },
-    Json {
-        id: i64,
-        event_name: SessionEventName,
-        payload: Value,
-    },
-}
+pub fn session_event_to_sse(event: SessionEvent) -> Result<Event, SessionEventConversionError> {
+    let event_id = event.event_id;
+    let event_name = SessionEventName::from(event.event_type);
+    let sse = Event::default()
+        .id(event_id.to_string())
+        .event(event_name.as_str());
 
-impl SessionSseEvent {
-    pub fn stream_error(message: impl Into<String>) -> Self {
-        Self::Json {
-            id: 0,
-            event_name: SessionEventName::StreamError,
-            payload: serde_json::json!({ "error": message.into() }),
+    match event_name {
+        SessionEventName::OutputLine => {
+            let Some(line) = event.payload.as_str() else {
+                return Err(SessionEventConversionError::OutputLinePayload { event_id });
+            };
+            Ok(sse.data(line))
         }
-    }
-
-    fn id(&self) -> i64 {
-        match self {
-            Self::OutputLine { id, .. } | Self::Json { id, .. } => *id,
-        }
-    }
-
-    fn event_name(&self) -> &str {
-        match self {
-            Self::OutputLine { .. } => SESSION_OUTPUT_LINE_EVENT,
-            Self::Json { event_name, .. } => event_name.as_str(),
-        }
-    }
-
-    fn data(&self) -> String {
-        match self {
-            Self::OutputLine { line, .. } => line.clone(),
-            Self::Json { payload, .. } => {
-                serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_owned())
-            }
-        }
+        _ => sse
+            .json_data(event.payload)
+            .map_err(|source| SessionEventConversionError::JsonData { event_id, source }),
     }
 }
 
-impl TryFrom<SessionEvent> for SessionSseEvent {
-    type Error = SessionEventConversionError;
-
-    fn try_from(event: SessionEvent) -> Result<Self, Self::Error> {
-        let event_name = SessionEventName::from(event.event_type);
-        match event_name {
-            SessionEventName::OutputLine => {
-                let Some(line) = event.payload.as_str() else {
-                    return Err(SessionEventConversionError::OutputLinePayload {
-                        event_id: event.event_id,
-                    });
-                };
-                Ok(Self::OutputLine {
-                    id: event.event_id,
-                    line: line.to_owned(),
-                })
-            }
-            event_name => Ok(Self::Json {
-                id: event.event_id,
-                event_name,
-                payload: event.payload,
-            }),
-        }
-    }
+pub fn stream_error_sse(message: impl Into<String>) -> Event {
+    Event::default()
+        .event(SessionEventName::StreamError.as_str())
+        .json_data(serde_json::json!({ "error": message.into() }))
+        .unwrap_or_else(|_| {
+            Event::default()
+                .event(SessionEventName::StreamError.as_str())
+                .data("{}")
+        })
 }
 
-impl From<SessionSseEvent> for Event {
-    fn from(value: SessionSseEvent) -> Self {
-        Event::default()
-            .id(value.id().to_string())
-            .event(value.event_name())
-            .data(value.data())
-    }
-}
-
-#[derive(Clone, Debug, Error)]
+#[derive(Debug, Error)]
 pub enum SessionEventConversionError {
     #[error("session.output.line event {event_id} payload must be a string")]
     OutputLinePayload { event_id: i64 },
+    #[error("failed to serialize session event {event_id} payload as SSE JSON: {source}")]
+    JsonData { event_id: i64, source: axum::Error },
 }

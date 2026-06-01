@@ -544,7 +544,7 @@ impl TuiApp {
     }
 
     fn handle_sse_frame(&mut self, frame: SseFrame, options: &TuiOptions) -> bool {
-        self.last_event_id = frame.id.clone();
+        self.last_event_id = (!frame.id.is_empty()).then_some(frame.id.clone());
         self.push_debug_line(format_debug_frame(&frame));
 
         if frame.event == "session.output.line" {
@@ -751,7 +751,11 @@ fn user_message_text(item: &Value) -> Option<&str> {
 }
 
 fn format_debug_frame(frame: &SseFrame) -> String {
-    let id = frame.id.as_deref().unwrap_or("-");
+    let id = if frame.id.is_empty() {
+        "-"
+    } else {
+        frame.id.as_str()
+    };
     let data = parse_json_or_string(&frame.data);
     format!(
         "{} {} {}",

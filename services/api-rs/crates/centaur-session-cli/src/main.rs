@@ -357,11 +357,7 @@ async fn stream_output_lines(
         let event = event.wrap_err("read event stream")?;
 
         if event.event == "session.output.line" {
-            println!(
-                "{}\t{}",
-                event.id.as_deref().unwrap_or("unknown"),
-                event.data
-            );
+            println!("{}\t{}", event_id_or_unknown(&event.id), event.data);
             if output_type_matches(
                 &event.data,
                 exit_on_output_type.as_ref().map(|value| value.as_str()),
@@ -374,7 +370,7 @@ async fn stream_output_lines(
                 "{}",
                 serde_json::to_string(&json!({
                     "sse_event": event.event,
-                    "id": event.id,
+                    "id": optional_event_id(&event.id),
                     "data": data,
                 }))?
             );
@@ -386,6 +382,14 @@ async fn stream_output_lines(
     }
 
     Ok(())
+}
+
+fn event_id_or_unknown(event_id: &str) -> &str {
+    optional_event_id(event_id).unwrap_or("unknown")
+}
+
+fn optional_event_id(event_id: &str) -> Option<&str> {
+    (!event_id.is_empty()).then_some(event_id)
 }
 
 pub(crate) fn output_type_matches(data: &str, expected_type: Option<&str>) -> bool {
