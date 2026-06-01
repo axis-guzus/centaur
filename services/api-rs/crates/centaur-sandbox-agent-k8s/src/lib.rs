@@ -4,29 +4,21 @@
 //! `just codegen-agent-sandbox-crd`.
 
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use centaur_sandbox_core::{
-    MountKind, ObservedSandbox, ReadOptions, ReadResult, SandboxBackend, SandboxError,
-    SandboxHandle, SandboxId, SandboxResult, SandboxSpec, SandboxStatus, WriteAck,
+    MountKind, ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
+    SandboxResult, SandboxSpec, SandboxStatus,
 };
 use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
-use kube::api::{
-    AttachParams, AttachedProcess, DeleteParams, ListParams, Patch, PatchParams, PostParams,
-};
+use kube::api::{AttachParams, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::{Api, Client, Error};
 use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::Mutex;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::{Instant, sleep};
 
 pub use generated::agents_x_k8s_io as crd;
 
@@ -98,23 +90,11 @@ impl StateVolumeConfig {
 pub struct AgentSandboxBackend {
     client: Client,
     config: AgentSandboxConfig,
-    streams: Arc<Mutex<HashMap<SandboxId, K8sStreams>>>,
-}
-
-struct K8sStreams {
-    attached: AttachedProcess,
-    stdin: Option<Pin<Box<dyn AsyncWrite + Send>>>,
-    stdout: Option<Pin<Box<dyn AsyncRead + Send>>>,
-    stderr: Option<Pin<Box<dyn AsyncRead + Send>>>,
 }
 
 impl AgentSandboxBackend {
     pub fn new(client: Client, config: AgentSandboxConfig) -> Self {
-        Self {
-            client,
-            config,
-            streams: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { client, config }
     }
 
     pub async fn try_default(namespace: impl Into<String>) -> SandboxResult<Self> {
@@ -199,16 +179,12 @@ impl AgentSandboxBackend {
         }
     }
 
-    async fn ensure_attached(&self, id: &SandboxId) -> SandboxResult<()> {
+    async fn attach_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo> {
         if self.status(id).await? != SandboxStatus::Running {
-            self.drop_streams(id).await;
             return Err(SandboxError::NotReady(format!(
                 "agent sandbox {} is not running",
                 id.as_str()
             )));
-        }
-        if self.streams.lock().await.contains_key(id) {
-            return Ok(());
         }
         let params = AttachParams::default()
             .container(self.config.container_name.clone())
@@ -232,22 +208,12 @@ impl AgentSandboxBackend {
         let stderr = attached
             .stderr()
             .map(|stream| Box::pin(stream) as Pin<Box<dyn AsyncRead + Send>>);
-        self.streams.lock().await.insert(
-            id.clone(),
-            K8sStreams {
-                attached,
-                stdin,
-                stdout,
-                stderr,
-            },
-        );
-        Ok(())
-    }
-
-    async fn drop_streams(&self, id: &SandboxId) {
-        if let Some(streams) = self.streams.lock().await.remove(id) {
-            streams.attached.abort();
-        }
+        let stdin = stdin.ok_or_else(|| SandboxError::Io("stdin was not attached".to_owned()))?;
+        let stdout =
+            stdout.ok_or_else(|| SandboxError::Io("stdout was not attached".to_owned()))?;
+        let stderr =
+            stderr.ok_or_else(|| SandboxError::Io("stderr was not attached".to_owned()))?;
+        Ok(SandboxIo::with_guard(stdin, stdout, stderr, attached))
     }
 }
 
@@ -273,69 +239,8 @@ impl SandboxBackend for AgentSandboxBackend {
         Ok(SandboxHandle::new(id, BACKEND_NAME))
     }
 
-    async fn read_bytes(&self, id: &SandboxId, options: ReadOptions) -> SandboxResult<ReadResult> {
-        self.ensure_attached(id).await?;
-        let mut streams = self.streams.lock().await;
-        let streams = streams
-            .get_mut(id)
-            .ok_or_else(|| SandboxError::Io("attach stream was not initialized".to_owned()))?;
-        let reader = match options.stream {
-            centaur_sandbox_core::OutputStream::Stdout => streams
-                .stdout
-                .as_mut()
-                .ok_or_else(|| SandboxError::Io("stdout is closed".to_owned()))?,
-            centaur_sandbox_core::OutputStream::Stderr => streams
-                .stderr
-                .as_mut()
-                .ok_or_else(|| SandboxError::Io("stderr is closed".to_owned()))?,
-        };
-
-        let mut buf = vec![0; options.max_bytes];
-        let read = read_with_timeout(reader.as_mut(), &mut buf, options.timeout_ms).await?;
-        match read {
-            Some(0) => Ok(ReadResult::Eof),
-            Some(n) => {
-                buf.truncate(n);
-                Ok(ReadResult::Bytes {
-                    bytes: Bytes::from(buf),
-                    stream: options.stream,
-                    start_offset: None,
-                    next_offset: None,
-                })
-            }
-            None => Ok(ReadResult::TimedOut),
-        }
-    }
-
-    async fn write_bytes(&self, id: &SandboxId, bytes: Bytes) -> SandboxResult<WriteAck> {
-        self.ensure_attached(id).await?;
-        let mut streams = self.streams.lock().await;
-        let streams = streams
-            .get_mut(id)
-            .ok_or_else(|| SandboxError::Io("attach stream was not initialized".to_owned()))?;
-        let stdin = streams
-            .stdin
-            .as_mut()
-            .ok_or_else(|| SandboxError::Io("stdin is closed".to_owned()))?;
-        stdin
-            .write_all(&bytes)
-            .await
-            .map_err(|err| SandboxError::Io(format!("failed to write stdin: {err}")))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|err| SandboxError::Io(format!("failed to flush stdin: {err}")))?;
-        Ok(WriteAck::new(bytes.len()))
-    }
-
-    async fn close_stdin(&self, id: &SandboxId) -> SandboxResult<()> {
-        self.ensure_attached(id).await?;
-        let mut streams = self.streams.lock().await;
-        let streams = streams
-            .get_mut(id)
-            .ok_or_else(|| SandboxError::Io("attach stream was not initialized".to_owned()))?;
-        streams.stdin.take();
-        Ok(())
+    async fn open_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo> {
+        self.attach_io(id).await
     }
 
     async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus> {
@@ -372,7 +277,6 @@ impl SandboxBackend for AgentSandboxBackend {
     }
 
     async fn stop(&self, id: &SandboxId) -> SandboxResult<()> {
-        self.drop_streams(id).await;
         match self
             .sandboxes()
             .delete(id.as_str(), &DeleteParams::default())
@@ -385,34 +289,12 @@ impl SandboxBackend for AgentSandboxBackend {
     }
 
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
-        self.drop_streams(id).await;
         self.patch_replicas(id, 0).await
     }
 
     async fn resume(&self, id: &SandboxId) -> SandboxResult<()> {
         self.patch_replicas(id, 1).await?;
         self.wait_until_running(id).await
-    }
-}
-
-async fn read_with_timeout(
-    mut reader: Pin<&mut (dyn AsyncRead + Send)>,
-    buf: &mut [u8],
-    timeout_ms: Option<u64>,
-) -> SandboxResult<Option<usize>> {
-    if let Some(timeout_ms) = timeout_ms {
-        match timeout(Duration::from_millis(timeout_ms), reader.read(buf)).await {
-            Ok(result) => result
-                .map(Some)
-                .map_err(|err| SandboxError::Io(format!("failed to read output: {err}"))),
-            Err(_) => Ok(None),
-        }
-    } else {
-        reader
-            .read(buf)
-            .await
-            .map(Some)
-            .map_err(|err| SandboxError::Io(format!("failed to read output: {err}")))
     }
 }
 

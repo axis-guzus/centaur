@@ -1,16 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig};
-use centaur_sandbox_core::{
-    OutputStream, ReadOptions, ReadResult, SandboxBackend, SandboxId, SandboxSpec, SandboxStatus,
-};
+use centaur_sandbox_core::{SandboxBackend, SandboxId, SandboxSpec, SandboxStatus, SandboxWrite};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{DriftReason, ReconcileOutcome, SandboxManager};
 use clap::Parser;
 use kube::config::KubeConfigOptions;
 use kube::{Client, Config};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Instant, sleep};
 
 const ALL_IMPLEMENTATIONS: &[&str] = &["local", "agent-k8s"];
@@ -34,7 +32,7 @@ async fn sandbox_invariants_by_implementation() {
         pause_resume_restores_running(&implementation).await;
         unexpected_shutdown_reports_drift(&implementation).await;
         byte_io_round_trips(&implementation).await;
-        stdin_close_reaches_eof(&implementation).await;
+        stdin_drop_closes_write_half(&implementation).await;
         reconnect_can_observe_and_stop(&implementation).await;
         pause_blocks_read_write_until_resume(&implementation).await;
         missing_sandbox_operations_are_consistent(&implementation).await;
@@ -121,17 +119,24 @@ async fn byte_io_round_trips(implementation: &SandboxImplementation) {
             )
         });
 
-    let payload = Bytes::from_static(b"byte-io-ping\n");
-    let ack = manager
-        .write_bytes(&handle.id, payload.clone())
+    let mut io = manager
+        .open_io(&handle.id)
         .await
-        .unwrap_or_else(|err| panic!("{} write_bytes failed: {err}", implementation.name));
-    assert_eq!(ack.bytes_written, payload.len(), "{}", implementation.name);
+        .unwrap_or_else(|err| panic!("{} open_io failed: {err}", implementation.name))
+        .into_parts();
+    let payload = b"byte-io-ping\n";
+    io.stdin
+        .write_all(payload)
+        .await
+        .unwrap_or_else(|err| panic!("{} stdin write failed: {err}", implementation.name));
+    io.stdin
+        .flush()
+        .await
+        .unwrap_or_else(|err| panic!("{} stdin flush failed: {err}", implementation.name));
 
-    let read = read_stdout(&manager, &handle.id).await;
+    let read = read_stdout(&mut io.stdout, payload.len()).await;
     assert_eq!(
-        read,
-        ReadResult::stdout(payload),
+        read, payload,
         "{} should round-trip bytes through stdin/stdout",
         implementation.name
     );
@@ -139,7 +144,7 @@ async fn byte_io_round_trips(implementation: &SandboxImplementation) {
     manager.stop(&handle.id).await.unwrap();
 }
 
-async fn stdin_close_reaches_eof(implementation: &SandboxImplementation) {
+async fn stdin_drop_closes_write_half(implementation: &SandboxImplementation) {
     let manager = SandboxManager::new(implementation.backend.clone());
     let handle = manager
         .create_running(implementation.byte_io_spec.clone())
@@ -151,26 +156,22 @@ async fn stdin_close_reaches_eof(implementation: &SandboxImplementation) {
             )
         });
 
-    manager
-        .write_bytes(&handle.id, Bytes::from_static(b"before-close\n"))
+    let io = manager
+        .open_io(&handle.id)
         .await
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{} open_io failed: {err}", implementation.name))
+        .into_parts();
+    let mut stdin = io.stdin;
+    let mut stdout = io.stdout;
+    let _guard = io.guard;
+
+    stdin.write_all(b"before-close\n").await.unwrap();
+    stdin.flush().await.unwrap();
     assert_eq!(
-        read_stdout(&manager, &handle.id).await,
-        ReadResult::stdout(Bytes::from_static(b"before-close\n"))
+        read_stdout(&mut stdout, b"before-close\n".len()).await,
+        b"before-close\n"
     );
-    manager
-        .close_stdin(&handle.id)
-        .await
-        .unwrap_or_else(|err| panic!("{} close_stdin failed: {err}", implementation.name));
-    assert!(
-        manager
-            .write_bytes(&handle.id, Bytes::from_static(b"after-close\n"))
-            .await
-            .is_err(),
-        "{} should reject writes after stdin close",
-        implementation.name
-    );
+    drop_stdin(stdin);
 
     manager.stop(&handle.id).await.unwrap();
 }
@@ -212,31 +213,19 @@ async fn pause_blocks_read_write_until_resume(implementation: &SandboxImplementa
     eventually_status(&manager, &handle.id, SandboxStatus::Suspended).await;
 
     assert!(
-        manager
-            .write_bytes(&handle.id, Bytes::from_static(b"paused\n"))
-            .await
-            .is_err(),
-        "{} should reject writes while paused",
-        implementation.name
-    );
-    assert!(
-        manager
-            .read_bytes(&handle.id, ReadOptions::stdout(64).timeout_ms(10))
-            .await
-            .is_err(),
-        "{} should reject reads while paused",
+        manager.open_io(&handle.id).await.is_err(),
+        "{} should reject opening I/O while paused",
         implementation.name
     );
 
     manager.resume(&handle.id).await.unwrap();
     eventually_status(&manager, &handle.id, SandboxStatus::Running).await;
-    manager
-        .write_bytes(&handle.id, Bytes::from_static(b"after-resume\n"))
-        .await
-        .unwrap();
+    let mut io = manager.open_io(&handle.id).await.unwrap().into_parts();
+    io.stdin.write_all(b"after-resume\n").await.unwrap();
+    io.stdin.flush().await.unwrap();
     assert_eq!(
-        read_stdout(&manager, &handle.id).await,
-        ReadResult::stdout(Bytes::from_static(b"after-resume\n"))
+        read_stdout(&mut io.stdout, b"after-resume\n".len()).await,
+        b"after-resume\n"
     );
     manager.stop(&handle.id).await.unwrap();
 }
@@ -260,6 +249,11 @@ async fn missing_sandbox_operations_are_consistent(implementation: &SandboxImple
     assert!(
         manager.resume(&missing).await.is_err(),
         "{} should not resume a missing sandbox",
+        implementation.name
+    );
+    assert!(
+        manager.open_io(&missing).await.is_err(),
+        "{} should not open I/O for a missing sandbox",
         implementation.name
     );
     manager.stop(&missing).await.unwrap_or_else(|err| {
@@ -326,22 +320,17 @@ async fn eventually_observed_count_at_most(backend: Arc<dyn SandboxBackend>, exp
     }
 }
 
-async fn read_stdout<S>(manager: &SandboxManager<S>, id: &SandboxId) -> ReadResult
-where
-    S: centaur_sandbox_manager::DesiredStateStore,
-{
-    manager
-        .read_bytes(
-            id,
-            ReadOptions {
-                stream: OutputStream::Stdout,
-                after_offset: None,
-                max_bytes: 1024,
-                timeout_ms: Some(5_000),
-            },
-        )
+async fn read_stdout(stdout: &mut centaur_sandbox_core::SandboxRead, len: usize) -> Vec<u8> {
+    let mut buf = vec![0; len];
+    tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut buf))
         .await
-        .unwrap_or_else(|err| panic!("read stdout failed for {}: {err}", id.as_str()))
+        .expect("read stdout timed out")
+        .expect("read stdout failed");
+    buf
+}
+
+fn drop_stdin(stdin: SandboxWrite) {
+    drop(stdin);
 }
 
 async fn implementations() -> Vec<SandboxImplementation> {

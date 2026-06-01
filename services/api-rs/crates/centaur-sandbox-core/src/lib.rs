@@ -12,7 +12,7 @@ mod spec;
 
 pub use backend::SandboxBackend;
 pub use error::{SandboxError, SandboxResult};
-pub use io::{OutputStream, ReadOptions, ReadResult, WriteAck};
+pub use io::{SandboxIo, SandboxIoGuard, SandboxIoParts, SandboxRead, SandboxWrite};
 pub use lifecycle::{
     DesiredSandboxState, ObservedSandbox, SandboxHandle, SandboxId, SandboxStatus,
 };

@@ -1,101 +1,61 @@
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum OutputStream {
-    Stdout,
-    Stderr,
+use tokio::io::{AsyncRead, AsyncWrite};
+
+pub type SandboxRead = Pin<Box<dyn AsyncRead + Send>>;
+pub type SandboxWrite = Pin<Box<dyn AsyncWrite + Send>>;
+
+pub struct SandboxIo {
+    stdin: SandboxWrite,
+    stdout: SandboxRead,
+    stderr: SandboxRead,
+    guard: SandboxIoGuard,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ReadOptions {
-    pub stream: OutputStream,
-    pub after_offset: Option<u64>,
-    pub max_bytes: usize,
-    pub timeout_ms: Option<u64>,
+pub struct SandboxIoParts {
+    pub stdin: SandboxWrite,
+    pub stdout: SandboxRead,
+    pub stderr: SandboxRead,
+    pub guard: SandboxIoGuard,
 }
 
-impl ReadOptions {
-    pub fn stdout(max_bytes: usize) -> Self {
+pub struct SandboxIoGuard {
+    _inner: Box<dyn Send>,
+}
+
+impl SandboxIo {
+    pub fn new(stdin: SandboxWrite, stdout: SandboxRead, stderr: SandboxRead) -> Self {
+        Self::with_guard(stdin, stdout, stderr, ())
+    }
+
+    pub fn with_guard(
+        stdin: SandboxWrite,
+        stdout: SandboxRead,
+        stderr: SandboxRead,
+        guard: impl Send + 'static,
+    ) -> Self {
         Self {
-            stream: OutputStream::Stdout,
-            after_offset: None,
-            max_bytes,
-            timeout_ms: None,
+            stdin,
+            stdout,
+            stderr,
+            guard: SandboxIoGuard::new(guard),
         }
     }
 
-    pub fn stderr(max_bytes: usize) -> Self {
+    pub fn into_parts(self) -> SandboxIoParts {
+        SandboxIoParts {
+            stdin: self.stdin,
+            stdout: self.stdout,
+            stderr: self.stderr,
+            guard: self.guard,
+        }
+    }
+}
+
+impl SandboxIoGuard {
+    pub fn new(guard: impl Send + 'static) -> Self {
         Self {
-            stream: OutputStream::Stderr,
-            after_offset: None,
-            max_bytes,
-            timeout_ms: None,
+            _inner: Box::new(guard),
         }
-    }
-
-    pub fn after_offset(mut self, offset: u64) -> Self {
-        self.after_offset = Some(offset);
-        self
-    }
-
-    pub fn timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.timeout_ms = Some(timeout_ms);
-        self
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum ReadResult {
-    Bytes {
-        bytes: Bytes,
-        stream: OutputStream,
-        start_offset: Option<u64>,
-        next_offset: Option<u64>,
-    },
-    TimedOut,
-    Eof,
-}
-
-impl ReadResult {
-    pub fn stdout(bytes: impl Into<Bytes>) -> Self {
-        Self::Bytes {
-            bytes: bytes.into(),
-            stream: OutputStream::Stdout,
-            start_offset: None,
-            next_offset: None,
-        }
-    }
-
-    pub fn stderr(bytes: impl Into<Bytes>) -> Self {
-        Self::Bytes {
-            bytes: bytes.into(),
-            stream: OutputStream::Stderr,
-            start_offset: None,
-            next_offset: None,
-        }
-    }
-
-    pub fn with_offsets(self, start_offset: u64, next_offset: u64) -> Self {
-        match self {
-            Self::Bytes { bytes, stream, .. } => Self::Bytes {
-                bytes,
-                stream,
-                start_offset: Some(start_offset),
-                next_offset: Some(next_offset),
-            },
-            other => other,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct WriteAck {
-    pub bytes_written: usize,
-}
-
-impl WriteAck {
-    pub fn new(bytes_written: usize) -> Self {
-        Self { bytes_written }
     }
 }

@@ -19,11 +19,9 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use bytes::Bytes;
     use centaur_sandbox_core::{
-        DesiredSandboxState, ObservedSandbox, ReadOptions, ReadResult, SandboxBackend,
-        SandboxError, SandboxHandle, SandboxId, SandboxResult, SandboxSpec, SandboxStatus,
-        WriteAck,
+        DesiredSandboxState, ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle,
+        SandboxId, SandboxIo, SandboxResult, SandboxSpec, SandboxStatus,
     };
 
     use super::{DriftReason, ReconcileOutcome, SandboxManager};
@@ -244,20 +242,8 @@ mod tests {
             unreachable!("manager reconciliation should not create in this slice")
         }
 
-        async fn read_bytes(
-            &self,
-            _id: &SandboxId,
-            _opts: ReadOptions,
-        ) -> SandboxResult<ReadResult> {
-            unreachable!("reconciliation should not read bytes")
-        }
-
-        async fn write_bytes(&self, _id: &SandboxId, _bytes: Bytes) -> SandboxResult<WriteAck> {
-            unreachable!("reconciliation should not write bytes")
-        }
-
-        async fn close_stdin(&self, _id: &SandboxId) -> SandboxResult<()> {
-            unreachable!("reconciliation should not close stdin")
+        async fn open_io(&self, _id: &SandboxId) -> SandboxResult<SandboxIo> {
+            unreachable!("reconciliation should not open I/O")
         }
 
         async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus> {

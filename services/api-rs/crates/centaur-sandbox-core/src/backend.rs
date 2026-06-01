@@ -1,9 +1,7 @@
 use async_trait::async_trait;
-use bytes::Bytes;
 
 use crate::{
-    ObservedSandbox, ReadOptions, ReadResult, SandboxHandle, SandboxId, SandboxResult, SandboxSpec,
-    SandboxStatus, WriteAck,
+    ObservedSandbox, SandboxHandle, SandboxId, SandboxIo, SandboxResult, SandboxSpec, SandboxStatus,
 };
 
 #[async_trait]
@@ -19,14 +17,8 @@ pub trait SandboxBackend: Send + Sync {
     /// Create a sandbox from the supplied workload spec and return its handle.
     async fn create(&self, spec: SandboxSpec) -> SandboxResult<SandboxHandle>;
 
-    /// Read raw bytes from the sandbox stdout or stderr stream.
-    async fn read_bytes(&self, id: &SandboxId, opts: ReadOptions) -> SandboxResult<ReadResult>;
-
-    /// Write raw bytes to the sandbox stdin stream.
-    async fn write_bytes(&self, id: &SandboxId, bytes: Bytes) -> SandboxResult<WriteAck>;
-
-    /// Close stdin without stopping the sandbox process or deleting runtime state.
-    async fn close_stdin(&self, id: &SandboxId) -> SandboxResult<()>;
+    /// Open owned stdin/stdout/stderr handles for a running sandbox.
+    async fn open_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo>;
 
     /// Return the portable, cheap lifecycle status for a sandbox.
     async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus>;

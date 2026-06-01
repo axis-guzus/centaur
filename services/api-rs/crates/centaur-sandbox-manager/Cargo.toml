@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-bytes.workspace = true
 centaur-sandbox-core.workspace = true
 thiserror.workspace = true
 

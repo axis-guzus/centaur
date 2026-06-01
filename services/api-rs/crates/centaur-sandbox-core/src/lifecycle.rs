@@ -61,7 +61,7 @@ impl SandboxHandle {
 pub enum SandboxStatus {
     /// Runtime resources exist but are not yet ready for byte I/O.
     Created,
-    /// Runtime is live and should accept read/write operations.
+    /// Runtime is live and should accept `open_io`.
     Running,
     /// Runtime state may exist, but no live process is serving I/O.
     Suspended,
@@ -78,7 +78,7 @@ impl SandboxStatus {
         matches!(self, Self::Stopped | Self::Gone)
     }
 
-    pub fn can_read_write(&self) -> bool {
+    pub fn can_open_io(&self) -> bool {
         matches!(self, Self::Running)
     }
 }

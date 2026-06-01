@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     convert::Infallible,
     sync::Arc,
     time::Duration,
@@ -15,32 +15,39 @@ use axum::{
     },
     routing::{get, post},
 };
-use bytes::Bytes;
 use centaur_sandbox_core::{
-    OutputStream, ReadOptions, ReadResult, SandboxBackend, SandboxError, SandboxId, SandboxSpec,
-    SandboxStatus,
+    SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec,
+    SandboxStatus, SandboxWrite,
 };
 use centaur_session_core::{
     HarnessType, SessionEvent, SessionMessageInput, ThreadKey, ThreadKeyError,
 };
 use centaur_session_sqlx::{PgSessionStore, SessionStoreError, default_metadata};
-use futures_util::stream;
+use futures_util::{SinkExt, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::{sync::Mutex, time::sleep};
+use tokio::{io, sync::Mutex, time::sleep};
+use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::warn;
 
 const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
+const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 1_000;
 const DEFAULT_MAX_DURATION_MS: u64 = 60_000;
 type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync>;
+type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 
 #[derive(Clone)]
 pub struct AppState {
     store: PgSessionStore,
     sandbox_runtime: SandboxRuntime,
-    stdout_pumps: Arc<Mutex<HashSet<String>>>,
+    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+}
+
+#[derive(Clone)]
+struct SessionPipe {
+    stdin: Arc<Mutex<SessionInputSink>>,
 }
 
 pub fn build_router(store: PgSessionStore) -> Router {
@@ -51,7 +58,7 @@ pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: Sandbox
     let state = AppState {
         store,
         sandbox_runtime,
-        stdout_pumps: Arc::new(Mutex::new(HashSet::new())),
+        sandbox_pipes: Arc::new(Mutex::new(HashMap::new())),
     };
     Router::new()
         .route("/healthz", get(healthz))
@@ -180,14 +187,11 @@ async fn execute_session(
             .await
         }
         SandboxRuntime::Backend { backend, .. } => {
-            match ensure_stdout_pump(&state, &thread_key, &sandbox_id).await {
-                Ok(()) => write_input_lines(
-                    backend.as_ref(),
-                    &SandboxId::new(&sandbox_id),
-                    &request.input_lines,
-                )
-                .await
-                .map(|()| 0),
+            let pipe = ensure_session_pipe(&state, backend.clone(), &thread_key, &sandbox_id).await;
+            match pipe {
+                Ok(pipe) => write_input_lines(&pipe, &request.input_lines)
+                    .await
+                    .map(|()| 0),
                 Err(error) => Err(error),
             }
         }
@@ -311,30 +315,45 @@ async fn run_mock_session_pipe(
     Ok(output_line_count)
 }
 
-async fn ensure_stdout_pump(
+async fn ensure_session_pipe(
     state: &AppState,
+    backend: Arc<dyn SandboxBackend>,
     thread_key: &ThreadKey,
     sandbox_id: &str,
-) -> Result<(), ApiError> {
-    let SandboxRuntime::Backend { backend, .. } = &state.sandbox_runtime else {
-        return Ok(());
+) -> Result<SessionPipe, ApiError> {
+    if let Some(pipe) = state.sandbox_pipes.lock().await.get(sandbox_id).cloned() {
+        return Ok(pipe);
+    }
+
+    let io = backend
+        .open_io(&SandboxId::new(sandbox_id))
+        .await
+        .map_err(ApiError::Sandbox)?
+        .into_parts();
+    let pipe = SessionPipe {
+        stdin: Arc::new(Mutex::new(FramedWrite::new(
+            io.stdin,
+            LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
+        ))),
     };
 
-    let mut pumps = state.stdout_pumps.lock().await;
-    if !pumps.insert(sandbox_id.to_owned()) {
-        return Ok(());
-    }
-    drop(pumps);
-
+    state
+        .sandbox_pipes
+        .lock()
+        .await
+        .insert(sandbox_id.to_owned(), pipe.clone());
     let store = state.store.clone();
-    let backend = backend.clone();
     let thread_key = thread_key.clone();
-    let sandbox_id = SandboxId::new(sandbox_id);
-    let pump_key = sandbox_id.as_str().to_owned();
-    let stdout_pumps = state.stdout_pumps.clone();
+    let pump_key = sandbox_id.to_owned();
+    let sandbox_pipes = state.sandbox_pipes.clone();
+    let stdout = io.stdout;
+    let stderr = io.stderr;
+    let guard = io.guard;
+    let stderr_key = pump_key.clone();
 
     tokio::spawn(async move {
-        let result = run_stdout_pump(store.clone(), backend, thread_key.clone(), sandbox_id).await;
+        let result =
+            run_stdout_pump(store.clone(), thread_key.clone(), &pump_key, stdout, guard).await;
         if let Err(error) = result {
             warn!(%pump_key, %error, "session stdout pump failed");
             let _ = store
@@ -343,109 +362,69 @@ async fn ensure_stdout_pump(
                     None,
                     "session.stdout_pump_failed",
                     json!({
-                        "sandbox_id": pump_key,
+                        "sandbox_id": pump_key.as_str(),
                         "error": error.to_string(),
                     }),
                 )
                 .await;
         }
-        stdout_pumps.lock().await.remove(&pump_key);
+        sandbox_pipes.lock().await.remove(&pump_key);
     });
 
-    Ok(())
+    tokio::spawn(async move {
+        if let Err(error) = drain_stderr(stderr).await {
+            warn!(%stderr_key, %error, "session stderr drain failed");
+        }
+    });
+
+    Ok(pipe)
 }
 
 async fn run_stdout_pump(
     store: PgSessionStore,
-    backend: Arc<dyn SandboxBackend>,
     thread_key: ThreadKey,
-    sandbox_id: SandboxId,
+    sandbox_id: &str,
+    stdout: SandboxRead,
+    _guard: SandboxIoGuard,
 ) -> Result<(), ApiError> {
-    let mut buffer = String::new();
-    loop {
-        match backend
-            .read_bytes(
-                &sandbox_id,
-                ReadOptions {
-                    stream: OutputStream::Stdout,
-                    after_offset: None,
-                    max_bytes: 8192,
-                    timeout_ms: Some(1_000),
-                },
-            )
-            .await
-            .map_err(ApiError::Sandbox)?
-        {
-            ReadResult::Bytes { bytes, .. } => {
-                let chunk = std::str::from_utf8(&bytes).map_err(|err| {
-                    ApiError::BadRequest(format!("sandbox stdout was not UTF-8: {err}"))
-                })?;
-                buffer.push_str(chunk);
-
-                while let Some(index) = buffer.find('\n') {
-                    let line = buffer[..index].trim_end_matches('\r').to_owned();
-                    buffer.drain(..=index);
-                    append_output_line(&store, &thread_key, None, &line).await?;
-                }
-            }
-            ReadResult::TimedOut => {}
-            ReadResult::Eof => {
-                flush_partial_output(&store, &thread_key, None, &mut buffer).await?;
-                store
-                    .append_event(
-                        &thread_key,
-                        None,
-                        "session.stdout_eof",
-                        json!({
-                            "sandbox_id": sandbox_id.as_str(),
-                        }),
-                    )
-                    .await?;
-                return Ok(());
-            }
-        }
+    let mut stdout = FramedRead::new(
+        stdout,
+        LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
+    );
+    while let Some(line) = stdout.next().await {
+        let line = line.map_err(codec_error_to_api)?;
+        append_output_line(&store, &thread_key, None, &line).await?;
     }
-}
-
-async fn write_input_lines(
-    backend: &dyn SandboxBackend,
-    sandbox_id: &SandboxId,
-    input_lines: &[String],
-) -> Result<(), ApiError> {
-    for line in input_lines {
-        write_input_line(backend, sandbox_id, line).await?;
-    }
+    store
+        .append_event(
+            &thread_key,
+            None,
+            "session.stdout_eof",
+            json!({
+                "sandbox_id": sandbox_id,
+            }),
+        )
+        .await?;
     Ok(())
 }
 
-async fn write_input_line(
-    backend: &dyn SandboxBackend,
-    sandbox_id: &SandboxId,
-    line: &str,
-) -> Result<(), ApiError> {
-    let mut bytes = Vec::with_capacity(line.len() + 1);
-    bytes.extend_from_slice(line.as_bytes());
-    bytes.push(b'\n');
-    backend
-        .write_bytes(sandbox_id, Bytes::from(bytes))
+async fn drain_stderr(mut stderr: SandboxRead) -> Result<(), ApiError> {
+    io::copy(&mut stderr, &mut io::sink())
         .await
-        .map_err(ApiError::Sandbox)?;
+        .map_err(|err| ApiError::Sandbox(SandboxError::Io(format!("drain stderr: {err}"))))?;
     Ok(())
 }
 
-async fn flush_partial_output(
-    store: &PgSessionStore,
-    thread_key: &ThreadKey,
-    execution_id: Option<&str>,
-    buffer: &mut String,
-) -> Result<usize, ApiError> {
-    if buffer.is_empty() {
-        return Ok(0);
+async fn write_input_lines(pipe: &SessionPipe, input_lines: &[String]) -> Result<(), ApiError> {
+    let mut stdin = pipe.stdin.lock().await;
+    for line in input_lines {
+        stdin.send(line).await.map_err(codec_error_to_api)?;
     }
-    let line = buffer.trim_end_matches('\r').to_owned();
-    buffer.clear();
-    append_output_line(store, thread_key, execution_id, &line).await?;
-    Ok(1)
+    Ok(())
+}
+
+fn codec_error_to_api(error: LinesCodecError) -> ApiError {
+    ApiError::Sandbox(SandboxError::Io(error.to_string()))
 }
 
 async fn append_output_line(
@@ -530,8 +509,10 @@ async fn stream_events(
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let thread_key = parse_thread_key(raw_thread_key)?;
     let session = state.store.get_session(&thread_key).await?;
-    if let Some(sandbox_id) = session.sandbox_id.as_deref() {
-        ensure_stdout_pump(&state, &thread_key, sandbox_id).await?;
+    if let Some(sandbox_id) = session.sandbox_id.as_deref()
+        && let SandboxRuntime::Backend { backend, .. } = &state.sandbox_runtime
+    {
+        ensure_session_pipe(&state, backend.clone(), &thread_key, sandbox_id).await?;
     }
 
     let stream = stream::unfold(

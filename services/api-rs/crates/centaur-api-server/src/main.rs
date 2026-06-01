@@ -204,8 +204,8 @@ fn codex_app_server_env_template(args: &Args) -> Vec<(String, String)> {
     }
 
     for name in &args.session_sandbox_passthrough_env {
-        if let Ok(value) = env::var(&name) {
-            push_env(&mut envs, &name, value);
+        if let Ok(value) = env::var(name) {
+            push_env(&mut envs, name, value);
         }
     }
 

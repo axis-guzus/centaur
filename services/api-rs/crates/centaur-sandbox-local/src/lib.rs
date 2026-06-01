@@ -6,6 +6,7 @@
 
 use std::{
     collections::HashMap,
+    pin::Pin,
     process::Stdio,
     sync::{
         Arc,
@@ -14,16 +15,14 @@ use std::{
 };
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use centaur_sandbox_core::{
-    ObservedSandbox, OutputStream, ReadOptions, ReadResult, SandboxBackend, SandboxError,
-    SandboxHandle, SandboxId, SandboxResult, SandboxSpec, SandboxStatus, WriteAck,
+    ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
+    SandboxResult, SandboxSpec, SandboxStatus,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::Mutex,
-    time::{Duration, timeout},
 };
 
 #[derive(Clone, Default)]
@@ -110,84 +109,36 @@ impl SandboxBackend for LocalSandboxBackend {
         Ok(SandboxHandle::new(id, self.name()))
     }
 
-    async fn read_bytes(&self, id: &SandboxId, opts: ReadOptions) -> SandboxResult<ReadResult> {
+    async fn open_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo> {
         let sandbox = self.sandbox(id).await?;
         let mut sandbox = sandbox.lock().await;
+        let status = refresh_status(&mut sandbox).await?;
 
-        if !sandbox.status.can_read_write() {
+        if !status.can_open_io() {
             return Err(SandboxError::NotReady(format!(
                 "local sandbox {} is {:?}",
                 id.as_str(),
-                sandbox.status
-            )));
-        }
-
-        let mut buf = vec![0; opts.max_bytes];
-        let read = match opts.stream {
-            OutputStream::Stdout => {
-                let stdout = sandbox
-                    .stdout
-                    .as_mut()
-                    .ok_or_else(|| SandboxError::Io("stdout is closed".to_owned()))?;
-                read_with_timeout(stdout, &mut buf, opts.timeout_ms).await?
-            }
-            OutputStream::Stderr => {
-                let stderr = sandbox
-                    .stderr
-                    .as_mut()
-                    .ok_or_else(|| SandboxError::Io("stderr is closed".to_owned()))?;
-                read_with_timeout(stderr, &mut buf, opts.timeout_ms).await?
-            }
-        };
-
-        match read {
-            Some(0) => Ok(ReadResult::Eof),
-            Some(n) => {
-                buf.truncate(n);
-                Ok(ReadResult::Bytes {
-                    bytes: Bytes::from(buf),
-                    stream: opts.stream,
-                    start_offset: None,
-                    next_offset: None,
-                })
-            }
-            None => Ok(ReadResult::TimedOut),
-        }
-    }
-
-    async fn write_bytes(&self, id: &SandboxId, bytes: Bytes) -> SandboxResult<WriteAck> {
-        let sandbox = self.sandbox(id).await?;
-        let mut sandbox = sandbox.lock().await;
-
-        if !sandbox.status.can_read_write() {
-            return Err(SandboxError::NotReady(format!(
-                "local sandbox {} is {:?}",
-                id.as_str(),
-                sandbox.status
+                status
             )));
         }
 
         let stdin = sandbox
             .stdin
-            .as_mut()
-            .ok_or_else(|| SandboxError::Io("stdin is closed".to_owned()))?;
-        stdin
-            .write_all(&bytes)
-            .await
-            .map_err(|err| SandboxError::Io(format!("failed to write stdin: {err}")))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|err| SandboxError::Io(format!("failed to flush stdin: {err}")))?;
-
-        Ok(WriteAck::new(bytes.len()))
-    }
-
-    async fn close_stdin(&self, id: &SandboxId) -> SandboxResult<()> {
-        let sandbox = self.sandbox(id).await?;
-        let mut sandbox = sandbox.lock().await;
-        sandbox.stdin.take();
-        Ok(())
+            .take()
+            .ok_or_else(|| SandboxError::Io("stdin is already open or closed".to_owned()))?;
+        let stdout = sandbox
+            .stdout
+            .take()
+            .ok_or_else(|| SandboxError::Io("stdout is already open or closed".to_owned()))?;
+        let stderr = sandbox
+            .stderr
+            .take()
+            .ok_or_else(|| SandboxError::Io("stderr is already open or closed".to_owned()))?;
+        Ok(SandboxIo::new(
+            box_write(stdin),
+            box_read(stdout),
+            box_read(stderr),
+        ))
     }
 
     async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus> {
@@ -266,28 +217,18 @@ fn command_parts(spec: &SandboxSpec) -> SandboxResult<(&str, Vec<&str>)> {
     ))
 }
 
-async fn read_with_timeout<R>(
-    reader: &mut R,
-    buf: &mut [u8],
-    timeout_ms: Option<u64>,
-) -> SandboxResult<Option<usize>>
+fn box_read<R>(reader: R) -> Pin<Box<dyn AsyncRead + Send>>
 where
-    R: AsyncReadExt + Unpin,
+    R: AsyncRead + Send + 'static,
 {
-    if let Some(timeout_ms) = timeout_ms {
-        match timeout(Duration::from_millis(timeout_ms), reader.read(buf)).await {
-            Ok(result) => result
-                .map(Some)
-                .map_err(|err| SandboxError::Io(format!("failed to read output: {err}"))),
-            Err(_) => Ok(None),
-        }
-    } else {
-        reader
-            .read(buf)
-            .await
-            .map(Some)
-            .map_err(|err| SandboxError::Io(format!("failed to read output: {err}")))
-    }
+    Box::pin(reader)
+}
+
+fn box_write<W>(writer: W) -> Pin<Box<dyn AsyncWrite + Send>>
+where
+    W: AsyncWrite + Send + 'static,
+{
+    Box::pin(writer)
 }
 
 async fn refresh_status(sandbox: &mut LocalSandbox) -> SandboxResult<SandboxStatus> {
@@ -338,9 +279,12 @@ async fn send_signal(child: &Child, signal: &str) -> SandboxResult<()> {
 mod tests {
     use std::sync::Arc;
 
-    use centaur_sandbox_core::{DesiredSandboxState, OutputStream};
+    use centaur_sandbox_core::DesiredSandboxState;
     use centaur_sandbox_manager::{DriftReason, SandboxManager};
-    use tokio::time::{Duration, Instant, sleep};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        time::{Duration, Instant, sleep, timeout},
+    };
 
     use super::*;
 
@@ -349,25 +293,45 @@ mod tests {
         let backend = Arc::new(LocalSandboxBackend::new());
         let manager = SandboxManager::new(backend);
         let handle = manager.create_running(cat_spec()).await.unwrap();
+        let mut io = manager.open_io(&handle.id).await.unwrap().into_parts();
 
-        manager
-            .write_bytes(&handle.id, Bytes::from_static(b"ping\n"))
+        io.stdin.write_all(b"ping\n").await.unwrap();
+        io.stdin.flush().await.unwrap();
+        let mut read = vec![0; b"ping\n".len()];
+        timeout(Duration::from_secs(1), io.stdout.read_exact(&mut read))
             .await
-            .unwrap();
-        let read = manager
-            .read_bytes(
-                &handle.id,
-                ReadOptions {
-                    stream: OutputStream::Stdout,
-                    after_offset: None,
-                    max_bytes: 64,
-                    timeout_ms: Some(1_000),
-                },
-            )
-            .await
+            .expect("stdout read timed out")
             .unwrap();
 
-        assert_eq!(read, ReadResult::stdout(Bytes::from_static(b"ping\n")));
+        assert_eq!(read, b"ping\n");
+        manager.stop(&handle.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_backend_open_io_write_is_not_blocked_by_pending_stdout_read() {
+        let backend = Arc::new(LocalSandboxBackend::new());
+        let manager = SandboxManager::new(backend);
+        let handle = manager.create_running(cat_spec()).await.unwrap();
+        let io = manager.open_io(&handle.id).await.unwrap().into_parts();
+        let mut stdin = io.stdin;
+        let mut stdout = io.stdout;
+        let _guard = io.guard;
+
+        let pending_read = tokio::spawn(async move {
+            let mut read = vec![0; b"ping\n".len()];
+            stdout.read_exact(&mut read).await.unwrap();
+            read
+        });
+        sleep(Duration::from_millis(50)).await;
+
+        timeout(Duration::from_millis(100), async {
+            stdin.write_all(b"ping\n").await.unwrap();
+            stdin.flush().await.unwrap();
+        })
+        .await
+        .expect("stdin write should not wait for a stdout read timeout");
+
+        assert_eq!(pending_read.await.unwrap(), b"ping\n");
         manager.stop(&handle.id).await.unwrap();
     }
 

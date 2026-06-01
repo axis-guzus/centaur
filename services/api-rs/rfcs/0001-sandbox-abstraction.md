@@ -7,8 +7,8 @@ Target: `services/api-rs`
 ## Summary
 
 Build the first Rust slice around a narrow sandbox runtime abstraction. The
-goal is to get one isolated workload up, read and write byte-oriented stdio,
-stop it, pause it, resume it, and reconcile its observed state against what the
+goal is to get one isolated workload up, open byte-oriented stdio handles, stop
+it, pause it, resume it, and reconcile its observed state against what the
 control plane thinks should exist.
 
 This RFC intentionally does not expose sandbox spawning over an HTTP API. The
@@ -19,7 +19,8 @@ runtime layer.
 
 ## Goals
 
-- Define a backend-neutral sandbox trait for lifecycle, byte I/O, and status.
+- Define a backend-neutral sandbox trait for lifecycle, owned byte I/O handles,
+  and status.
 - Keep `SandboxSpec` focused on the workload primitive: image/process/env/mounts,
   not Centaur agent metadata.
 - Treat I/O as bytes. Protocol framing, NDJSON, Anthropic events, and harness
@@ -50,7 +51,8 @@ abstraction, not on `SandboxBackend`.
 
 The Rust abstraction should not expose attach as a public operation. Kubernetes
 attach is a transport detail owned by the Agent Sandbox backend. The portable
-contract should expose `read_bytes`, `write_bytes`, and `close_stdin`.
+contract should expose a single `open_io` operation that returns owned Tokio
+stdin/stdout/stderr handles.
 
 The Agent Sandbox CRD backend implements pause/resume by patching:
 
@@ -87,10 +89,9 @@ Owns backend-neutral runtime types:
 - `SandboxId`
 - `SandboxHandle`
 - `SandboxStatus`
-- `OutputStream`
-- `ReadOptions`
-- `ReadResult`
-- `WriteAck`
+- `SandboxIo`
+- `SandboxRead`
+- `SandboxWrite`
 - `ObservedSandbox`
 - `DesiredSandboxState`
 - common errors
@@ -100,9 +101,9 @@ agent dependencies.
 
 ### `centaur-sandbox-local`
 
-Development and test backend. It runs a local child process, wires its stdin and
-stdout as bytes, and implements the same lifecycle shape where the host process
-allows it.
+Development and test backend. It runs a local child process, exposes owned
+stdin/stdout/stderr handles, and implements the same lifecycle shape where the
+host process allows it.
 
 This backend is the fastest way to prove the abstraction without Kubernetes.
 
@@ -126,7 +127,7 @@ raw Pod backend.
 Internal orchestration over `SandboxBackend`:
 
 - create a sandbox from a runtime-only `SandboxSpec`
-- read and write stdio bytes
+- open stdio handles
 - stop/pause/resume by `SandboxId`
 - reconcile desired sandbox state with observed backend state
 - expose an internal library API for future control-plane code
@@ -141,8 +142,9 @@ Sketch only. Supporting types such as `EnvVar`, `Mount`, `ResourceLimits`, and
 
 ```rust
 use async_trait::async_trait;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct SandboxId(String);
@@ -174,35 +176,18 @@ pub enum SandboxStatus {
     Unknown(String),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum OutputStream {
-    Stdout,
-    Stderr,
+pub type SandboxRead = Pin<Box<dyn AsyncRead + Send>>;
+pub type SandboxWrite = Pin<Box<dyn AsyncWrite + Send>>;
+
+pub struct SandboxIo {
+    stdin: SandboxWrite,
+    stdout: SandboxRead,
+    stderr: SandboxRead,
+    guard: SandboxIoGuard,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ReadOptions {
-    pub stream: OutputStream,
-    pub after_offset: Option<u64>,
-    pub max_bytes: usize,
-    pub timeout_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ReadResult {
-    Bytes {
-        bytes: Bytes,
-        stream: OutputStream,
-        start_offset: Option<u64>,
-        next_offset: Option<u64>,
-    },
-    TimedOut,
-    Eof,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WriteAck {
-    pub bytes_written: usize,
+pub struct SandboxIoGuard {
+    _inner: Box<dyn Send>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -225,17 +210,7 @@ pub trait SandboxBackend: Send + Sync {
     fn name(&self) -> &'static str;
 
     async fn create(&self, spec: SandboxSpec) -> Result<SandboxHandle, SandboxError>;
-    async fn read_bytes(
-        &self,
-        id: &SandboxId,
-        opts: ReadOptions,
-    ) -> Result<ReadResult, SandboxError>;
-    async fn write_bytes(
-        &self,
-        id: &SandboxId,
-        bytes: Bytes,
-    ) -> Result<WriteAck, SandboxError>;
-    async fn close_stdin(&self, id: &SandboxId) -> Result<(), SandboxError>;
+    async fn open_io(&self, id: &SandboxId) -> Result<SandboxIo, SandboxError>;
     async fn status(&self, id: &SandboxId) -> Result<SandboxStatus, SandboxError>;
     async fn observe(&self, id: &SandboxId) -> Result<ObservedSandbox, SandboxError>;
     async fn list_observed(&self) -> Result<Vec<ObservedSandbox>, SandboxError>;
@@ -257,32 +232,34 @@ The sandbox abstraction moves bytes. It does not know whether those bytes are:
 
 Transport rules:
 
-- `read_bytes` reads stdout or stderr bytes from the workload.
-- `write_bytes` writes bytes to the workload's stdin using the backend's
-  transport mechanism.
-- `close_stdin` closes the workload's stdin without stopping the sandbox.
+- `open_io` opens one owned stdio session for a running workload.
+- The returned `stdin`, `stdout`, and `stderr` handles are plain Tokio
+  `AsyncWrite` / `AsyncRead` objects.
+- Dropping the returned `stdin` handle closes the workload's stdin without
+  stopping the sandbox.
 - The sandbox layer does not append newlines, JSON-encode values, or parse
   stdout.
-- Concurrent readers should be rejected or serialized by the manager.
-- Closing stdin does not imply stopping the sandbox.
-- `Eof` means the backend cannot currently produce more bytes for that stream.
-  Call `observe` or `status` before deciding whether the sandbox stopped.
+- Protocol framing belongs above this layer. A session API can wrap stdout with
+  `tokio_util::codec::FramedRead` and stdin with `FramedWrite`.
+- Backends may reject a second `open_io` call for the same live workload if the
+  first stdio session still owns the transport.
+- EOF on `stdout` or `stderr` means that stream is closed. Call `observe` or
+  `status` before deciding whether the sandbox stopped.
 - Pause must close or quiesce private live I/O transport before scaling or
   freezing the workload down.
-- Resume must wait until the workload can accept read/write operations again.
+- Resume must wait until the workload can accept `open_io` again.
 - Kubernetes attach, stream ownership, reconnects, and TTY details are private
   backend concerns, not public API concepts.
 
 Protocol-specific code belongs above this layer. For example, a future agent
-runner can turn `turn.start` structs into NDJSON bytes and parse stdout bytes
-back into agent events without changing the sandbox backend.
+runner can turn `turn.start` structs into NDJSON lines using `LinesCodec` and
+parse stdout lines back into agent events without changing the sandbox backend.
 
 ## Output Recovery Model
 
-Durable output recovery is part of the internal sandbox API shape, but not part
-of the first implementation milestone. The sandbox API should be offset-friendly
-from the start so a future backend can recover output after the API process
-crashes.
+Durable output recovery is not part of the first implementation milestone. The
+session/control-plane layer should persist framed output above the sandbox
+boundary so a future API process can recover output after a crash.
 
 Kubernetes attach is not durable. If the API process owns a live attach stream
 and then crashes, bytes written by the sandbox while the API is down may be lost
@@ -300,26 +277,27 @@ Agent Sandboxes, the likely shape is a stdout/stderr spool on the state volume:
 /state/stdio/events.jsonl
 ```
 
-The backend can then implement:
+The backend can then offer a separate recovery primitive:
 
 ```rust
-async fn read_bytes(id, ReadOptions {
-    stream: OutputStream::Stdout,
-    after_offset: Some(last_persisted_offset),
-    max_bytes: 65536,
-    timeout_ms: Some(30_000),
-}) -> ReadResult;
+async fn replay_output(
+    id: &SandboxId,
+    stream_name: &str,
+    after_offset: u64,
+    max_bytes: usize,
+) -> Result<OutputChunk, SandboxError>;
 ```
 
-`read_bytes` should prefer durable bytes when `after_offset` is supplied. A live
-Kubernetes attach pump can still exist underneath for low-latency reads, but it
-should be treated as an optimization rather than the durable source of truth.
+That recovery API should prefer durable bytes. A live Kubernetes attach pump can
+still exist underneath for low-latency reads, but it should be treated as an
+optimization rather than the durable source of truth.
 
 Input recovery is a higher-level problem. If the API crashes after accepting a
 write but before sending it to the sandbox, or after sending it but before
 persisting that fact, the sandbox layer alone cannot prove whether the workload
 observed the input. A future control-plane data model should persist intended
-writes before calling `write_bytes` if it needs retryable input delivery.
+input frames before writing them to `SandboxIo.stdin` if it needs retryable input
+delivery.
 
 ## Lifecycle State Machine
 
@@ -342,7 +320,7 @@ writes before calling `write_bytes` if it needs retryable input delivery.
 State notes:
 
 - `Created` means the workload resource exists but is not ready for I/O.
-- `Running` means read/write operations should succeed.
+- `Running` means `open_io` should succeed.
 - `Suspended` means durable runtime state may exist but no live process is
   serving I/O.
 - `Stopped` means the control plane intentionally cleaned up the sandbox.
@@ -422,7 +400,7 @@ The Agent Sandbox backend should own:
 - deterministic sandbox names or caller-supplied IDs
 - companion resource construction when needed
 - readiness wait through the controller-owned backing Pod
-- private attach stream demultiplexing into `read_bytes` and `write_bytes`
+- private attach transport for `open_io`
 - pause/resume patches
 - deletion of the Sandbox CRD, state PVC, and companion resources
 - observation of both the Sandbox object and backing Pod
@@ -440,15 +418,15 @@ byte API.
 
 The first usable slice should prove:
 
-1. `centaur-sandbox-core` compiles with lean workload types and byte I/O.
+1. `centaur-sandbox-core` compiles with lean workload types and owned byte I/O.
 2. `centaur-sandbox-local` can run a scripted child process and round-trip raw
-   bytes.
-3. `centaur-sandbox-manager` can create, write bytes, read bytes, and
-   stop using the local backend.
+   bytes through `SandboxIo`.
+3. `centaur-sandbox-manager` can create, open I/O, and stop using the local
+   backend.
 4. The manager can reconcile a small in-memory desired-state map against the
    local backend's observed state.
-5. `centaur-sandbox-agent-k8s` can create a real Agent Sandbox CRD and
-   read/write stdio bytes through the backing Pod.
+5. `centaur-sandbox-agent-k8s` can create a real Agent Sandbox CRD and open
+   stdio handles through the backing Pod.
 6. `centaur-sandbox-agent-k8s` can pause and resume by patching replicas, then
    observe the resulting state.
 
@@ -466,32 +444,29 @@ let spec = SandboxSpec {
 };
 
 let handle = manager.create(spec).await?;
-manager.write_bytes(&handle.id, Bytes::from_static(b"ping\n")).await?;
-let chunk = manager.read_bytes(&handle.id, ReadOptions {
-    stream: OutputStream::Stdout,
-    after_offset: None,
-    max_bytes: 1024,
-    timeout_ms: Some(1_000),
-}).await?;
-assert!(matches!(chunk, ReadResult::Bytes { .. }));
+let mut io = manager.open_io(&handle.id).await?.into_parts();
+io.stdin.write_all(b"ping\n").await?;
+io.stdin.flush().await?;
+let mut chunk = vec![0; b"ping\n".len()];
+io.stdout.read_exact(&mut chunk).await?;
+assert_eq!(chunk, b"ping\n");
 manager.stop(&handle.id).await?;
 ```
 
 ## Testing Strategy
 
-- Unit test byte stream behavior in `centaur-sandbox-core`.
+- Unit test owned I/O handle behavior in `centaur-sandbox-core`.
 - Use `centaur-sandbox-local` for deterministic manager and reconciliation tests.
 - Mock Kubernetes at the crate boundary for Sandbox CRD spec, replica patch,
-  backing Pod private I/O/status, and observed state mapping tests.
+  backing Pod private attach/status, and observed state mapping tests.
 - Add ignored or feature-gated local Kubernetes integration tests that create a
   Sandbox CRD in the `centaur` namespace and round-trip bytes.
-- Keep durable output spool tests out of the first milestone; only verify that
-  `ReadOptions.after_offset` is represented in the API shape.
+- Keep durable output spool tests out of the first milestone.
 - Keep pause/resume tests focused on externally visible behavior:
   - pause closes I/O and patches/scales/freezes the workload
   - status reports `Suspended`
   - resume restores the workload and waits for readiness
-  - read/write works again after resume
+  - `open_io` works again after resume
 - Add reconciliation tests for stale state:
   - observed `Gone` while desired `Running`
   - observed `Running` while desired `Stopped`
@@ -511,7 +486,7 @@ manager.stop(&handle.id).await?;
 
 Start with `centaur-sandbox-core`, `centaur-sandbox-local`, and
 `centaur-sandbox-manager`. Prove the byte I/O and reconciliation boundary before
-touching Kubernetes. Then implement Agent Sandbox create/read/write/stop, followed
+touching Kubernetes. Then implement Agent Sandbox create/open I/O/stop, followed
 by Agent Sandbox pause/resume and reconciliation.
 
 The core rule should be: the sandbox crate manages isolated runtime workloads,

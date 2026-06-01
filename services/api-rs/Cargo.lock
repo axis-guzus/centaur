@@ -276,6 +276,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -300,16 +301,15 @@ name = "centaur-sandbox-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "bytes",
  "serde",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
 name = "centaur-sandbox-e2e"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "centaur-sandbox-agent-k8s",
  "centaur-sandbox-core",
  "centaur-sandbox-local",
@@ -335,7 +335,6 @@ name = "centaur-sandbox-manager"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "bytes",
  "centaur-sandbox-core",
  "thiserror",
  "tokio",

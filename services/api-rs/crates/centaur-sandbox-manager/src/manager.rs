@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 use centaur_sandbox_core::{
-    DesiredSandboxState, ObservedSandbox, ReadOptions, ReadResult, SandboxBackend, SandboxHandle,
-    SandboxId, SandboxResult, SandboxSpec, SandboxStatus, WriteAck,
+    DesiredSandboxState, ObservedSandbox, SandboxBackend, SandboxHandle, SandboxId, SandboxIo,
+    SandboxResult, SandboxSpec, SandboxStatus,
 };
 
 use crate::{
@@ -49,16 +48,8 @@ where
         Ok(handle)
     }
 
-    pub async fn read_bytes(&self, id: &SandboxId, opts: ReadOptions) -> SandboxResult<ReadResult> {
-        self.backend.read_bytes(id, opts).await
-    }
-
-    pub async fn write_bytes(&self, id: &SandboxId, bytes: Bytes) -> SandboxResult<WriteAck> {
-        self.backend.write_bytes(id, bytes).await
-    }
-
-    pub async fn close_stdin(&self, id: &SandboxId) -> SandboxResult<()> {
-        self.backend.close_stdin(id).await
+    pub async fn open_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo> {
+        self.backend.open_io(id).await
     }
 
     pub async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus> {
