@@ -7,11 +7,11 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
+use strum::{AsRefStr, Display, EnumString};
 use thiserror::Error;
 use time::OffsetDateTime;
 
 pub const MAX_THREAD_KEY_BYTES: usize = 512;
-pub const SUPPORTED_HARNESS_TYPES: &[&str] = &["codex", "amp", "claudecode"];
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ThreadKey(String);
@@ -115,96 +115,26 @@ fn validate_thread_key(value: &str) -> Result<(), ThreadKeyError> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, AsRefStr, Display, EnumString,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum HarnessType {
     Codex,
     Amp,
     ClaudeCode,
 }
 
-impl HarnessType {
-    pub fn parse(value: impl Into<String>) -> Result<Self, HarnessTypeError> {
-        let value = value.into();
-        match value.as_str() {
-            "" => Err(HarnessTypeError::Empty),
-            "codex" => Ok(Self::Codex),
-            "amp" => Ok(Self::Amp),
-            "claudecode" => Ok(Self::ClaudeCode),
-            _ => Err(HarnessTypeError::Unsupported),
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Codex => "codex",
-            Self::Amp => "amp",
-            Self::ClaudeCode => "claudecode",
-        }
-    }
-
-    pub fn into_string(self) -> String {
-        self.as_str().to_owned()
-    }
-}
-
-impl fmt::Display for HarnessType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for HarnessType {
-    type Err = HarnessTypeError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::parse(value)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Error)]
-pub enum HarnessTypeError {
-    #[error("harness_type is required")]
-    Empty,
-    #[error("harness_type must be one of: codex, amp, claudecode")]
-    Unsupported,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum SessionStatus {
     Active,
     Idle,
     Executing,
     Failed,
     Archived,
-}
-
-impl SessionStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Idle => "idle",
-            Self::Executing => "executing",
-            Self::Failed => "failed",
-            Self::Archived => "archived",
-        }
-    }
-}
-
-impl FromStr for SessionStatus {
-    type Err = ParseEnumError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "active" => Ok(Self::Active),
-            "idle" => Ok(Self::Idle),
-            "executing" => Ok(Self::Executing),
-            "failed" => Ok(Self::Failed),
-            "archived" => Ok(Self::Archived),
-            _ => Err(ParseEnumError::new("session status", value)),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -218,38 +148,14 @@ pub struct Session {
     pub updated_at: OffsetDateTime,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum MessageRole {
     User,
     Assistant,
     System,
     Tool,
-}
-
-impl MessageRole {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Assistant => "assistant",
-            Self::System => "system",
-            Self::Tool => "tool",
-        }
-    }
-}
-
-impl FromStr for MessageRole {
-    type Err = ParseEnumError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "user" => Ok(Self::User),
-            "assistant" => Ok(Self::Assistant),
-            "system" => Ok(Self::System),
-            "tool" => Ok(Self::Tool),
-            _ => Err(ParseEnumError::new("message role", value)),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -270,41 +176,15 @@ pub struct SessionMessage {
     pub created_at: OffsetDateTime,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ExecutionStatus {
     Queued,
     Running,
     Completed,
     Failed,
     Cancelled,
-}
-
-impl ExecutionStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-impl FromStr for ExecutionStatus {
-    type Err = ParseEnumError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "queued" => Ok(Self::Queued),
-            "running" => Ok(Self::Running),
-            "completed" => Ok(Self::Completed),
-            "failed" => Ok(Self::Failed),
-            "cancelled" => Ok(Self::Cancelled),
-            _ => Err(ParseEnumError::new("execution status", value)),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -330,28 +210,14 @@ pub struct SessionEvent {
     pub created_at: OffsetDateTime,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Error)]
-#[error("invalid {kind}: {value}")]
-pub struct ParseEnumError {
-    kind: &'static str,
-    value: String,
-}
-
-impl ParseEnumError {
-    fn new(kind: &'static str, value: &str) -> Self {
-        Self {
-            kind,
-            value: value.to_owned(),
-        }
-    }
-}
-
 pub fn empty_object() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::{HarnessType, ThreadKey};
 
     #[test]
@@ -377,10 +243,10 @@ mod tests {
 
     #[test]
     fn harness_type_accepts_supported_values() {
-        assert_eq!(HarnessType::parse("codex").unwrap(), HarnessType::Codex);
-        assert_eq!(HarnessType::parse("amp").unwrap(), HarnessType::Amp);
+        assert_eq!(HarnessType::from_str("codex").unwrap(), HarnessType::Codex);
+        assert_eq!(HarnessType::from_str("amp").unwrap(), HarnessType::Amp);
         assert_eq!(
-            HarnessType::parse("claudecode").unwrap(),
+            HarnessType::from_str("claudecode").unwrap(),
             HarnessType::ClaudeCode
         );
     }
@@ -399,10 +265,6 @@ mod tests {
 
     #[test]
     fn harness_type_rejects_unsupported_values() {
-        let err = HarnessType::parse("claude-code").unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "harness_type must be one of: codex, amp, claudecode"
-        );
+        assert!(HarnessType::from_str("claude-code").is_err());
     }
 }

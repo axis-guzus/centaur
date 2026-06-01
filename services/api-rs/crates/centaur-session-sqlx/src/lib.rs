@@ -55,8 +55,8 @@ impl PgSessionStore {
             "#,
         )
         .bind(thread_key.as_str())
-        .bind(harness_type.as_str())
-        .bind(SessionStatus::Idle.as_str())
+        .bind(harness_type.as_ref())
+        .bind(SessionStatus::Idle.as_ref())
         .bind(metadata)
         .execute(&self.pool)
         .await?;
@@ -65,8 +65,8 @@ impl PgSessionStore {
         if session.harness_type != *harness_type {
             return Err(SessionStoreError::HarnessConflict {
                 thread_key: thread_key.as_str().to_owned(),
-                existing: session.harness_type.into_string(),
-                requested: harness_type.as_str().to_owned(),
+                existing: session.harness_type.to_string(),
+                requested: harness_type.as_ref().to_owned(),
             });
         }
         Ok(session)
@@ -109,7 +109,7 @@ impl PgSessionStore {
             )
             .bind(&message_id)
             .bind(thread_key.as_str())
-            .bind(message.role.as_str())
+            .bind(message.role.as_ref())
             .bind(parts)
             .bind(message.metadata.clone())
             .execute(&mut *tx)
@@ -155,7 +155,7 @@ impl PgSessionStore {
         )
         .bind(&execution_id)
         .bind(thread_key.as_str())
-        .bind(ExecutionStatus::Queued.as_str())
+        .bind(ExecutionStatus::Queued.as_ref())
         .bind(metadata)
         .fetch_one(&self.pool)
         .await?;
@@ -176,7 +176,7 @@ impl PgSessionStore {
             "#,
         )
         .bind(execution_id)
-        .bind(ExecutionStatus::Running.as_str())
+        .bind(ExecutionStatus::Running.as_ref())
         .fetch_one(&self.pool)
         .await?;
 
@@ -198,7 +198,7 @@ impl PgSessionStore {
             "#,
         )
         .bind(execution_id)
-        .bind(ExecutionStatus::Completed.as_str())
+        .bind(ExecutionStatus::Completed.as_ref())
         .fetch_one(&self.pool)
         .await?;
 
@@ -221,7 +221,7 @@ impl PgSessionStore {
             "#,
         )
         .bind(execution_id)
-        .bind(ExecutionStatus::Failed.as_str())
+        .bind(ExecutionStatus::Failed.as_ref())
         .bind(error)
         .fetch_one(&self.pool)
         .await?;
@@ -334,7 +334,7 @@ impl PgSessionStore {
             "#,
         )
         .bind(thread_key)
-        .bind(status.as_str())
+        .bind(status.as_ref())
         .execute(&self.pool)
         .await?;
         Ok(())
