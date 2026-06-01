@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, env, net::SocketAddr, path::PathBuf, sync::Arc,
 use centaur_api_server::{SandboxRuntime, build_router_with_runtime};
 use centaur_iron_proxy::{SourceKind, SourcePolicy, discover_fragment_files, load_fragment_files};
 use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig, IronProxyPodConfig};
-use centaur_sandbox_core::SandboxSpec;
+use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_session_core::{HarnessType, ThreadKey};
 use centaur_session_sqlx::PgSessionStore;
@@ -11,6 +11,8 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
+
+const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
@@ -120,10 +122,17 @@ async fn sandbox_runtime_from_env() -> Result<SandboxRuntime, ServerError> {
                 )),
                 "codex-app-server" => {
                     let env_template = codex_app_server_env_template();
+                    let repos_path = sandbox_repos_path_from_env();
                     Ok(SandboxRuntime::backend_with_spec_factory(
                         Arc::new(backend),
                         move |thread_key, harness_type, _execution_id| {
-                            codex_app_server_spec(&image, harness_type, thread_key, &env_template)
+                            codex_app_server_spec(
+                                &image,
+                                harness_type,
+                                thread_key,
+                                &env_template,
+                                repos_path.as_deref(),
+                            )
                         },
                     ))
                 }
@@ -313,16 +322,39 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn sandbox_repos_path_from_env() -> Option<String> {
+    nonempty_env("SESSION_SANDBOX_REPOS_PATH").or_else(|| nonempty_env("REPOS_PATH"))
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 fn codex_app_server_spec(
     image: &str,
     harness_type: &HarnessType,
     thread_key: &ThreadKey,
     env_template: &[(String, String)],
+    repos_path: Option<&str>,
 ) -> SandboxSpec {
     let mut spec = SandboxSpec::new(image)
         .args(["harness-server", harness_server_kind(harness_type)])
         .env("CENTAUR_THREAD_KEY", thread_key.as_str())
         .env("CENTAUR_HARNESS_KIND", harness_server_kind(harness_type));
+    if let Some(repos_path) = repos_path {
+        spec = spec.mount(
+            Mount::new(
+                MountKind::Bind {
+                    source_path: repos_path.to_owned(),
+                },
+                SANDBOX_REPOS_MOUNT_PATH,
+            )
+            .read_only(),
+        );
+    }
     for (name, value) in env_template {
         spec = spec.env(name.clone(), value.clone());
     }
@@ -409,6 +441,61 @@ while [ "$turn_index" -le 3 ]; do
   turn_index=$((turn_index + 1))
 done
 done"#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_app_server_spec_mounts_repos_path_read_only() {
+        let harness_type = HarnessType::parse("codex").unwrap();
+        let thread_key = ThreadKey::parse("test:thread").unwrap();
+
+        let spec = codex_app_server_spec(
+            "centaur-agent:latest",
+            &harness_type,
+            &thread_key,
+            &[("CENTAUR_API_URL".to_owned(), "http://api:8000".to_owned())],
+            Some("/host/github"),
+        );
+
+        assert_eq!(spec.mounts.len(), 1);
+        assert_eq!(spec.mounts[0].target_path, SANDBOX_REPOS_MOUNT_PATH);
+        assert!(spec.mounts[0].read_only);
+        assert_eq!(
+            spec.mounts[0].kind,
+            MountKind::Bind {
+                source_path: "/host/github".to_owned(),
+            }
+        );
+        assert!(
+            spec.env
+                .iter()
+                .any(|env| { env.name == "CENTAUR_API_URL" && env.value == "http://api:8000" })
+        );
+    }
+
+    #[test]
+    fn codex_app_server_spec_omits_repos_mount_when_unset() {
+        let harness_type = HarnessType::parse("claude").unwrap();
+        let thread_key = ThreadKey::parse("test:thread").unwrap();
+
+        let spec = codex_app_server_spec(
+            "centaur-agent:latest",
+            &harness_type,
+            &thread_key,
+            &[],
+            None,
+        );
+
+        assert!(spec.mounts.is_empty());
+        assert!(
+            spec.env
+                .iter()
+                .any(|env| { env.name == "CENTAUR_HARNESS_KIND" && env.value == "claude-code" })
+        );
+    }
 }
 
 #[derive(Debug, Error)]
