@@ -2,7 +2,9 @@ use std::{collections::BTreeMap, env, net::SocketAddr, path::PathBuf, sync::Arc,
 
 use centaur_api_server::{SandboxRuntime, build_router_with_runtime};
 use centaur_iron_proxy::{SourceKind, SourcePolicy, discover_fragment_files, load_fragment_files};
-use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig, IronProxyPodConfig};
+use centaur_sandbox_agent_k8s::{
+    AgentSandboxBackend, AgentSandboxConfig, IronProxyPodConfig, StateVolumeConfig,
+};
 use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_session_core::{HarnessType, ThreadKey};
@@ -101,6 +103,7 @@ async fn sandbox_runtime_from_env() -> Result<SandboxRuntime, ServerError> {
                 .or_else(|| nonempty_env("KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME"));
             config.service_account_name = nonempty_env("SESSION_SANDBOX_SERVICE_ACCOUNT_NAME")
                 .or_else(|| nonempty_env("KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME"));
+            config.state_volume = sandbox_state_volume_from_env();
             config.ready_timeout = Duration::from_secs(
                 env::var("SESSION_SANDBOX_READY_TIMEOUT_SECS")
                     .ok()
@@ -343,6 +346,27 @@ fn sandbox_image_pull_secrets_from_env() -> Vec<String> {
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn sandbox_state_volume_from_env() -> Option<StateVolumeConfig> {
+    if !env_bool("SESSION_SANDBOX_STATE_VOLUME_ENABLED")
+        && !env_bool("KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED")
+    {
+        return None;
+    }
+    let mount_path = nonempty_env("SESSION_SANDBOX_STATE_MOUNT_PATH")
+        .or_else(|| nonempty_env("KUBERNETES_SANDBOX_STATE_MOUNT_PATH"))
+        .unwrap_or_else(|| "/home/agent/state".to_owned());
+    let size = nonempty_env("SESSION_SANDBOX_STATE_VOLUME_SIZE")
+        .or_else(|| nonempty_env("KUBERNETES_SANDBOX_STATE_VOLUME_SIZE"))
+        .unwrap_or_else(|| "10Gi".to_owned());
+    let mut config = StateVolumeConfig::new(mount_path, size);
+    if let Some(storage_class_name) = nonempty_env("SESSION_SANDBOX_STATE_VOLUME_STORAGE_CLASS")
+        .or_else(|| nonempty_env("KUBERNETES_SANDBOX_STATE_VOLUME_STORAGE_CLASS"))
+    {
+        config = config.storage_class_name(storage_class_name);
+    }
+    Some(config)
 }
 
 fn nonempty_env(name: &str) -> Option<String> {
