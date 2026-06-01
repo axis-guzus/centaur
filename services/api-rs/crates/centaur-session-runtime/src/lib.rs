@@ -12,17 +12,25 @@ use centaur_sandbox_manager::SandboxManager;
 use centaur_session_core::{
     HarnessType, Session, SessionEvent, SessionExecution, SessionMessageInput, ThreadKey,
 };
-use centaur_session_sqlx::{PgSessionStore, SessionStoreError, default_metadata};
+use centaur_session_sqlx::{
+    PgSessionStore, SessionEventListener, SessionEventNotification, SessionStoreError,
+    default_metadata,
+};
 use futures_util::{SinkExt, Stream, StreamExt, stream};
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::{io, sync::Mutex, time::sleep};
+use tokio::{
+    io,
+    sync::Mutex,
+    time::{Instant, Interval, MissedTickBehavior, interval_at},
+};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::warn;
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 
 const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 1024 * 1024;
+const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
@@ -69,6 +77,8 @@ struct EventStreamState {
     thread_key: ThreadKey,
     after_event_id: i64,
     pending: VecDeque<SessionEvent>,
+    listener: SessionEventListener,
+    safety_tick: Interval,
     done: bool,
 }
 
@@ -206,10 +216,13 @@ impl SessionRuntime {
             self.ensure_session_pipe(thread_key, sandbox_id).await?;
         }
 
+        let listener = self.store.listen_session_events().await?;
+
         Ok(session_event_stream(
             self.store.clone(),
             thread_key.clone(),
             after_event_id,
+            listener,
         ))
     }
 
@@ -389,6 +402,7 @@ fn session_event_stream(
     store: PgSessionStore,
     thread_key: ThreadKey,
     after_event_id: i64,
+    listener: SessionEventListener,
 ) -> impl Stream<Item = Result<SessionEvent, SessionRuntimeError>> {
     stream::unfold(
         EventStreamState {
@@ -396,6 +410,8 @@ fn session_event_stream(
             thread_key,
             after_event_id,
             pending: VecDeque::new(),
+            listener,
+            safety_tick: event_stream_safety_tick(),
             done: false,
         },
         |mut state| async move {
@@ -412,7 +428,12 @@ fn session_event_stream(
                     .list_events_after(&state.thread_key, state.after_event_id, 100)
                     .await
                 {
-                    Ok(events) if events.is_empty() => sleep(Duration::from_millis(250)).await,
+                    Ok(events) if events.is_empty() => {
+                        if let Err(error) = wait_for_session_event_notification(&mut state).await {
+                            state.done = true;
+                            return Some((Err(error), state));
+                        }
+                    }
                     Ok(events) => state.pending = events.into(),
                     Err(error) => {
                         state.done = true;
@@ -422,6 +443,39 @@ fn session_event_stream(
             }
         },
     )
+}
+
+fn event_stream_safety_tick() -> Interval {
+    let mut tick = interval_at(
+        Instant::now() + EVENT_STREAM_SAFETY_POLL_INTERVAL,
+        EVENT_STREAM_SAFETY_POLL_INTERVAL,
+    );
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    tick
+}
+
+async fn wait_for_session_event_notification(
+    state: &mut EventStreamState,
+) -> Result<(), SessionRuntimeError> {
+    loop {
+        tokio::select! {
+            notification = state.listener.recv() => {
+                let notification = notification?;
+                if notification_matches(&notification, &state.thread_key, state.after_event_id) {
+                    return Ok(());
+                }
+            }
+            _ = state.safety_tick.tick() => return Ok(()),
+        }
+    }
+}
+
+fn notification_matches(
+    notification: &SessionEventNotification,
+    thread_key: &ThreadKey,
+    after_event_id: i64,
+) -> bool {
+    notification.thread_key == thread_key.as_str() && notification.event_id > after_event_id
 }
 
 async fn run_stdout_pump(
@@ -542,4 +596,42 @@ pub enum SessionRuntimeError {
     Store(#[from] SessionStoreError),
     #[error(transparent)]
     Sandbox(#[from] SandboxError),
+}
+
+#[cfg(test)]
+mod tests {
+    use centaur_session_core::ThreadKey;
+    use centaur_session_sqlx::SessionEventNotification;
+
+    use super::notification_matches;
+
+    #[test]
+    fn notification_matches_thread_and_newer_event_id() {
+        let thread_key = ThreadKey::parse("cli:test").unwrap();
+
+        assert!(notification_matches(
+            &SessionEventNotification {
+                thread_key: "cli:test".to_owned(),
+                event_id: 11,
+            },
+            &thread_key,
+            10,
+        ));
+        assert!(!notification_matches(
+            &SessionEventNotification {
+                thread_key: "cli:other".to_owned(),
+                event_id: 11,
+            },
+            &thread_key,
+            10,
+        ));
+        assert!(!notification_matches(
+            &SessionEventNotification {
+                thread_key: "cli:test".to_owned(),
+                event_id: 10,
+            },
+            &thread_key,
+            10,
+        ));
+    }
 }
