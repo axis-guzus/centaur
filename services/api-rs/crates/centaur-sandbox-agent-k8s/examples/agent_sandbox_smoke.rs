@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::time::Duration;
 
-use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig};
+use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig, IronProxyPodConfig};
 use centaur_sandbox_core::{SandboxBackend, SandboxSpec, SandboxStatus};
 use kube::config::KubeConfigOptions;
 use kube::{Client, Config};
@@ -25,6 +25,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = AgentSandboxConfig::new(namespace.clone());
     config.labels = labels;
     config.ready_timeout = Duration::from_secs(90);
+    if let Some(iron_proxy) = iron_proxy_config_from_env()? {
+        config.iron_proxy = Some(iron_proxy);
+    }
 
     let backend = AgentSandboxBackend::new(client, config);
     let spec = SandboxSpec::new(image)
@@ -55,4 +58,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("stopped {}", handle.id.as_str());
 
     Ok(())
+}
+
+fn iron_proxy_config_from_env() -> Result<Option<IronProxyPodConfig>, Box<dyn std::error::Error>> {
+    let Ok(image) = env::var("IRON_PROXY_IMAGE") else {
+        return Ok(None);
+    };
+    let ca_cert_secret_name = env::var("IRON_PROXY_CA_CERT_SECRET")?;
+    let ca_key_secret_name = env::var("IRON_PROXY_CA_KEY_SECRET")?;
+    let mut config = IronProxyPodConfig::new(image, ca_cert_secret_name, ca_key_secret_name);
+    config.image_pull_policy = env::var("IRON_PROXY_IMAGE_PULL_POLICY").ok();
+    if let Ok(secret_name) = env::var("IRON_PROXY_ENV_SECRET") {
+        config.secret_env_name = Some(secret_name.clone());
+        config.env_from_secret_names.push(secret_name);
+        config.secret_env_prefix = env::var("IRON_PROXY_ENV_SECRET_PREFIX").unwrap_or_default();
+    }
+    Ok(Some(config))
 }
