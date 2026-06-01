@@ -1,7 +1,8 @@
-use std::{env, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use centaur_api_server::{SandboxRuntime, build_router_with_runtime};
-use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig};
+use centaur_iron_proxy::{SourcePolicy, load_fragment_files};
+use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig, IronProxyPodConfig};
 use centaur_sandbox_core::SandboxSpec;
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_session_core::{HarnessType, ThreadKey};
@@ -98,6 +99,7 @@ async fn sandbox_runtime_from_env() -> Result<SandboxRuntime, ServerError> {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(90),
             );
+            config.iron_proxy = iron_proxy_config_from_env()?;
 
             let client = if let Ok(context) = env::var("SESSION_SANDBOX_K8S_CONTEXT") {
                 let kube_config = kube::Config::from_kubeconfig(&kube::config::KubeConfigOptions {
@@ -170,6 +172,80 @@ fn agent_k8s_mock_app_server_spec(image: &str) -> SandboxSpec {
         .args([mock_app_server_script()])
 }
 
+fn iron_proxy_config_from_env() -> Result<Option<IronProxyPodConfig>, ServerError> {
+    let fragment_paths = iron_proxy_fragment_paths();
+    if !env_bool("SESSION_SANDBOX_IRON_PROXY_ENABLED") && fragment_paths.is_empty() {
+        return Ok(None);
+    }
+    let ca_secret_name = env::var("SESSION_SANDBOX_IRON_PROXY_CA_SECRET_NAME")
+        .or_else(|_| env::var("KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME"))
+        .map_err(|_| ServerError::MissingIronProxyCaSecret)?;
+    let image = env::var("SESSION_SANDBOX_IRON_PROXY_IMAGE")
+        .or_else(|_| env::var("KUBERNETES_IRON_PROXY_IMAGE"))
+        .unwrap_or_else(|_| "centaur-iron-proxy:latest".to_owned());
+    let mut config = IronProxyPodConfig::new(image, ca_secret_name)
+        .with_fragments(load_fragment_files(&fragment_paths)?);
+    config.image_pull_policy = env::var("SESSION_SANDBOX_IRON_PROXY_IMAGE_PULL_POLICY")
+        .or_else(|_| env::var("KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY"))
+        .ok();
+    config.source_policy = SourcePolicy::from_env();
+    config.env_from_secret_name = env::var("SESSION_SANDBOX_IRON_PROXY_ENV_SECRET")
+        .or_else(|_| env::var("KUBERNETES_SECRET_ENV_NAME"))
+        .ok();
+    config.harness_auth_modes = harness_auth_modes_from_env();
+    push_optional_proxy_env(
+        &mut config.extra_env,
+        "OP_CONNECT_HOST",
+        env::var("SESSION_SANDBOX_OP_CONNECT_HOST")
+            .or_else(|_| env::var("KUBERNETES_OP_CONNECT_HOST"))
+            .ok(),
+    );
+    push_optional_proxy_env(
+        &mut config.extra_env,
+        "IRON_BROKER_URL",
+        env::var("SESSION_SANDBOX_IRON_BROKER_URL")
+            .or_else(|_| env::var("KUBERNETES_TOKEN_BROKER_URL"))
+            .ok(),
+    );
+    Ok(Some(config))
+}
+
+fn iron_proxy_fragment_paths() -> Vec<PathBuf> {
+    env::var("SESSION_SANDBOX_IRON_PROXY_FRAGMENT_PATHS")
+        .unwrap_or_default()
+        .split([',', ':'])
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn harness_auth_modes_from_env() -> BTreeMap<String, String> {
+    let mut modes = BTreeMap::new();
+    if let Ok(mode) = env::var("CODEX_AUTH_MODE") {
+        modes.insert("codex".to_owned(), mode);
+    }
+    if let Ok(mode) = env::var("CLAUDE_CODE_AUTH_MODE") {
+        modes.insert("claude-code".to_owned(), mode);
+    }
+    modes
+}
+
+fn push_optional_proxy_env(envs: &mut BTreeMap<String, String>, name: &str, value: Option<String>) {
+    if let Some(value) = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        envs.insert(name.to_owned(), value);
+    }
+}
+
+fn env_bool(name: &str) -> bool {
+    env::var(name)
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
 fn codex_app_server_spec(
     image: &str,
     harness_type: &HarnessType,
@@ -178,7 +254,8 @@ fn codex_app_server_spec(
 ) -> SandboxSpec {
     let mut spec = SandboxSpec::new(image)
         .args(["harness-server", harness_server_kind(harness_type)])
-        .env("CENTAUR_THREAD_KEY", thread_key.as_str());
+        .env("CENTAUR_THREAD_KEY", thread_key.as_str())
+        .env("CENTAUR_HARNESS_KIND", harness_server_kind(harness_type));
     for (name, value) in env_template {
         spec = spec.env(name.clone(), value.clone());
     }
@@ -266,6 +343,10 @@ done"#
 enum ServerError {
     #[error("DATABASE_URL is required")]
     MissingDatabaseUrl,
+    #[error(
+        "SESSION_SANDBOX_IRON_PROXY_CA_SECRET_NAME or KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME is required when SESSION_SANDBOX_IRON_PROXY_ENABLED is set"
+    )]
+    MissingIronProxyCaSecret,
     #[error("unknown SESSION_SANDBOX_BACKEND {0:?}; expected mock, local, or agent-k8s")]
     InvalidSandboxBackend(String),
     #[error("unknown SESSION_SANDBOX_WORKLOAD {0:?}; expected mock or codex-app-server")]
@@ -278,6 +359,8 @@ enum ServerError {
     Store(#[from] centaur_session_sqlx::SessionStoreError),
     #[error(transparent)]
     Sandbox(#[from] centaur_sandbox_core::SandboxError),
+    #[error(transparent)]
+    IronProxy(#[from] centaur_iron_proxy::IronProxyConfigError),
     #[error(transparent)]
     KubeConfig(#[from] kube::config::KubeconfigError),
     #[error(transparent)]
