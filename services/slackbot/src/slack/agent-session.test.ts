@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { AgentSessionRenderer, withAgentSessionLock } from './agent-session'
 
 describe('AgentSessionRenderer', () => {
-  it('stops calling assistant.threads.setStatus after the channel returns user_not_found', async () => {
+  it('does not set an initial assistant status and stops clearing after user_not_found', async () => {
     const setStatusCalls: any[] = []
     const client = {
       assistant: {
@@ -30,7 +30,7 @@ describe('AgentSessionRenderer', () => {
       title: 'Centaur execution'
     })
 
-    expect(setStatusCalls.length).toBe(1)
+    expect(setStatusCalls.length).toBe(0)
 
     await renderer.text(sessionId, 'Hi there')
     await renderer.step(sessionId, { id: 's1', title: 'Run command', status: 'in_progress' })
@@ -101,15 +101,12 @@ describe('AgentSessionRenderer', () => {
         details: '```bash\nsleep 2\n```'
       }
     ])
-    expect(calls.slice(0, 3).map(call => call.method)).toEqual([
-      'assistant.threads.setStatus',
+    expect(calls.slice(0, 2).map(call => call.method)).toEqual([
       'chat.startStream',
       'assistant.threads.setStatus'
     ])
-    expect(calls[0]?.params.status).toBe('Thinking...')
-    expect(calls[0]?.params.loading_messages).toEqual(['Thinking...'])
-    expect(calls[2]?.params.status).toBe('')
-    expect(calls[2]?.params.loading_messages).toBeUndefined()
+    expect(calls[1]?.params.status).toBe('')
+    expect(calls[1]?.params.loading_messages).toBeUndefined()
 
     const appends = calls.filter(call => call.method === 'chat.appendStream')
     expect(appends[0]?.params.chunks).toEqual([
@@ -171,7 +168,7 @@ describe('AgentSessionRenderer', () => {
 
     expect(calls.map(call => call.method)).toContain('chat.startStream')
     expect(calls.map(call => call.method)).toContain('chat.stopStream')
-    expect(calls.filter(call => call.method === 'assistant.threads.setStatus')).toHaveLength(3)
+    expect(calls.filter(call => call.method === 'assistant.threads.setStatus')).toHaveLength(2)
   })
 
   it('streams task updates with accumulated details and output', async () => {

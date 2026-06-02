@@ -106,7 +106,6 @@ function headerBlock(header: string): AnyBlock {
 
 const sessions = new Map<string, AgentSessionState>()
 const sessionQueues = new Map<string, Promise<void>>()
-const THINKING_STATUS = 'Thinking...'
 const TEXT_FLUSH_INTERVAL_MS = 250
 const TEXT_FLUSH_CHARS = 1000
 const FIRST_TEXT_FLUSH_CHARS = 1
@@ -138,7 +137,6 @@ export class AgentSessionRenderer {
       statusCleared: false,
       statusUnsupported: false
     })
-    await this.setStatus(id, THINKING_STATUS)
     return { sessionId: id }
   }
 
